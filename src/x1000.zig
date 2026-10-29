@@ -50,6 +50,8 @@ pub const Cpm = struct {
     pub const clock_gate = Register32(0xb0000020);
     pub const ddr_clock = Register32(0xb000002c);
     pub const lcd_clock = Register32(0xb0000064);
+    pub const i2s_clock = Register32(0xb0000060);
+    pub const i2s_clock_latch = Register32(0xb0000070);
     pub const power_switch_0 = Register32(0xb0000090);
     pub const power_switch_1 = Register32(0xb0000094);
     pub const power_switch_2 = Register32(0xb0000098);
@@ -58,6 +60,8 @@ pub const Cpm = struct {
     pub const status = Register32(0xb00000d4);
 
     pub const Gate = enum(u5) {
+        aic = 11,
+        pdma = 21,
         lcd = 23,
         ost = 20,
         ddr = 31,
@@ -76,6 +80,114 @@ pub const Cpm = struct {
     pub const lcd_clock_busy = bit(27);
     pub const lcd_clock_change_enable = bit(28);
 };
+
+pub const Aic = struct {
+    const base = 0xb0020000;
+
+    pub const configuration = Register32(base + 0x00);
+    pub const common_control = Register32(base + 0x04);
+    pub const i2s_control = Register32(base + 0x10);
+    pub const status = Register32(base + 0x14);
+    pub const bit_clock_divider = Register32(base + 0x30);
+    pub const data = Register32(base + 0x34);
+    pub const spdif_enable = Register32(base + 0x80);
+
+    pub const data_physical_address: u32 = 0x10020034;
+    pub const reset = bit(3);
+    pub const receive_threshold_15 = @as(u32, 15) << 24;
+    pub const transmit_threshold_16 = @as(u32, 16) << 16;
+    pub const play_last_sample = bit(6);
+    pub const external_codec = bit(4);
+    pub const drive_bit_clock = bit(2);
+    pub const drive_frame_clock = bit(1);
+    pub const controller_enable = bit(0);
+
+    pub const packed_16_bit = bit(28);
+    pub const stereo = @as(u32, 1) << 24;
+    pub const output_16_bit = @as(u32, 1) << 19;
+    pub const input_16_bit = @as(u32, 1) << 16;
+    pub const transmit_dma = bit(14);
+    pub const transmit_underrun_interrupt = bit(5);
+    pub const playback_enable = bit(1);
+
+    pub const stop_bit_clock = bit(12);
+    pub const master_clock_enable = bit(4);
+    pub const transmit_underrun = bit(5);
+    pub const transmit_level_mask: u32 = 0x3f << 8;
+
+    pub inline fn transmitLevel() u6 {
+        return @truncate((status.read() & transmit_level_mask) >> 8);
+    }
+
+    pub inline fn clearTransmitUnderrun() void {
+        status.clear(transmit_underrun);
+    }
+};
+
+pub const Pdma = struct {
+    pub const control = Register32(0xb3421000);
+    pub const interrupt_pending = Register32(0xb3421004);
+    pub const doorbell = Register32(0xb3421008);
+
+    pub const enabled_with_request_forwarding: u32 = 0xf8000001;
+
+    pub const Request = enum(u6) {
+        i2s_transmit = 0x06,
+    };
+
+    pub const Descriptor = extern struct {
+        command: u32,
+        source: u32,
+        target: u32,
+        count: u32,
+        stride: u32,
+        request: u32,
+        padding_0: u32 = 0,
+        padding_1: u32 = 0,
+
+        pub fn audioPlayback(source: u32, byte_count: u24) Descriptor {
+            return .{
+                .command = command_source_increment | command_interrupt |
+                    command_request_interval_9 | command_transfer_size_auto,
+                .source = source,
+                .target = Aic.data_physical_address,
+                .count = byte_count,
+                .stride = 0,
+                .request = @backingInt(Request.i2s_transmit),
+            };
+        }
+    };
+
+    pub fn Channel(comptime index: usize) type {
+        const base = 0xb3420000 + index * 0x20;
+        return struct {
+            pub const source = Register32(base + 0x00);
+            pub const target = Register32(base + 0x04);
+            pub const count = Register32(base + 0x08);
+            pub const request = Register32(base + 0x0c);
+            pub const status = Register32(base + 0x10);
+            pub const command = Register32(base + 0x14);
+            pub const descriptor_address = Register32(base + 0x18);
+            pub const stride = Register32(base + 0x1c);
+        };
+    }
+
+    pub const command_source_increment = bit(23);
+    pub const command_request_interval_9 = @as(u32, 9) << 16;
+    pub const command_transfer_size_auto = @as(u32, 7) << 8;
+    pub const command_interrupt = bit(1);
+
+    pub const status_descriptor_8_words = bit(30);
+    pub const status_descriptorless = bit(31);
+    pub const status_address_error = bit(4);
+    pub const status_transfer_complete = bit(3);
+    pub const status_halted = bit(2);
+    pub const status_enabled = bit(0);
+};
+
+comptime {
+    if (@sizeOf(Pdma.Descriptor) != 32) @compileError("X1000 PDMA descriptors are eight words");
+}
 
 pub const Timer = struct {
     const control = Register32(0xb2000000);

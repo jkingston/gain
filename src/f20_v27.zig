@@ -19,10 +19,10 @@ pub const display = struct {
     pub const mcu_control: u32 = 0x00000114;
 
     pub const backlight = x1000.Gpio.Pin{ .port = .c, .index = 25 };
-    pub const chip_select = x1000.Gpio.Pin{ .port = .b, .index = 13 };
-    pub const reset = x1000.Gpio.Pin{ .port = .b, .index = 14 };
+    pub const reset = x1000.Gpio.Pin{ .port = .b, .index = 13 };
+    pub const power = x1000.Gpio.Pin{ .port = .b, .index = 14 };
     pub const read_strobe = x1000.Gpio.Pin{ .port = .b, .index = 16 };
-    pub const write_strobe = x1000.Gpio.Pin{ .port = .b, .index = 18 };
+    pub const chip_enable = x1000.Gpio.Pin{ .port = .b, .index = 18 };
     pub const port_a_function_1: u32 = 0x0000ffff;
     pub const port_b_function_1: u32 = 0x001a0000;
 
@@ -74,6 +74,64 @@ pub const display = struct {
         data(0x32),                data(0x49),             data(0x00),                  data(0x09),
         data(0x08),                data(0x32),             data(0x35),                  data(0x0f),
     };
+};
+
+pub const audio = struct {
+    pub const i2s_port_b_function_1: u32 = 0x1f;
+    pub const dac_i2c = I2cPins{
+        .scl = .{ .port = .c, .index = 26 },
+        .sda = .{ .port = .c, .index = 27 },
+    };
+
+    pub const dac_power = x1000.Gpio.Pin{ .port = .b, .index = 12 };
+    pub const dac_analog_power = x1000.Gpio.Pin{ .port = .b, .index = 9 };
+    pub const amplifier_power = x1000.Gpio.Pin{ .port = .b, .index = 6 };
+    pub const amplifier_shutdown = x1000.Gpio.Pin{ .port = .b, .index = 8 };
+    pub const output_mute = x1000.Gpio.Pin{ .port = .b, .index = 15 };
+    pub const output_select = x1000.Gpio.Pin{ .port = .b, .index = 5 };
+
+    pub const dac_address: u7 = 0x48;
+    pub const DacRegister = enum(u8) {
+        master_mode_control = 10,
+        dpll_settings = 12,
+        left_volume = 15,
+        right_volume = 16,
+    };
+    pub const master_mode_stop_div_16_384_edges: u8 = 0x00;
+    pub const dpll_bandwidth: u8 = 0xda;
+
+    pub const SampleRate = enum(u32) {
+        hz_44_100 = 44_100,
+        hz_48_000 = 48_000,
+    };
+
+    pub const source_clock_hz: u32 = 600_000_000;
+    pub const master_clock_multiplier: u32 = 256;
+    pub const bit_clock_divider: u32 = 3;
+    pub const dma_fifo_prime_frames: u8 = 24;
+
+    const ClockRatio = struct { numerator: u32, denominator: u32 };
+
+    pub fn clockRatio(rate: SampleRate) ClockRatio {
+        return switch (rate) {
+            .hz_48_000 => .{ .numerator = 64, .denominator = 3_125 },
+            .hz_44_100 => .{ .numerator = 41, .denominator = 2_179 },
+        };
+    }
+
+    pub fn clockWord(rate: SampleRate) u32 {
+        const ratio = clockRatio(rate);
+        return x1000.bit(31) | x1000.bit(30) | x1000.bit(29) |
+            ratio.numerator << 13 | ratio.denominator;
+    }
+
+    pub fn clockErrorPpm(rate: SampleRate) u32 {
+        const ratio = clockRatio(rate);
+        const expected = @as(u64, @backingInt(rate)) * master_clock_multiplier * ratio.denominator;
+        const generated = @as(u64, source_clock_hz) * ratio.numerator;
+        const difference = if (generated > expected) generated - expected else expected - generated;
+        return @intCast(difference * 1_000_000 / expected);
+    }
 };
 
 pub const ButtonId = enum(u3) {
@@ -199,3 +257,21 @@ pub const ddr = struct {
         .{ .address = x1000.Ddr.controller.remap_5, .value = 0x13121110 },
     };
 };
+
+test "audio clock profiles stay within two ppm" {
+    const testing = @import("std").testing;
+    try testing.expectEqual(@as(u32, 0xe0080c35), audio.clockWord(.hz_48_000));
+    try testing.expectEqual(@as(u32, 0xe0052883), audio.clockWord(.hz_44_100));
+    try testing.expectEqual(@as(u32, 0), audio.clockErrorPpm(.hz_48_000));
+    try testing.expect(audio.clockErrorPpm(.hz_44_100) <= 2);
+}
+
+test "audio DMA descriptor matches the X1000 playback contract" {
+    const testing = @import("std").testing;
+    const descriptor = x1000.Pdma.Descriptor.audioPlayback(0x00080000, 960_000);
+    try testing.expectEqual(@as(usize, 32), @sizeOf(x1000.Pdma.Descriptor));
+    try testing.expectEqual(@as(u32, 0x00890702), descriptor.command);
+    try testing.expectEqual(@as(u32, 0x10020034), descriptor.target);
+    try testing.expectEqual(@as(u32, 6), descriptor.request);
+    try testing.expectEqual(@as(u32, 960_000), descriptor.count);
+}

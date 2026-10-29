@@ -130,16 +130,16 @@ const Display = struct {
 
     fn init() bool {
         board.display.backlight.output(false);
-        board.display.chip_select.output(false);
         board.display.reset.output(false);
+        board.display.power.output(false);
         board.display.read_strobe.output(true);
-        board.display.write_strobe.output(true);
+        board.display.chip_enable.output(true);
         x1000.Gpio.selectFunction1(.a, board.display.port_a_function_1);
         x1000.Gpio.selectFunction1(.b, board.display.port_b_function_1);
 
-        board.display.reset.set(true);
+        board.display.power.set(true);
         Timer.delayMicroseconds(20_000);
-        board.display.chip_select.set(true);
+        board.display.reset.set(true);
         Timer.delayMicroseconds(12_000);
 
         x1000.Cpm.lcd_clock.write(board.display.clock_configuration);
@@ -158,9 +158,9 @@ const Display = struct {
         x1000.Lcd.vertical_area.write(height);
 
         board.display.read_strobe.set(true);
-        board.display.write_strobe.set(true);
+        board.display.chip_enable.set(true);
         Timer.delayMicroseconds(5_000);
-        board.display.write_strobe.set(false);
+        board.display.chip_enable.set(false);
 
         for (board.display.initialization) |item| {
             if (board.display.isCommand(item)) {

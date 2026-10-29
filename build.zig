@@ -54,6 +54,12 @@ pub fn build(b: *std.Build) void {
         .target = b.graph.host,
         .optimize = .Debug,
     }) });
+    const hardware_tests = b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("src/f20_v27.zig"),
+        .target = b.graph.host,
+        .optimize = .Debug,
+    }) });
     const test_step = b.step("test", "Run host-side tests");
     test_step.dependOn(&b.addRunArtifact(packer_tests).step);
+    test_step.dependOn(&b.addRunArtifact(hardware_tests).step);
 }
