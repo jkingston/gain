@@ -37,14 +37,21 @@ current RAM-only build provides:
 This milestone does not access NAND or microSD. Audio and storage are not yet
 implemented.
 
-## Build
+## Development
 
-Zig 0.17.0 is required.
+Install [mise](https://mise.jdx.dev), then install the pinned Zig toolchain and
+run the complete project check:
 
 ```sh
-zig build
-zig build test
+mise install
+mise run check
 ```
+
+Useful individual tasks are `mise run format`, `mise run lint`,
+`mise run build`, `mise run test` and `mise run fuzz`. The lint task checks
+canonical Zig formatting and runs Zig's AST validation. The complete check
+then builds both firmware images and runs the host-side tests. The separate
+fuzz task runs 100,000 generated cases against the SPL image builder.
 
 The build places these images in `zig-out/bin`:
 
