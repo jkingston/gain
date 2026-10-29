@@ -1,5 +1,6 @@
 ENTRY(_start)
-MEMORY { DRAM : ORIGIN = 0x80004000, LENGTH = 0x1ffb000 }
+/* Keep stage two below the framebuffer at physical address 0x40000. */
+MEMORY { DRAM : ORIGIN = 0x80004000, LENGTH = 0x3c000 }
 SECTIONS {
     .startup : { KEEP(*(.startup)) } > DRAM
     .vectors 0x80004180 : { KEEP(*(.vectors)) } > DRAM

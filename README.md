@@ -61,6 +61,26 @@ The build places these images in `zig-out/bin`:
 | `gain-spl.raw` | Unwrapped TCSM code |
 | `gain-stage2.bin` | Flat DRAM image loaded at `0x80004000` |
 
+## Hardware boundary
+
+The source keeps SoC and board knowledge separate without a runtime HAL:
+
+| Source | Responsibility |
+|---|---|
+| `src/x1000.zig` | Typed X1000 MMIO registers, fields and peripheral primitives |
+| `src/f20_v27.zig` | F20 V2.7 wiring, panel data and verified LPDDR profile |
+| `src/spl.zig` | Ordered clock and DRAM initialization flow |
+| `src/main.zig` | Device behavior and diagnostics |
+
+Small register and pin operations are explicitly inlined. Fixed LPDDR writes
+use compact data tables, while waits, read-modify-write operations and ordering
+boundaries remain imperative. Opaque panel and DRAM values are kept together
+as named, board-specific profiles.
+
+The SPL has a 10 KiB code limit imposed by both the linker and image packer.
+Stage two has a 240 KiB link region ending at the framebuffer boundary. A
+budget overflow therefore fails the build.
+
 ## RAM boot
 
 The development boot uses the X1000 mask ROM and a compatible `usbboot` host

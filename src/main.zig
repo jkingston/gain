@@ -1,115 +1,30 @@
-fn reg(address: usize) *volatile u32 {
-    return @ptrFromInt(address);
-}
+const x1000 = @import("x1000.zig");
+const board = @import("f20_v27.zig");
 
-fn read32(address: usize) u32 {
-    return reg(address).*;
-}
-
-fn write32(address: usize, value: u32) void {
-    reg(address).* = value;
-}
-
-const Timer = struct {
-    const count = 0xb2000020;
-
-    fn now() u32 {
-        return read32(count);
-    }
-
-    fn elapsed(start: u32) u32 {
-        return now() -% start;
-    }
-
-    fn delayUs(microseconds: u32) void {
-        const start = now();
-        const ticks = microseconds * 6;
-        while (elapsed(start) < ticks) asm volatile ("nop");
-    }
-};
-
-const Gpio = struct {
-    const base = 0xb0010000;
-
-    fn address(port: usize, offset: usize) usize {
-        return base + port * 0x100 + offset;
-    }
-
-    fn output(port: usize, pin: u5, high: bool) void {
-        const mask = @as(u32, 1) << pin;
-        write32(address(port, 0x18), mask);
-        write32(address(port, 0x24), mask);
-        write32(address(port, 0x38), mask);
-        set(port, pin, high);
-    }
-
-    fn input(port: usize, pin: u5) void {
-        const mask = @as(u32, 1) << pin;
-        write32(address(port, 0x18), mask);
-        write32(address(port, 0x24), mask);
-        write32(address(port, 0x34), mask);
-        write32(address(port, 0x48), mask);
-        write32(address(port, 0x74), mask);
-    }
-
-    fn device1(port: usize, mask: u32) void {
-        write32(address(port, 0x18), mask);
-        write32(address(port, 0x28), mask);
-        write32(address(port, 0x38), mask);
-        write32(address(port, 0x44), mask);
-    }
-
-    fn set(port: usize, pin: u5, high: bool) void {
-        write32(address(port, if (high) 0x44 else 0x48), @as(u32, 1) << pin);
-    }
-
-    fn get(port: usize, pin: u5) bool {
-        return read32(address(port, 0x00)) & (@as(u32, 1) << pin) != 0;
-    }
-};
-
-const Watchdog = struct {
-    const data = 0xb0002000;
-    const enable = 0xb0002004;
-    const count = 0xb0002008;
-    const control = 0xb000200c;
-    const stop_clear = 0xb000203c;
-
-    fn start() void {
-        write32(stop_clear, 1 << 16);
-        write32(enable, 0);
-        write32(control, (5 << 3) | 4); // external 24 MHz clock divided by 1024
-        write32(count, 0);
-        write32(data, 65_000); // approximately 2.77 seconds
-        write32(enable, 1);
-    }
-
-    fn kick() void {
-        write32(count, 0);
-    }
-};
+const Timer = x1000.Timer;
+const Pin = x1000.Gpio.Pin;
+const Watchdog = x1000.Watchdog;
 
 const I2c = struct {
-    port: usize,
-    scl: u5,
-    sda: u5,
+    scl: Pin,
+    sda: Pin,
 
-    fn low(self: I2c, pin: u5) void {
-        Gpio.output(self.port, pin, false);
+    fn low(_: I2c, pin: Pin) void {
+        pin.output(false);
     }
 
-    fn release(self: I2c, pin: u5) void {
-        Gpio.input(self.port, pin);
+    fn release(_: I2c, pin: Pin) void {
+        pin.input();
     }
 
     fn clock(self: I2c, high: bool) void {
         if (high) self.release(self.scl) else self.low(self.scl);
-        Timer.delayUs(4);
+        Timer.delayMicroseconds(4);
     }
 
     fn dataLine(self: I2c, high: bool) void {
         if (high) self.release(self.sda) else self.low(self.sda);
-        Timer.delayUs(4);
+        Timer.delayMicroseconds(4);
     }
 
     fn start(self: I2c) void {
@@ -134,7 +49,7 @@ const I2c = struct {
         }
         self.dataLine(true);
         self.clock(true);
-        const acknowledged = !Gpio.get(self.port, self.sda);
+        const acknowledged = !self.sda.get();
         self.clock(false);
         return acknowledged;
     }
@@ -145,7 +60,7 @@ const I2c = struct {
         var bit: u4 = 0;
         while (bit < 8) : (bit += 1) {
             self.clock(true);
-            value = (value << 1) | @intFromBool(Gpio.get(self.port, self.sda));
+            value = (value << 1) | @intFromBool(self.sda.get());
             self.clock(false);
         }
         self.dataLine(true);
@@ -154,9 +69,9 @@ const I2c = struct {
         return value;
     }
 
-    fn readRegister(self: I2c, device: u7, index: u8, value: *u8) bool {
+    fn readRegister(self: I2c, device: u7, index: board.pmic.Register, value: *u8) bool {
         self.start();
-        if (!self.writeByte(@as(u8, device) << 1) or !self.writeByte(index)) {
+        if (!self.writeByte(@as(u8, device) << 1) or !self.writeByte(@backingInt(index))) {
             self.stop();
             return false;
         }
@@ -170,20 +85,19 @@ const I2c = struct {
         return true;
     }
 
-    fn writeRegister(self: I2c, device: u7, index: u8, value: u8) bool {
+    fn writeRegister(self: I2c, device: u7, index: board.pmic.Register, value: u8) bool {
         self.start();
         const ok = self.writeByte(@as(u8, device) << 1) and
-            self.writeByte(index) and self.writeByte(value);
+            self.writeByte(@backingInt(index)) and self.writeByte(value);
         self.stop();
         return ok;
     }
 };
 
 const Display = struct {
-    const lcd = 0xb3050000;
-    const cpm_clkgr = 0xb0000020;
-    const cpm_lpcdr = 0xb0000064;
-    const pixels: [*]volatile u16 = @ptrFromInt(0xa0040000);
+    const width = board.display.width;
+    const height = board.display.height;
+    const pixels: [*]volatile u16 = @ptrFromInt(board.display.framebuffer_address);
 
     const black: u16 = 0x0000;
     const white: u16 = 0xffff;
@@ -192,38 +106,22 @@ const Display = struct {
     const cyan: u16 = 0x07ff;
     const yellow: u16 = 0xffe0;
 
-    const panel_init = [_]u16{
-        0x1c8, 0x0ff, 0x093, 0x042,
-        0x136, 0x0d8, 0x13a, 0x005,
-        0x1c0, 0x015, 0x015, 0x1c1,
-        0x001, 0x1c5, 0x0da, 0x1b1,
-        0x000, 0x01b, 0x1b4, 0x002,
-        0x1e0, 0x00f, 0x013, 0x017,
-        0x004, 0x013, 0x007, 0x040,
-        0x039, 0x04f, 0x006, 0x00d,
-        0x00a, 0x01f, 0x022, 0x000,
-        0x1e1, 0x000, 0x021, 0x024,
-        0x003, 0x00f, 0x005, 0x038,
-        0x032, 0x049, 0x000, 0x009,
-        0x008, 0x032, 0x035, 0x00f,
-    };
-
     fn ready() bool {
         var timeout: u32 = 1_000_000;
         while (timeout != 0) : (timeout -= 1) {
-            if (read32(lcd + 0xa8) & 1 == 0) return true;
+            if (x1000.Lcd.mcu_state.read() & x1000.Lcd.mcu_busy == 0) return true;
         }
         return false;
     }
 
     fn send(value: u32) bool {
         if (!ready()) return false;
-        write32(lcd + 0xac, value);
+        x1000.Lcd.mcu_data.write(value);
         return true;
     }
 
-    fn command(value: u8) bool {
-        return send(0x40000000 | @as(u32, value));
+    fn command(value: board.display.Command) bool {
+        return send(x1000.Lcd.command_flag | @as(u32, @backingInt(value)));
     }
 
     fn data(value: u8) bool {
@@ -231,69 +129,69 @@ const Display = struct {
     }
 
     fn init() bool {
-        Gpio.output(2, 25, false);
-        Gpio.output(1, 13, false);
-        Gpio.output(1, 14, false);
-        Gpio.output(1, 16, true);
-        Gpio.output(1, 18, true);
-        Gpio.device1(0, 0x0000ffff);
-        Gpio.device1(1, 0x001a0000);
+        board.display.backlight.output(false);
+        board.display.chip_select.output(false);
+        board.display.reset.output(false);
+        board.display.read_strobe.output(true);
+        board.display.write_strobe.output(true);
+        x1000.Gpio.selectFunction1(.a, board.display.port_a_function_1);
+        x1000.Gpio.selectFunction1(.b, board.display.port_b_function_1);
 
-        Gpio.set(1, 14, true);
-        Timer.delayUs(20_000);
-        Gpio.set(1, 13, true);
-        Timer.delayUs(12_000);
+        board.display.reset.set(true);
+        Timer.delayMicroseconds(20_000);
+        board.display.chip_select.set(true);
+        Timer.delayMicroseconds(12_000);
 
-        write32(cpm_lpcdr, 0x90000000 | 29);
-        while (read32(cpm_lpcdr) & 0x08000000 != 0) asm volatile ("nop");
-        write32(cpm_lpcdr, read32(cpm_lpcdr) & ~@as(u32, 0x10000000));
-        write32(cpm_clkgr, read32(cpm_clkgr) & ~@as(u32, 1 << 23));
+        x1000.Cpm.lcd_clock.write(board.display.clock_configuration);
+        while (x1000.Cpm.lcd_clock.read() & x1000.Cpm.lcd_clock_busy != 0) asm volatile ("nop");
+        x1000.Cpm.lcd_clock.clear(x1000.Cpm.lcd_clock_change_enable);
+        x1000.Cpm.ungate(.lcd);
 
-        write32(lcd + 0xa0, 0x00000100);
-        write32(lcd + 0xb8, 0x00000000);
-        write32(lcd + 0xa4, 0x00000114);
-        write32(lcd + 0xb0, 0);
-        write32(lcd + 0xb4, 0);
-        write32(lcd + 0xbc, 0);
-        write32(lcd + 0x30, 0x40000000);
-        write32(lcd + 0x10, 320);
-        write32(lcd + 0x14, 240);
+        x1000.Lcd.mcu_config.write(board.display.mcu_configuration);
+        x1000.Lcd.mcu_config_new.write(0x00000000);
+        x1000.Lcd.mcu_control.write(board.display.mcu_control);
+        x1000.Lcd.write_time.write(0);
+        x1000.Lcd.task_hold.write(0);
+        x1000.Lcd.slow_write_time.write(0);
+        x1000.Lcd.control.write(x1000.Lcd.direct_command_mode);
+        x1000.Lcd.horizontal_area.write(width);
+        x1000.Lcd.vertical_area.write(height);
 
-        Gpio.set(1, 16, true);
-        Gpio.set(1, 18, true);
-        Timer.delayUs(5_000);
-        Gpio.set(1, 18, false);
+        board.display.read_strobe.set(true);
+        board.display.write_strobe.set(true);
+        Timer.delayMicroseconds(5_000);
+        board.display.write_strobe.set(false);
 
-        for (panel_init) |item| {
-            if (item & 0x100 != 0) {
-                if (!command(@truncate(item))) return false;
+        for (board.display.initialization) |item| {
+            if (board.display.isCommand(item)) {
+                if (!command(@fromBackingInt(@intCast(@as(u8, @truncate(item)))))) return false;
             } else if (!data(@truncate(item))) return false;
         }
-        if (!command(0x11)) return false;
-        Timer.delayUs(120_000);
-        if (!command(0x29)) return false;
-        Timer.delayUs(20_000);
+        if (!command(.sleep_out)) return false;
+        Timer.delayMicroseconds(120_000);
+        if (!command(.display_on)) return false;
+        Timer.delayMicroseconds(20_000);
         return true;
     }
 
     fn setWindow() bool {
-        if (!command(0x2a)) return false;
+        if (!command(.column_address)) return false;
         if (!data(0) or !data(0) or !data(1) or !data(0x3f)) return false;
-        if (!command(0x2b)) return false;
+        if (!command(.page_address)) return false;
         if (!data(0) or !data(0) or !data(0) or !data(0xef)) return false;
-        return command(0x2c);
+        return command(.memory_write);
     }
 
     fn clear(color: u16) void {
         var index: usize = 0;
-        while (index < 320 * 240) : (index += 1) pixels[index] = color;
+        while (index < width * height) : (index += 1) pixels[index] = color;
     }
 
-    fn rectangle(x: usize, y: usize, width: usize, height: usize, color: u16) void {
+    fn rectangle(x: usize, y: usize, rectangle_width: usize, rectangle_height: usize, color: u16) void {
         var py = y;
-        while (py < y + height and py < 240) : (py += 1) {
+        while (py < y + rectangle_height and py < Display.height) : (py += 1) {
             var px = x;
-            while (px < x + width and px < 320) : (px += 1) pixels[py * 320 + px] = color;
+            while (px < x + rectangle_width and px < Display.width) : (px += 1) pixels[py * Display.width + px] = color;
         }
     }
 
@@ -363,33 +261,28 @@ const Display = struct {
     fn present() bool {
         if (!setWindow()) return false;
         var index: usize = 0;
-        while (index < 320 * 240) : (index += 1) {
+        while (index < width * height) : (index += 1) {
             const pixel = pixels[index];
             if (!data(@truncate(pixel >> 8)) or !data(@truncate(pixel))) return false;
         }
-        Gpio.set(2, 25, true);
+        board.display.backlight.set(true);
         return true;
     }
 };
 
-const Button = struct {
-    port: usize,
-    pin: u5,
-    label: []const u8,
-};
-
-const buttons = [_]Button{
-    .{ .port = 0, .pin = 16, .label = "PLAY" },
-    .{ .port = 0, .pin = 17, .label = "VOL+" },
-    .{ .port = 0, .pin = 19, .label = "VOL-" },
-    .{ .port = 1, .pin = 28, .label = "MENU" },
-    .{ .port = 3, .pin = 4, .label = "PREV" },
-    .{ .port = 2, .pin = 24, .label = "NEXT" },
-    .{ .port = 3, .pin = 5, .label = "BACK" },
-    .{ .port = 1, .pin = 7, .label = "POWER" },
-};
-
 var display_ready = false;
+
+fn panicCode(comptime value: *const [4]u8) u32 {
+    return @as(u32, value[0]) << 24 |
+        @as(u32, value[1]) << 16 |
+        @as(u32, value[2]) << 8 |
+        value[3];
+}
+
+fn wheelState() u2 {
+    return @truncate((@as(u2, @intFromBool(board.wheel.phase_b.get())) << 1) |
+        @intFromBool(board.wheel.phase_a.get()));
+}
 
 fn hexDigit(value: u4) u8 {
     return if (value < 10) '0' + @as(u8, value) else 'A' + @as(u8, value) - 10;
@@ -414,12 +307,12 @@ fn decimal4(value_initial: u32, output: *[4]u8) void {
 }
 
 fn rawPanicBlink() noreturn {
-    Gpio.output(2, 25, false);
+    board.display.backlight.output(false);
     while (true) {
-        Gpio.set(2, 25, true);
-        Timer.delayUs(150_000);
-        Gpio.set(2, 25, false);
-        Timer.delayUs(150_000);
+        board.display.backlight.set(true);
+        Timer.delayMicroseconds(150_000);
+        board.display.backlight.set(false);
+        Timer.delayMicroseconds(150_000);
     }
 }
 
@@ -433,7 +326,7 @@ fn showPanic(cause: u32, epc: u32, status: u32) noreturn {
     hex32(status, &status_text);
 
     Display.clear(Display.black);
-    Display.rectangle(0, 0, 320, 34, Display.red);
+    Display.rectangle(0, 0, Display.width, 34, Display.red);
     Display.text(12, 8, "GAIN PANIC", Display.white, 2);
     Display.text(16, 58, "CAUSE", Display.white, 2);
     Display.text(130, 58, &cause_text, Display.yellow, 2);
@@ -452,7 +345,7 @@ export fn exception_panic(cause: u32, epc: u32, status: u32) callconv(.c) noretu
 
 fn drawMain(pmic_ok: bool, battery_mv: u32, seen: u8, clockwise: bool, counter_clockwise: bool) bool {
     Display.clear(Display.black);
-    Display.rectangle(0, 0, 320, 28, 0x18e3);
+    Display.rectangle(0, 0, Display.width, 28, 0x18e3);
     Display.text(10, 7, "GAIN PHASE 1", Display.white, 2);
     Display.text(8, 38, "NATIVE ZIG BOOT", Display.cyan, 1);
     Display.text(184, 38, "WDT", Display.white, 1);
@@ -467,10 +360,10 @@ fn drawMain(pmic_ok: bool, battery_mv: u32, seen: u8, clockwise: bool, counter_c
     Display.text(212, 56, "MV", Display.white, 1);
 
     Display.text(8, 82, "PRESS EVERY CONTROL", Display.white, 1);
-    for (buttons, 0..) |button, index| {
+    for (board.buttons, 0..) |button, index| {
         const x = 8 + (index % 4) * 78;
         const y = 100 + (index / 4) * 28;
-        const observed = seen & (@as(u8, 1) << @intCast(index)) != 0;
+        const observed = seen & button.id.mask() != 0;
         Display.rectangle(x, y, 70, 20, if (observed) 0x0400 else 0x4000);
         Display.text(x + 5, y + 7, button.label, Display.white, 1);
     }
@@ -494,38 +387,38 @@ fn powerOff(pmic: I2c) noreturn {
     Watchdog.kick();
     _ = showShutdown();
     var control: u8 = 0;
-    if (!pmic.readRegister(0x34, 0x32, &control) or
-        !pmic.writeRegister(0x34, 0x32, control | 0x80))
+    if (!pmic.readRegister(board.pmic.address, .power_control, &control) or
+        !pmic.writeRegister(board.pmic.address, .power_control, control | board.pmic.shutdown))
     {
-        showPanic(0x504d4943, 0, 0); // PMIC
+        showPanic(panicCode("PMIC"), 0, 0);
     }
     const start = Timer.now();
-    while (Timer.elapsed(start) < 6_000_000) Watchdog.kick();
-    showPanic(0x504f5745, 0, 0); // POWE: power-off returned unexpectedly
+    while (Timer.elapsed(start) < Timer.milliseconds(1_000)) Watchdog.kick();
+    showPanic(panicCode("POWE"), 0, 0);
 }
 
 export fn gain_main() callconv(.c) noreturn {
     if (!Display.init()) rawPanicBlink();
     display_ready = true;
-    Watchdog.start();
+    Watchdog.start(.external, .by_1024, board.watchdog_timeout_ticks);
     Watchdog.kick();
 
-    for (buttons) |button| Gpio.input(button.port, button.pin);
-    Gpio.input(1, 23);
-    Gpio.input(1, 24);
+    for (board.buttons) |button| button.pin.input();
+    board.wheel.phase_a.input();
+    board.wheel.phase_b.input();
 
-    var pmic = I2c{ .port = 3, .scl = 0, .sda = 1 };
+    var pmic = I2c{ .scl = board.pmic.primary.scl, .sda = board.pmic.primary.sda };
     var status: u8 = 0;
-    var pmic_ok = pmic.readRegister(0x34, 0x00, &status);
+    var pmic_ok = pmic.readRegister(board.pmic.address, .status, &status);
     if (!pmic_ok) {
-        pmic = .{ .port = 3, .scl = 1, .sda = 0 };
-        pmic_ok = pmic.readRegister(0x34, 0x00, &status);
+        pmic = .{ .scl = board.pmic.alternate.scl, .sda = board.pmic.alternate.sda };
+        pmic_ok = pmic.readRegister(board.pmic.address, .status, &status);
     }
     var battery_high: u8 = 0;
     var battery_low: u8 = 0;
     if (pmic_ok) {
-        _ = pmic.readRegister(0x34, 0x78, &battery_high);
-        _ = pmic.readRegister(0x34, 0x79, &battery_low);
+        _ = pmic.readRegister(board.pmic.address, .battery_high, &battery_high);
+        _ = pmic.readRegister(board.pmic.address, .battery_low, &battery_low);
     }
     const battery_mv = ((@as(u32, battery_high) << 4) | (battery_low & 0x0f)) * 11 / 10;
 
@@ -533,8 +426,7 @@ export fn gain_main() callconv(.c) noreturn {
     var stable_buttons: u8 = 0;
     var stable_samples: u3 = 0;
     var seen: u8 = 0;
-    var old_wheel: u2 = @truncate((@as(u2, @intFromBool(Gpio.get(1, 24))) << 1) |
-        @intFromBool(Gpio.get(1, 23)));
+    var old_wheel = wheelState();
     const wheel_table = [_]i8{ 0, -1, 1, 0, 1, 0, 0, -1, -1, 0, 0, 1, 0, 1, -1, 0 };
     var clockwise = false;
     var counter_clockwise = false;
@@ -546,8 +438,8 @@ export fn gain_main() callconv(.c) noreturn {
     while (true) {
         Watchdog.kick();
         var sample: u8 = 0;
-        for (buttons, 0..) |button, index| {
-            if (!Gpio.get(button.port, button.pin)) sample |= @as(u8, 1) << @intCast(index);
+        for (board.buttons) |button| {
+            if (!button.pin.get()) sample |= button.id.mask();
         }
 
         if (sample == raw_buttons) {
@@ -565,8 +457,7 @@ export fn gain_main() callconv(.c) noreturn {
             seen = new_seen;
         }
 
-        const new_wheel: u2 = @truncate((@as(u2, @intFromBool(Gpio.get(1, 24))) << 1) |
-            @intFromBool(Gpio.get(1, 23)));
+        const new_wheel = wheelState();
         if (new_wheel != old_wheel) {
             const direction = wheel_table[(@as(usize, old_wheel) << 2) | new_wheel];
             if (direction > 0 and !clockwise) {
@@ -579,22 +470,25 @@ export fn gain_main() callconv(.c) noreturn {
             old_wheel = new_wheel;
         }
 
-        const power_down = stable_buttons & (1 << 7) != 0;
+        const power_down = stable_buttons & board.ButtonId.power.mask() != 0;
         if (power_down) {
             if (power_started == null) power_started = Timer.now();
-            if (Timer.elapsed(power_started.?) > 9_000_000) powerOff(pmic);
+            if (Timer.elapsed(power_started.?) > Timer.milliseconds(1_500)) powerOff(pmic);
         } else power_started = null;
 
-        const panic_down = stable_buttons & ((1 << 3) | (1 << 6)) == ((1 << 3) | (1 << 6));
+        const panic_buttons = board.ButtonId.menu.mask() | board.ButtonId.back.mask();
+        const panic_down = stable_buttons & panic_buttons == panic_buttons;
         if (panic_down) {
             if (panic_started == null) panic_started = Timer.now();
-            if (Timer.elapsed(panic_started.?) > 6_000_000) showPanic(0x4d414e55, 0, 0); // MANU
+            if (Timer.elapsed(panic_started.?) > Timer.milliseconds(1_000)) {
+                showPanic(panicCode("MANU"), 0, 0);
+            }
         } else panic_started = null;
 
-        if (changed and Timer.elapsed(last_draw) > 120_000) {
+        if (changed and Timer.elapsed(last_draw) > Timer.milliseconds(20)) {
             if (!drawMain(pmic_ok, battery_mv, seen, clockwise, counter_clockwise)) rawPanicBlink();
             last_draw = Timer.now();
         }
-        Timer.delayUs(1_000);
+        Timer.delayMicroseconds(1_000);
     }
 }
