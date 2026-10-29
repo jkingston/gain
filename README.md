@@ -10,7 +10,7 @@ normal boot path.
 
 | Property | Value |
 |---|---|
-| Board | Surfans F20 V2.7, Rockbox `hw1/hw2` family |
+| Board | Surfans F20 V2.7 |
 | SoC | Ingenic X1000 |
 | CPU | XBurst-1, little-endian MIPS32 |
 | RAM | 32 MiB integrated LPDDR |
@@ -20,6 +20,55 @@ normal boot path.
 
 Recovery images, stock firmware and captured device data are kept in the
 separate `f20-v27-archive` repository.
+
+## Current state
+
+The first native hardware milestone is verified on a physical F20 V2.7. The
+current RAM-only build provides:
+
+- an X1000 ROM-loadable Zig SPL;
+- LPDDR initialization and a gain-owned stage-two handoff;
+- a freestanding Zig runtime with exception vectors;
+- a 320 x 240 RGB565 display driver;
+- all buttons and both wheel directions;
+- AXP192 status, battery voltage and power-off;
+- a watchdog-backed panic screen.
+
+This milestone does not access NAND or microSD. Audio and storage are not yet
+implemented.
+
+## Build
+
+Zig 0.17.0 is required.
+
+```sh
+zig build
+zig build test
+```
+
+The build places these images in `zig-out/bin`:
+
+| Image | Purpose |
+|---|---|
+| `gain-spl.bin` | X1000 ROM image with a 2 KiB boot header |
+| `gain-spl.raw` | Unwrapped TCSM code |
+| `gain-stage2.bin` | Flat DRAM image loaded at `0x80004000` |
+
+## RAM boot
+
+The development boot uses the X1000 mask ROM and a compatible `usbboot` host
+tool. It does not modify storage.
+
+```sh
+usbboot --cpu x1000 --stage1 zig-out/bin/gain-spl.bin
+usbboot --cpu x1000 --addr 0x80004000 \
+  --download zig-out/bin/gain-stage2.bin --flush-caches \
+  --start1 0xf4001a00
+```
+
+The ROM loads the SPL at `0xf4001000` and enters it at `0xf4001800`. The SPL
+initializes LPDDR and returns to the ROM USB loop. The final command uploads
+stage two and calls gain's handoff at `0xf4001a00`.
 
 ## License
 
