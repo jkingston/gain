@@ -1,0 +1,11 @@
+.DS_Store
+.zig-cache/
+zig-cache/
+zig-out/
+build/
+dist/
+*.o
+*.elf
+*.bin
+*.map
+
