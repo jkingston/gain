@@ -187,7 +187,27 @@ pub fn build(b: *std.Build) void {
         .optimize = .Debug,
     });
     playback_sim_module.addImport("playback", playback_module);
+    playback_sim_module.addImport("playback_controls", b.createModule(.{
+        .root_source_file = b.path("src/playback_controls.zig"),
+        .target = b.graph.host,
+        .optimize = .Debug,
+    }));
     const playback_sim_tests = b.addTest(.{ .root_module = playback_sim_module });
+    const playback_control_tests = b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("src/playback_controls.zig"),
+        .target = b.graph.host,
+        .optimize = .Debug,
+    }) });
+    const display_transfer_tests = b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("src/display_transfer.zig"),
+        .target = b.graph.host,
+        .optimize = .Debug,
+    }) });
+    const lcd_dma_tests = b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("src/lcd_dma.zig"),
+        .target = b.graph.host,
+        .optimize = .Debug,
+    }) });
     const fat32_module = b.createModule(.{
         .root_source_file = b.path("src/fat32.zig"),
         .target = b.graph.host,
@@ -246,6 +266,9 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(flac_tests).step);
     test_step.dependOn(&b.addRunArtifact(f20_tests).step);
     test_step.dependOn(&b.addRunArtifact(playback_sim_tests).step);
+    test_step.dependOn(&b.addRunArtifact(playback_control_tests).step);
+    test_step.dependOn(&b.addRunArtifact(display_transfer_tests).step);
+    test_step.dependOn(&b.addRunArtifact(lcd_dma_tests).step);
     test_step.dependOn(&b.addRunArtifact(storage_sim_tests).step);
     test_step.dependOn(&b.addRunArtifact(media_pipeline_sim_tests).step);
     test_step.dependOn(&b.addRunArtifact(flac_sim_tests).step);

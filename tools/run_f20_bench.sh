@@ -5,8 +5,8 @@ repo=${0:A:h:h}
 usbboot=${GAIN_USBBOOT:-usbboot}
 spl=${GAIN_SPL:-zig-out/bin/gain-spl.bin}
 skip_spl=${GAIN_SKIP_SPL:-0}
-selected_cases=${GAIN_F20_CASES:-"0 1 3 4 5 6 7 8 9 10"}
-report_bytes=492
+selected_cases=${GAIN_F20_CASES:-"0 1 3 4 5 6 7 8 9 10 13"}
+report_bytes=528
 report_file=$(mktemp -t gain-f20-bench.XXXXXX)
 case_file=$(mktemp -t gain-f20-case.XXXXXX)
 trap 'rm -f "$report_file" "$case_file"' EXIT

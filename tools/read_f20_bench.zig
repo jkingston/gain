@@ -30,7 +30,7 @@ pub fn main(init: std.process.Init) !void {
     const stdout = &stdout_writer.interface;
     try stdout.print(
         "F20 FLAC benchmark: {d}/{d} cases completed, timer {d} Hz\n" ++
-            "case                         n    min ms  median ms     p95 ms     max ms   storage ms  budget   checksum\n",
+            "case                         n    min ms  median ms     p95 ms     max ms   I/O max ms  budget   checksum\n",
         .{ @popCount(report.completed_case_mask), protocol.case_count, report.timer_frequency },
     );
     var benchmark_failed = false;
@@ -65,6 +65,16 @@ pub fn main(init: std.process.Init) !void {
     if (stream.observations != 0 and stream.maximum_ticks > protocol.refill_ceiling_ticks) {
         try stdout.print("stream refill exceeds the 75% release ceiling ({d:.2}%)\n", .{
             refillBudget(stream.maximum_ticks),
+        });
+        try stdout.flush();
+        return error.PerformanceRegression;
+    }
+    const sd_read_ahead = report.entries[@backingInt(protocol.Case.sd_stream_readahead)];
+    if (sd_read_ahead.observations != 0 and
+        sd_read_ahead.maximum_ticks > protocol.refill_ceiling_ticks)
+    {
+        try stdout.print("SD read-ahead refill exceeds the 75% release ceiling ({d:.2}%)\n", .{
+            refillBudget(sd_read_ahead.maximum_ticks),
         });
         try stdout.flush();
         return error.PerformanceRegression;

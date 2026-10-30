@@ -1,5 +1,6 @@
 const std = @import("std");
 const playback = @import("playback");
+const controls = @import("playback_controls");
 
 const maximum_fifo_frames = 64;
 const maximum_latency_samples = 128;
@@ -21,6 +22,7 @@ const Config = struct {
     chunks: u32,
     fifo_frames: u8,
     handoff: Handoff = .linked,
+    notify_every_descriptors: u8 = 1,
 };
 
 const LatencyPlan = struct {
@@ -92,8 +94,10 @@ const Simulator = struct {
     latency: LatencyPlan,
     state: playback.State,
     pending: [playback.maximum_buffers]PendingRefill = @splat(.{}),
+    buffer_chunks: [playback.maximum_buffers]u32 = @splat(0),
     fifo: Fifo = .{},
     tick: u32 = 0,
+    dma_chunk: u32 = 0,
     emitted: u32 = 0,
     expected_frame: u32 = 0,
     source_offset: u16 = 0,
@@ -105,7 +109,7 @@ const Simulator = struct {
 
     fn init(config: Config, latency: LatencyPlan) ?Simulator {
         if (config.fifo_frames == 0 or config.fifo_frames > maximum_fifo_frames or
-            config.frames_per_buffer == 0)
+            config.frames_per_buffer == 0 or config.notify_every_descriptors == 0)
         {
             return null;
         }
@@ -115,6 +119,7 @@ const Simulator = struct {
             .total_chunks = config.chunks,
         }) catch return null;
         var self = Simulator{ .config = config, .latency = latency, .state = state };
+        for (0..config.buffers) |slot| self.buffer_chunks[slot] = @intCast(slot);
         self.updateReadyLowWater();
         return self;
     }
@@ -144,6 +149,7 @@ const Simulator = struct {
             self.state.completeRefill(pending.refill) catch |failure| {
                 return .{ .scheduler = failure };
             };
+            self.buffer_chunks[pending.refill.slot] = pending.refill.chunk;
             pending.active = false;
             self.refills_completed += 1;
         }
@@ -152,15 +158,24 @@ const Simulator = struct {
     }
 
     fn descriptorComplete(self: *Simulator) ?Failure {
-        const completed_before = self.state.chunks_completed;
-        const observed: u7 = @intCast((completed_before + 1) % self.config.descriptors);
+        self.dma_chunk += 1;
+        const observed: u7 = @intCast(self.dma_chunk % self.config.descriptors);
         if (observed == 0) self.descriptor_wraps += 1;
-        const transition = self.state.advance(observed) catch |failure| {
-            return .{ .scheduler = failure };
-        };
         self.descriptor_events += 1;
-        if (transition.refill) |refill| {
-            if (self.scheduleRefill(refill)) |failure| return failure;
+        const should_notify = self.dma_chunk % self.config.notify_every_descriptors == 0 or
+            self.dma_chunk == self.config.chunks;
+        if (should_notify) {
+            const completions = self.state.completionsTo(observed) catch |failure| {
+                return .{ .scheduler = failure };
+            };
+            for (0..completions) |_| {
+                const transition = self.state.advance(self.state.nextDescriptor()) catch |failure| {
+                    return .{ .scheduler = failure };
+                };
+                if (transition.refill) |refill| {
+                    if (self.scheduleRefill(refill)) |failure| return failure;
+                }
+            }
         }
         self.source_offset = 0;
         self.restart_ready_tick = self.tick + switch (self.config.handoff) {
@@ -173,8 +188,10 @@ const Simulator = struct {
 
     fn pumpDma(self: *Simulator) ?Failure {
         while (self.fifo.length < self.config.fifo_frames) {
-            const chunk = self.state.currentChunk() orelse return null;
+            if (self.dma_chunk >= self.config.chunks) return null;
             if (self.tick < self.restart_ready_tick) return null;
+            const slot = self.dma_chunk % self.config.buffers;
+            const chunk = self.buffer_chunks[slot];
             const frame = chunk * self.config.frames_per_buffer + self.source_offset;
             self.fifo.push(self.config.fifo_frames, frame);
             self.source_offset += 1;
@@ -369,5 +386,85 @@ test "measured F20 refill latency has a wide deterministic margin" {
             else => return error.ExpectedDeadlineFailure,
         },
         .passed => return error.ExpectedDeadlineFailure,
+    }
+}
+
+test "blocking playback display reproduces descriptor overrun" {
+    const config = Config{
+        .buffers = 3,
+        .descriptors = 120,
+        .frames_per_buffer = 4_096,
+        .chunks = 120,
+        .fifo_frames = 64,
+        .notify_every_descriptors = 3,
+    };
+    switch (simulate(config, LatencyPlan.constant(193), .audio_before_refill)) {
+        .failed => |failure| switch (failure) {
+            .scheduler => |scheduler_failure| try std.testing.expectEqual(
+                error.DescriptorOverrun,
+                scheduler_failure,
+            ),
+            else => return error.ExpectedDescriptorOverrun,
+        },
+        .passed => return error.ExpectedDescriptorOverrun,
+    }
+}
+
+test "asynchronous display DMA preserves every audio descriptor event" {
+    const config = Config{
+        .buffers = 3,
+        .descriptors = 120,
+        .frames_per_buffer = 4_096,
+        .chunks = 120,
+        .fifo_frames = 64,
+        .notify_every_descriptors = 1,
+    };
+    // LCD DMA progresses independently, so its measured 15.4 ms full-frame
+    // duration does not extend the CPU refill latency or hide audio events.
+    for (std.enums.values(TieOrder)) |order| {
+        const metrics = try expectPass(simulate(config, LatencyPlan.constant(193), order));
+        try std.testing.expectEqual(@as(u32, 120), metrics.descriptor_events);
+        try std.testing.expectEqual(@as(u32, 120 * 4_096), metrics.emitted_frames);
+    }
+}
+
+test "asynchronous region DMA preserves 96 kHz playback" {
+    const config = Config{
+        .buffers = 3,
+        .descriptors = 120,
+        .frames_per_buffer = 4_096,
+        .chunks = 120,
+        .fifo_frames = 64,
+        .notify_every_descriptors = 1,
+    };
+
+    var controller = controls.State.init(64);
+    _ = controller.update(0);
+    var plan = LatencyPlan.constant(193);
+    plan.count = config.chunks;
+    var volume_changes: u8 = 0;
+    for (0..config.chunks) |chunk| {
+        _ = controller.update(0);
+        const button = if (chunk & 1 == 0)
+            controls.Button.volume_up.mask()
+        else
+            controls.Button.volume_down.mask();
+        switch (controller.update(button)) {
+            .set_attenuation => {
+                // The measured 18x7 hardware update is 89 us, or fewer than
+                // nine 96 kHz frames, while DMA continues independently.
+                plan.values[chunk] = 9;
+                volume_changes += 1;
+            },
+            else => return error.ExpectedVolumeChange,
+        }
+    }
+    try std.testing.expectEqual(@as(u8, 120), volume_changes);
+    try std.testing.expectEqual(@as(u8, 64), controller.attenuation);
+
+    for (std.enums.values(TieOrder)) |order| {
+        const metrics = try expectPass(simulate(config, plan, order));
+        try std.testing.expectEqual(@as(u32, 120), metrics.descriptor_events);
+        try std.testing.expectEqual(@as(u32, 120 * 4_096), metrics.emitted_frames);
     }
 }

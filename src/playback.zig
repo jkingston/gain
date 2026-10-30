@@ -61,6 +61,7 @@ pub const Error = error{
     InvalidConfig,
     AlreadyFinished,
     UnexpectedDescriptor,
+    DescriptorOverrun,
     BufferNotReady,
     InvalidRefill,
 };
@@ -96,6 +97,30 @@ pub const State = struct {
 
     pub fn expectedDescriptor(self: State) u7 {
         return @intCast(self.chunks_completed % self.config.descriptor_count);
+    }
+
+    pub fn nextDescriptor(self: State) u7 {
+        return @intCast((self.chunks_completed + 1) % self.config.descriptor_count);
+    }
+
+    /// Returns how many descriptor completions occurred before the descriptor
+    /// currently reported by hardware. A direct-mode LCD transfer can coalesce
+    /// interrupts while DMA continues. Catch-up remains safe only while at
+    /// least one untouched buffer separates DMA from the released buffers.
+    pub fn completionsTo(self: State, observed_descriptor: u7) Error!u8 {
+        if (self.finished) return error.AlreadyFinished;
+        if (observed_descriptor >= self.config.descriptor_count) {
+            return error.UnexpectedDescriptor;
+        }
+        const descriptor_count: u16 = self.config.descriptor_count;
+        const expected: u16 = self.nextDescriptor();
+        const observed: u16 = observed_descriptor;
+        const completions: u16 = (observed + descriptor_count - expected) % descriptor_count + 1;
+        const remaining = self.config.total_chunks - self.chunks_completed;
+        if (completions > remaining or completions >= self.config.buffer_count) {
+            return error.DescriptorOverrun;
+        }
+        return @intCast(completions);
     }
 
     pub fn slot(self: State, index: u8) Slot {
@@ -164,3 +189,22 @@ pub const State = struct {
         target.state = .ready;
     }
 };
+
+test "coalesced descriptor notifications catch up within the buffer margin" {
+    const testing = @import("std").testing;
+    var state = try State.init(.{
+        .buffer_count = 3,
+        .descriptor_count = 12,
+        .total_chunks = 12,
+    });
+
+    var strict_state = state;
+    try testing.expectError(error.UnexpectedDescriptor, strict_state.advance(2));
+    try testing.expectEqual(@as(u8, 2), try state.completionsTo(2));
+    for (0..2) |_| {
+        const transition = try state.advance(state.nextDescriptor());
+        if (transition.refill) |refill| try state.completeRefill(refill);
+    }
+    try testing.expectEqual(@as(u32, 2), state.chunks_completed);
+    try testing.expectError(error.DescriptorOverrun, state.completionsTo(5));
+}

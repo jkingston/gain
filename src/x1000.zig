@@ -441,6 +441,8 @@ pub const Watchdog = struct {
 };
 
 pub const Lcd = struct {
+    pub const descriptor_address = Register32(0xb3050040);
+    pub const state = Register32(0xb3050034);
     pub const control = Register32(0xb3050030);
     pub const horizontal_area = Register32(0xb3050010);
     pub const vertical_area = Register32(0xb3050014);
@@ -454,6 +456,12 @@ pub const Lcd = struct {
     pub const slow_write_time = Register32(0xb30500bc);
 
     pub const mcu_busy = bit(0);
+    pub const state_end_of_frame = bit(5);
+    pub const control_enable = bit(3);
+    pub const burst_64_words = @as(u32, 4) << 28;
+    pub const mcu_dma_start = bit(1);
+    pub const mcu_dma_transmit_enable = bit(0);
+    pub const dma_rgb565_over_8_bit_bus: u32 = bit(0) | (@as(u32, 1) << 8);
     pub const command_flag: u32 = 0x40000000;
     pub const direct_command_mode: u32 = 0x40000000;
 };

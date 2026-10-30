@@ -9,6 +9,7 @@ const x1000 = f20.soc;
 
 const maximum_observations = 128;
 const stream_repetitions = 4;
+const sd_read_ahead_observations = 16;
 const maximum_block_frames = 65_535;
 const compressed_bytes = 256 * 1024;
 const output_bytes = maximum_block_frames * 8;
@@ -22,6 +23,7 @@ const sd_descriptor_address = 0xa007_f000;
 const sd_switch_status_address = 0xa007_f100;
 const sd_scratch_address = 0xa008_0000;
 const sd_bounce_address = 0xa00a_0000;
+const sd_read_ahead_address = 0xa00b_0000;
 
 const report: *volatile protocol.Report = @ptrFromInt(protocol.report_address);
 const selected_case: *volatile u32 = @ptrFromInt(protocol.selection_address);
@@ -37,6 +39,7 @@ const sd_descriptor: *volatile f20.storage.DmaDescriptor = @ptrFromInt(sd_descri
 const sd_switch_status: *align(4) [64]u8 = @ptrFromInt(sd_switch_status_address);
 const sd_scratch: *[f20.storage.fat32.sector_bytes]u8 = @ptrFromInt(sd_scratch_address);
 const sd_bounce: *align(4) [64 * 1024 - 4]u8 = @ptrFromInt(sd_bounce_address);
+const sd_read_ahead: *align(4) [64 * 1024 - 4]u8 = @ptrFromInt(sd_read_ahead_address);
 
 var timings: [maximum_observations]u32 = undefined;
 var timing_count: usize = 0;
@@ -90,6 +93,7 @@ export fn benchmark_main() callconv(.c) void {
             run(case, benchmarkSdStreamCached);
             verifyMatchingOutput(.sd_stream_uncached, .sd_stream_cached);
         },
+        .sd_stream_readahead => run(case, benchmarkSdStreamReadAhead),
     }
     x1000.memoryBarrier();
 }
@@ -257,6 +261,37 @@ fn benchmarkSdStream(destination: []u8, checksum: *u32, maximum_storage_ticks: *
         observe(x1000.Timer.elapsed(started));
         maximum_storage_ticks.* = @max(maximum_storage_ticks.*, timed_reader.ticks -% storage_before);
         checksum.* +%= checksumOutput(output_uncached[0..chunk.len], fill.bytes);
+        if (fill.end) break;
+    }
+}
+
+fn benchmarkSdStreamReadAhead(checksum: *u32, maximum_prefetch_ticks: *u32) !void {
+    var storage = try f20.storage.Controller.initialize(.{
+        .descriptor = sd_descriptor,
+        .switch_status = sd_switch_status,
+    });
+    var volume = try f20.storage.fat32.Volume(f20.storage.Controller).mount(&storage, sd_scratch);
+    const file = try volume.findRoot("GAIN192 FLA".*);
+    var file_reader = try volume.reader(file);
+    const Reader = f20.storage.ReadAheadReader(@TypeOf(file_reader));
+    var reader = try Reader.init(&file_reader, .{ sd_bounce, sd_read_ahead });
+    var stream = try flac_pcm.Stream(Reader).init(&reader, compressed, left, right);
+    const chunk = output_uncached[0..stream.plan.chunkBytes()];
+    var fills: u32 = 0;
+    while (fills < sd_read_ahead_observations) {
+        const prefetch_started = x1000.Timer.now();
+        try reader.prefetch();
+        maximum_prefetch_ticks.* = @max(
+            maximum_prefetch_ticks.*,
+            x1000.Timer.elapsed(prefetch_started),
+        );
+
+        const fill_started = x1000.Timer.now();
+        const fill = try stream.fill(chunk);
+        x1000.memoryBarrier();
+        observe(x1000.Timer.elapsed(fill_started));
+        checksum.* +%= checksumOutput(chunk, fill.bytes);
+        fills += 1;
         if (fill.end) break;
     }
 }

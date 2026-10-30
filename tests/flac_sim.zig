@@ -8,6 +8,8 @@ const buffer_count = 3;
 const descriptor_count = 120;
 const timer_ticks_per_second = 6_000_000;
 const sample_rate = 192_000;
+const measured_read_ahead_fill_bound = 292_500;
+const measured_read_ahead_prefetch_bound = 28_600;
 
 // Captured on the F20 while decoding the same 24-bit/192 kHz workload. The
 // first three frames are prefilled; subsequent frames run between DMA events.
@@ -132,4 +134,13 @@ test "production optimization fixes the captured descriptor miss" {
     const worst = std.mem.max(u32, &optimized_sd_fill_ticks);
     try std.testing.expectEqual(@as(u32, 446_191), worst);
     try std.testing.expect(worst * 1_000 / chunk_ticks <= 872);
+}
+
+test "read-ahead fits storage and refill work between DMA events" {
+    const chunk_ticks = block_frames * timer_ticks_per_second / sample_rate;
+    const refill_target = chunk_ticks * 70 / 100;
+    try std.testing.expect(measured_read_ahead_fill_bound <= refill_target);
+    try std.testing.expect(
+        measured_read_ahead_fill_bound + measured_read_ahead_prefetch_bound < chunk_ticks,
+    );
 }

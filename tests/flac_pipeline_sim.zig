@@ -17,12 +17,15 @@ const chunk_bytes = block_frames * 8;
 const buffer_count = 3;
 
 const MemoryCard = struct {
+    read_calls: u32 = 0,
+
     pub fn readBlocks(self: *MemoryCard, first_lba: u32, output: []u8) !void {
         if (output.len == 0 or output.len % fat32.sector_bytes != 0 or
             @intFromPtr(output.ptr) & 3 != 0)
         {
             return error.InvalidRead;
         }
+        self.read_calls += 1;
         var offset: usize = 0;
         while (offset < output.len) : (offset += fat32.sector_bytes) {
             self.readSector(
@@ -51,6 +54,40 @@ const MemoryCard = struct {
 const Volume = fat32.Volume(MemoryCard);
 
 const Buffered = f20.storage.BufferedReader(Volume.Reader);
+const ReadAhead = f20.storage.ReadAheadReader(Volume.Reader);
+
+test "read-ahead removes physical storage reads from FLAC refill" {
+    var card = MemoryCard{};
+    var sector: [fat32.sector_bytes]u8 = undefined;
+    var volume = try Volume.mount(&card, &sector);
+    const file = try volume.findRoot("PIPE    FLA".*);
+    var file_reader = try volume.reader(file);
+    var first: [8_195]u8 align(4) = undefined;
+    var second: [8_195]u8 align(4) = undefined;
+    var reader = try ReadAhead.init(&file_reader, .{ &first, &second });
+    var compressed: [7_416]u8 = undefined;
+    var left: [block_frames]i32 = undefined;
+    var right: [block_frames]i32 = undefined;
+    var stream = try flac_pcm.Stream(ReadAhead).init(
+        &reader,
+        &compressed,
+        &left,
+        &right,
+    );
+    var output: [chunk_bytes]u8 align(4) = undefined;
+
+    var chunk: u32 = 0;
+    while (true) : (chunk += 1) {
+        try reader.prefetch();
+        const reads_before_fill = card.read_calls;
+        const fill = try stream.fill(&output);
+        try std.testing.expectEqual(reads_before_fill, card.read_calls);
+        try verifyChunk(&output, chunk);
+        if (fill.end) break;
+    }
+    try std.testing.expectEqual(@as(u32, 3), chunk);
+    try std.testing.expectEqual(@as(u32, encoded.len), file_reader.position);
+}
 
 test "FAT32 FLAC feeds exact fixed-size chunks through the production stream" {
     var card = MemoryCard{};

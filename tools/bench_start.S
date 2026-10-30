@@ -6,7 +6,9 @@
     .extern _gp
     .extern _bss_start
     .extern _bss_end
-    .equ saved_context, 0xa1ffe000
+    # Reserve 128 KiB between the ROM return context and benchmark stack for
+    # the deeper FAT32 and codec call paths.
+    .equ saved_context, 0xa1fdf000
     .equ benchmark_stack, 0x81fff000
 _start:
     li    $k0, saved_context

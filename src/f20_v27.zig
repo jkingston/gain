@@ -13,6 +13,13 @@ pub const display = struct {
     pub const width = 320;
     pub const height = 240;
     pub const framebuffer_address = 0xa0040000;
+    // Fixed uncached workspace below the SD DMA descriptor and above the
+    // read-ahead buffers. Full frames transfer directly from the framebuffer;
+    // only packed dirty regions use the staging area.
+    pub const dma_descriptor_address = 0xa007e000;
+    pub const dma_command_address = 0xa007e100;
+    pub const dma_staging_address = 0xa00c0000;
+    pub const dma_staging_pixel_capacity = width * 42;
     pub const clock_divider = 29;
     pub const clock_configuration: u32 = 0x90000000 | clock_divider;
     pub const mcu_configuration: u32 = 0x00000100;

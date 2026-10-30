@@ -1,5 +1,5 @@
 pub const magic = "GAINBNCH".*;
-pub const version = 1;
+pub const version = 2;
 pub const report_address = 0xa070_0000;
 pub const selection_address = 0xa06f_f000;
 pub const source_address = 0x8080_0000;
@@ -33,6 +33,7 @@ pub const Case = enum(u32) {
     sd_open,
     sd_stream_uncached,
     sd_stream_cached,
+    sd_stream_readahead,
 };
 
 pub const Entry = extern struct {
@@ -57,7 +58,7 @@ pub const Report = extern struct {
 };
 
 comptime {
-    if (@sizeOf(Report) != 492) @compileError("update the host transfer size with the report layout");
+    if (@sizeOf(Report) != 528) @compileError("update the host transfer size with the report layout");
 }
 
 test "track sparse completed cases" {

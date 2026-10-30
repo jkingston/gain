@@ -34,6 +34,7 @@ const MemoryCard = struct {
             data_lba => makeRootDirectory(output),
             data_lba + 1 => @memcpy(output, self.image[0..fat32.sector_bytes]),
             data_lba + 3 => @memcpy(output[0 .. file_bytes - fat32.sector_bytes], self.image[fat32.sector_bytes..]),
+            data_lba + 4 => makeAlbumDirectory(output),
             else => {},
         }
     }
@@ -81,6 +82,31 @@ test "FAT32 reader handles arbitrary caller buffer boundaries" {
         offset += count;
     }
     try std.testing.expectEqualSlices(u8, &card.image, &actual);
+}
+
+test "FAT32 directory iterator decodes nested long filenames" {
+    var card = MemoryCard.init();
+    var scratch: [fat32.sector_bytes]u8 = undefined;
+    var volume = try fat32.Volume(MemoryCard).mount(&card, &scratch);
+    var root = try volume.iterate(volume.rootDirectory());
+
+    const gain = (try root.next()).?;
+    try std.testing.expectEqualStrings("GAIN.WAV", gain.name());
+    const album = (try root.next()).?;
+    try std.testing.expectEqual(fat32.EntryKind.directory, album.kind);
+    try std.testing.expectEqualStrings("Synthetic Album Editions", album.name());
+    try std.testing.expect((try root.next()) == null);
+
+    var contents = try volume.iterate(try album.directory());
+    const dot = (try contents.next()).?;
+    try std.testing.expectEqualStrings(".", dot.name());
+    const parent = (try contents.next()).?;
+    try std.testing.expectEqualStrings("..", parent.name());
+    const aria = (try contents.next()).?;
+    try std.testing.expectEqual(fat32.EntryKind.file, aria.kind);
+    try std.testing.expectEqualStrings("01 - Tone.flac", aria.name());
+    try std.testing.expectEqual(@as(u32, 123), (try aria.file()).size);
+    try std.testing.expect((try contents.next()) == null);
 }
 
 test "WAV parser rejects inconsistent format arithmetic" {
@@ -181,6 +207,8 @@ fn makeFat(sector: *[fat32.sector_bytes]u8) void {
     write32(sector, 8, 0x0fff_ffff); // root cluster 2
     write32(sector, 12, 5); // file cluster 3 continues at cluster 5
     write32(sector, 20, 0x0fff_ffff);
+    write32(sector, 24, 0x0fff_ffff); // album directory cluster 6
+    write32(sector, 28, 0x0fff_ffff); // album file cluster 7
 }
 
 fn makeRootDirectory(sector: *[fat32.sector_bytes]u8) void {
@@ -188,6 +216,33 @@ fn makeRootDirectory(sector: *[fat32.sector_bytes]u8) void {
     sector[11] = 0x20;
     write16(sector, 26, 3);
     write32(sector, 28, file_bytes);
+    const alias = "SYNTH~1    ".*;
+    const checksum = shortChecksum(&alias);
+    writeLongNameEntry(sector, 32, 2, true, "Synthetic Album Editions", checksum);
+    writeLongNameEntry(sector, 64, 1, false, "Synthetic Album Editions", checksum);
+    @memcpy(sector[96..107], &alias);
+    sector[107] = 0x10;
+    write16(sector, 96 + 26, 6);
+}
+
+fn makeAlbumDirectory(sector: *[fat32.sector_bytes]u8) void {
+    const dot = ".          ".*;
+    @memcpy(sector[0..11], &dot);
+    sector[11] = 0x10;
+    write16(sector, 26, 6);
+    const parent = "..         ".*;
+    @memcpy(sector[32..43], &parent);
+    sector[43] = 0x10;
+    write16(sector, 32 + 26, 0);
+
+    const alias = "01-TON~1FLA".*;
+    const checksum = shortChecksum(&alias);
+    writeLongNameEntry(sector, 64, 2, true, "01 - Tone.flac", checksum);
+    writeLongNameEntry(sector, 96, 1, false, "01 - Tone.flac", checksum);
+    @memcpy(sector[128..139], &alias);
+    sector[139] = 0x20;
+    write16(sector, 128 + 26, 7);
+    write32(sector, 128 + 28, 123);
 }
 
 fn makeWave(image: *[file_bytes]u8) void {
@@ -216,6 +271,32 @@ fn makeWave(image: *[file_bytes]u8) void {
 fn signature(sector: *[fat32.sector_bytes]u8) void {
     sector[510] = 0x55;
     sector[511] = 0xaa;
+}
+
+fn writeLongNameEntry(
+    sector: *[fat32.sector_bytes]u8,
+    offset: usize,
+    ordinal: u8,
+    last: bool,
+    name: []const u8,
+    checksum: u8,
+) void {
+    const positions = [_]usize{ 1, 3, 5, 7, 9, 14, 16, 18, 20, 22, 24, 28, 30 };
+    sector[offset] = ordinal | if (last) @as(u8, 0x40) else 0;
+    sector[offset + 11] = 0x0f;
+    sector[offset + 13] = checksum;
+    const base = (@as(usize, ordinal) - 1) * positions.len;
+    for (positions, 0..) |position, index| {
+        const source = base + index;
+        const unit: u16 = if (source < name.len) name[source] else if (source == name.len) 0 else 0xffff;
+        write16(sector, offset + position, unit);
+    }
+}
+
+fn shortChecksum(name: *const [11]u8) u8 {
+    var checksum: u8 = 0;
+    for (name) |byte| checksum = ((checksum >> 1) | (checksum << 7)) +% byte;
+    return checksum;
 }
 
 fn write16(bytes: []u8, offset: usize, value: u16) void {

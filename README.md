@@ -33,9 +33,11 @@ current RAM-only build provides:
 - all buttons and both wheel directions;
 - AXP192 status, battery voltage and power-off;
 - native read-only SD initialization at up to 50 MHz;
-- allocation-free FAT32 and RIFF/WAVE parsing;
+- allocation-free FAT32 directory traversal, long names and RIFF/WAVE parsing;
 - allocation-free native FLAC decoding and streaming;
 - ES9018K2M setup and linked-PDMA PCM playback;
+- a folder browser and now-playing screen with track and volume controls;
+- fixed-point software volume and bounded, priority-aware display updates;
 - a watchdog-backed panic screen.
 
 The storage and playback path has been verified from RAM on the physical F20:
@@ -67,6 +69,22 @@ mark. The slowest complete fill used 87.1% of its interval before the next DMA
 event. A captured ReleaseSmall trace that missed a descriptor is retained as a
 deterministic regression; stage two is compiled with ReleaseFast.
 
+The optimized FLAC path keeps two compressed-input chunks in caller-owned
+uncached memory. FAT32 and physical SD reads run ahead while audio DMA is
+playing, so refill only copies prefetched bytes, decodes and packs PCM. On the
+physical F20, the full 24-block 24-bit/192 kHz workload peaked at 48.75 ms per
+refill, or 57.12% of its interval; the slowest prefetch took 4.76 ms. The
+standalone hardware benchmark samples 16 blocks per invocation to remain
+inside the X1000 ROM USB command window.
+
+The interactive player has been verified on the physical F20 with FLAC from the
+microSD card. Previous/next, Back and repeated volume changes work during
+playback. A blocking LCD update originally reproduced missed descriptor events
+and a buffer overrun; deterministic tests retain that failure. The current
+direct-mode fallback prioritizes audio service and limits each display dispatch
+to 32 pixels. Repeated volume changes completed without an error or audible
+interruption. Internal LCD DMA remains the planned production display path.
+
 ## Development
 
 Install [mise](https://mise.jdx.dev), then install the pinned Zig toolchain and
@@ -78,21 +96,21 @@ mise run check
 ```
 
 Useful individual tasks are `mise run format`, `mise run lint`,
-`mise run build`, `mise run test`, `mise run fuzz` and `mise run bench`. The lint task checks
-canonical Zig formatting and runs Zig's AST validation. The complete check
-then builds both firmware images and runs the host-side tests. The separate
-fuzz task runs at least 100,000 generated cases against the SPL image builder,
-WAV parser and FLAC metadata/frame decoder.
+`mise run build`, `mise run test`, `mise run fuzz` and `mise run bench`. The
+lint task checks canonical Zig formatting and runs Zig's AST validation. The
+complete check then builds both firmware images and runs the host-side tests.
+The separate fuzz task runs at least 100,000 generated cases against the SPL
+image builder, WAV parser and FLAC metadata/frame decoder.
 
 `mise run bench` measures FLAC decoding, PCM packing and LPC reconstruction on
-the host. `mise run bench-f20` runs the corresponding RAM-only benchmarks on a
-connected F20 in the mask-ROM USB loop. Device results include the minimum,
-median, p95 and maximum time as a fraction of a 16,384-frame 192 kHz playback
-interval. The performance target is at most 70% for the maximum refill, with
-75% as the enforced release ceiling. The default device suite is read-only and
-returns to the ROM USB loop after every case. Cached-output and sustained-SD
-probes are opt-in because they test cache coherency and experimental storage
-paths rather than release behavior.
+the host. `mise run bench-f20` runs the corresponding benchmarks and the
+physical SD read-ahead path on a connected F20 in the mask-ROM USB loop. Device
+results include the minimum, median, p95 and maximum time as a fraction of a
+16,384-frame 192 kHz playback interval. The performance target is at most 70%
+for the maximum refill, with 75% as the enforced release ceiling. The default
+device suite is read-only and returns to the ROM USB loop after every case.
+Cached-output and synchronous sustained-SD probes are opt-in because they test
+cache coherency and the superseded blocking storage path.
 
 After one successful suite, the F20 remains in the ROM USB loop with DRAM
 initialized. Set `GAIN_SKIP_SPL=1` for later benchmark invocations in that same
