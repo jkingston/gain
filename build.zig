@@ -59,7 +59,20 @@ pub fn build(b: *std.Build) void {
         .target = b.graph.host,
         .optimize = .Debug,
     }) });
+    const playback_module = b.createModule(.{
+        .root_source_file = b.path("src/playback.zig"),
+        .target = b.graph.host,
+        .optimize = .Debug,
+    });
+    const playback_sim_module = b.createModule(.{
+        .root_source_file = b.path("tests/playback_sim.zig"),
+        .target = b.graph.host,
+        .optimize = .Debug,
+    });
+    playback_sim_module.addImport("playback", playback_module);
+    const playback_sim_tests = b.addTest(.{ .root_module = playback_sim_module });
     const test_step = b.step("test", "Run host-side tests");
     test_step.dependOn(&b.addRunArtifact(packer_tests).step);
     test_step.dependOn(&b.addRunArtifact(hardware_tests).step);
+    test_step.dependOn(&b.addRunArtifact(playback_sim_tests).step);
 }
