@@ -1,98 +1,9 @@
 const x1000 = @import("x1000.zig");
 const board = @import("f20_v27.zig");
+const i2c = @import("i2c.zig");
 
 const Timer = x1000.Timer;
-const Pin = x1000.Gpio.Pin;
 const Watchdog = x1000.Watchdog;
-
-const I2c = struct {
-    scl: Pin,
-    sda: Pin,
-
-    fn low(_: I2c, pin: Pin) void {
-        pin.output(false);
-    }
-
-    fn release(_: I2c, pin: Pin) void {
-        pin.input();
-    }
-
-    fn clock(self: I2c, high: bool) void {
-        if (high) self.release(self.scl) else self.low(self.scl);
-        Timer.delayMicroseconds(4);
-    }
-
-    fn dataLine(self: I2c, high: bool) void {
-        if (high) self.release(self.sda) else self.low(self.sda);
-        Timer.delayMicroseconds(4);
-    }
-
-    fn start(self: I2c) void {
-        self.dataLine(true);
-        self.clock(true);
-        self.dataLine(false);
-        self.clock(false);
-    }
-
-    fn stop(self: I2c) void {
-        self.dataLine(false);
-        self.clock(true);
-        self.dataLine(true);
-    }
-
-    fn writeByte(self: I2c, value: u8) bool {
-        var mask: u8 = 0x80;
-        while (mask != 0) : (mask >>= 1) {
-            self.dataLine(value & mask != 0);
-            self.clock(true);
-            self.clock(false);
-        }
-        self.dataLine(true);
-        self.clock(true);
-        const acknowledged = !self.sda.get();
-        self.clock(false);
-        return acknowledged;
-    }
-
-    fn readByte(self: I2c) u8 {
-        var value: u8 = 0;
-        self.dataLine(true);
-        var bit: u4 = 0;
-        while (bit < 8) : (bit += 1) {
-            self.clock(true);
-            value = (value << 1) | @intFromBool(self.sda.get());
-            self.clock(false);
-        }
-        self.dataLine(true);
-        self.clock(true);
-        self.clock(false); // NACK
-        return value;
-    }
-
-    fn readRegister(self: I2c, device: u7, index: board.pmic.Register, value: *u8) bool {
-        self.start();
-        if (!self.writeByte(@as(u8, device) << 1) or !self.writeByte(@backingInt(index))) {
-            self.stop();
-            return false;
-        }
-        self.start();
-        if (!self.writeByte((@as(u8, device) << 1) | 1)) {
-            self.stop();
-            return false;
-        }
-        value.* = self.readByte();
-        self.stop();
-        return true;
-    }
-
-    fn writeRegister(self: I2c, device: u7, index: board.pmic.Register, value: u8) bool {
-        self.start();
-        const ok = self.writeByte(@as(u8, device) << 1) and
-            self.writeByte(@backingInt(index)) and self.writeByte(value);
-        self.stop();
-        return ok;
-    }
-};
 
 const Display = struct {
     const width = board.display.width;
@@ -383,13 +294,22 @@ fn showShutdown() bool {
     return Display.present();
 }
 
-fn powerOff(pmic: I2c) noreturn {
+fn readPmic(pmic: i2c.Bus, register: board.pmic.Register, value: *u8) bool {
+    value.* = pmic.readRegister(board.pmic.address, @backingInt(register)) catch return false;
+    return true;
+}
+
+fn writePmic(pmic: i2c.Bus, register: board.pmic.Register, value: u8) bool {
+    pmic.writeRegister(board.pmic.address, @backingInt(register), value) catch return false;
+    return true;
+}
+
+fn powerOff(pmic: i2c.Bus) noreturn {
     Watchdog.kick();
     _ = showShutdown();
     var control: u8 = 0;
-    if (!pmic.readRegister(board.pmic.address, .power_control, &control) or
-        !pmic.writeRegister(board.pmic.address, .power_control, control | board.pmic.shutdown))
-    {
+    if (!readPmic(pmic, .power_control, &control)) showPanic(panicCode("PMIC"), 0, 0);
+    if (!writePmic(pmic, .power_control, control | board.pmic.shutdown)) {
         showPanic(panicCode("PMIC"), 0, 0);
     }
     const start = Timer.now();
@@ -407,18 +327,18 @@ export fn gain_main() callconv(.c) noreturn {
     board.wheel.phase_a.input();
     board.wheel.phase_b.input();
 
-    var pmic = I2c{ .scl = board.pmic.primary.scl, .sda = board.pmic.primary.sda };
+    var pmic = i2c.Bus.init(board.pmic.primary.scl, board.pmic.primary.sda);
     var status: u8 = 0;
-    var pmic_ok = pmic.readRegister(board.pmic.address, .status, &status);
+    var pmic_ok = readPmic(pmic, .status, &status);
     if (!pmic_ok) {
-        pmic = .{ .scl = board.pmic.alternate.scl, .sda = board.pmic.alternate.sda };
-        pmic_ok = pmic.readRegister(board.pmic.address, .status, &status);
+        pmic = i2c.Bus.init(board.pmic.alternate.scl, board.pmic.alternate.sda);
+        pmic_ok = readPmic(pmic, .status, &status);
     }
     var battery_high: u8 = 0;
     var battery_low: u8 = 0;
     if (pmic_ok) {
-        _ = pmic.readRegister(board.pmic.address, .battery_high, &battery_high);
-        _ = pmic.readRegister(board.pmic.address, .battery_low, &battery_low);
+        _ = readPmic(pmic, .battery_high, &battery_high);
+        _ = readPmic(pmic, .battery_low, &battery_low);
     }
     const battery_mv = ((@as(u32, battery_high) << 4) | (battery_low & 0x0f)) * 11 / 10;
 

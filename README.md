@@ -32,10 +32,15 @@ current RAM-only build provides:
 - a 320 x 240 RGB565 display driver;
 - all buttons and both wheel directions;
 - AXP192 status, battery voltage and power-off;
+- native read-only SD initialization at up to 50 MHz;
+- allocation-free FAT32 and RIFF/WAVE parsing;
+- ES9018K2M setup and linked-PDMA PCM playback;
 - a watchdog-backed panic screen.
 
-This milestone does not access NAND or microSD. Audio and storage are not yet
-implemented.
+The storage and playback path has been verified from RAM on the physical F20:
+120 50 ms chunks streamed from microSD with 120 descriptor handoffs, no audio
+underruns and a 32-frame FIFO low-water mark. It has no NAND write path, and
+the SD API is read-only.
 
 ## Development
 
@@ -51,7 +56,8 @@ Useful individual tasks are `mise run format`, `mise run lint`,
 `mise run build`, `mise run test` and `mise run fuzz`. The lint task checks
 canonical Zig formatting and runs Zig's AST validation. The complete check
 then builds both firmware images and runs the host-side tests. The separate
-fuzz task runs 100,000 generated cases against the SPL image builder.
+fuzz task runs 100,000 generated cases against the SPL image builder and WAV
+parser.
 
 The build places these images in `zig-out/bin`:
 
@@ -69,6 +75,12 @@ The source keeps SoC and board knowledge separate without a runtime HAL:
 |---|---|
 | `src/x1000.zig` | Typed X1000 MMIO registers, fields and peripheral primitives |
 | `src/f20_v27.zig` | F20 V2.7 wiring, panel data and verified LPDDR profile |
+| `src/f20.zig` | Compile-time F20 device facade used by product code |
+| `src/sd.zig` | Native X1000 read-only SD controller |
+| `src/fat32.zig` | Portable allocation-free FAT32 reader |
+| `src/wav.zig` | Portable bounded RIFF/WAVE parser |
+| `src/audio.zig` | Native AIC, ES9018K2M and linked-PDMA output |
+| `src/playback.zig` | Portable buffer lifecycle and descriptor state machine |
 | `src/spl.zig` | Ordered clock and DRAM initialization flow |
 | `src/main.zig` | Device behavior and diagnostics |
 
@@ -80,6 +92,19 @@ as named, board-specific profiles.
 The SPL has a 10 KiB code limit imposed by both the linker and image packer.
 Stage two has a 240 KiB link region ending at the framebuffer boundary. A
 budget overflow therefore fails the build.
+
+## Simulation
+
+Simulation targets portable policy and feeds the same modules used on device:
+
+| Test | Boundary |
+|---|---|
+| `tests/playback_sim.zig` | DMA/FIFO timing, refill interleavings, descriptor wraps and frame order through `src/playback.zig` |
+| `tests/storage_sim.zig` | MBR, fragmented FAT32 files and WAV chunks through `src/fat32.zig` and `src/wav.zig` |
+| Inline source tests | Register encodings, clock ratios, descriptors and other pure hardware facts |
+
+The tests do not emulate the X1000. MMIO sequencing is checked by compiling
+the concrete F20 specializations and by RAM-only tests on the physical device.
 
 ## RAM boot
 

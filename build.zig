@@ -64,6 +64,21 @@ pub fn build(b: *std.Build) void {
         .target = b.graph.host,
         .optimize = .Debug,
     }) });
+    const audio_tests = b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("src/audio.zig"),
+        .target = b.graph.host,
+        .optimize = .Debug,
+    }) });
+    const f20_audio_tests = b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("src/f20_audio.zig"),
+        .target = b.graph.host,
+        .optimize = .Debug,
+    }) });
+    const f20_tests = b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("src/f20.zig"),
+        .target = b.graph.host,
+        .optimize = .Debug,
+    }) });
     const playback_module = b.createModule(.{
         .root_source_file = b.path("src/playback.zig"),
         .target = b.graph.host,
@@ -98,6 +113,9 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(packer_tests).step);
     test_step.dependOn(&b.addRunArtifact(hardware_tests).step);
     test_step.dependOn(&b.addRunArtifact(sd_tests).step);
+    test_step.dependOn(&b.addRunArtifact(audio_tests).step);
+    test_step.dependOn(&b.addRunArtifact(f20_audio_tests).step);
+    test_step.dependOn(&b.addRunArtifact(f20_tests).step);
     test_step.dependOn(&b.addRunArtifact(playback_sim_tests).step);
     test_step.dependOn(&b.addRunArtifact(storage_sim_tests).step);
 }

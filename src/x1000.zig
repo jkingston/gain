@@ -2,6 +2,10 @@ pub inline fn bit(comptime index: u5) u32 {
     return @as(u32, 1) << index;
 }
 
+pub inline fn memoryBarrier() void {
+    if (comptime @import("builtin").cpu.arch == .mipsel) asm volatile ("sync");
+}
+
 pub fn Register32(comptime address: usize) type {
     return struct {
         pub const location = address;
@@ -148,8 +152,12 @@ pub const Pdma = struct {
     pub const control = Register32(0xb3421000);
     pub const interrupt_pending = Register32(0xb3421004);
     pub const doorbell = Register32(0xb3421008);
+    pub const descriptor_pending = Register32(0xb3421010);
+    pub const descriptor_interrupt_clear = Register32(0xb3421014);
 
     pub const enabled_with_request_forwarding: u32 = 0xf8000001;
+    pub const channel_0 = bit(0);
+    pub const clear_all_but_channel_0: u32 = 0xffff_fffe;
 
     pub const Request = enum(u6) {
         i2s_transmit = 0x06,
@@ -211,6 +219,12 @@ pub const Pdma = struct {
     pub const status_transfer_complete = bit(3);
     pub const status_halted = bit(2);
     pub const status_enabled = bit(0);
+
+    pub fn descriptorIndexFromStatus(value: u32) ?u7 {
+        const offset: u8 = @truncate(value >> 8);
+        if (offset & 1 != 0) return null;
+        return @intCast(offset / 2);
+    }
 };
 
 pub const Msc0 = struct {

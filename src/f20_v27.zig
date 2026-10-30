@@ -77,6 +77,11 @@ pub const display = struct {
 };
 
 pub const audio = struct {
+    pub const SampleRate = enum(u32) {
+        hz_44_100 = 44_100,
+        hz_48_000 = 48_000,
+    };
+
     pub const i2s_port_b_function_1: u32 = 0x1f;
     pub const dac_i2c = I2cPins{
         .scl = .{ .port = .c, .index = 26 },
@@ -99,11 +104,6 @@ pub const audio = struct {
     };
     pub const master_mode_stop_div_16_384_edges: u8 = 0x00;
     pub const dpll_bandwidth: u8 = 0xda;
-
-    pub const SampleRate = enum(u32) {
-        hz_44_100 = 44_100,
-        hz_48_000 = 48_000,
-    };
 
     pub const source_clock_hz: u32 = 600_000_000;
     pub const master_clock_multiplier: u32 = 256;
