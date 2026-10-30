@@ -50,6 +50,7 @@ pub const Cpm = struct {
     pub const clock_gate = Register32(0xb0000020);
     pub const ddr_clock = Register32(0xb000002c);
     pub const lcd_clock = Register32(0xb0000064);
+    pub const msc0_clock = Register32(0xb0000068);
     pub const i2s_clock = Register32(0xb0000060);
     pub const i2s_clock_latch = Register32(0xb0000070);
     pub const power_switch_0 = Register32(0xb0000090);
@@ -64,6 +65,7 @@ pub const Cpm = struct {
         pdma = 21,
         lcd = 23,
         ost = 20,
+        msc0 = 4,
         ddr = 31,
     };
 
@@ -79,7 +81,17 @@ pub const Cpm = struct {
     pub const ddr_divider_ready = bit(27);
     pub const lcd_clock_busy = bit(27);
     pub const lcd_clock_change_enable = bit(28);
+    pub const msc_clock_busy = bit(28);
+    pub const msc_clock_change_enable = bit(29);
 };
+
+pub fn physicalAddress(address: usize) u32 {
+    return @truncate(address & 0x1fff_ffff);
+}
+
+pub fn isUncachedAddress(address: usize) bool {
+    return address >= 0xa000_0000 and address < 0xc000_0000;
+}
 
 pub const Aic = struct {
     const base = 0xb0020000;
@@ -200,6 +212,56 @@ pub const Pdma = struct {
     pub const status_halted = bit(2);
     pub const status_enabled = bit(0);
 };
+
+pub const Msc0 = struct {
+    const base = 0xb3450000;
+
+    pub const control = Register32(base + 0x00);
+    pub const status = Register32(base + 0x04);
+    pub const clock_rate = Register32(base + 0x08);
+    pub const command_attributes = Register32(base + 0x0c);
+    pub const response_timeout = Register32(base + 0x10);
+    pub const read_timeout = Register32(base + 0x14);
+    pub const block_length = Register32(base + 0x18);
+    pub const block_count = Register32(base + 0x1c);
+    pub const interrupt_mask = Register32(base + 0x24);
+    pub const interrupt_flags = Register32(base + 0x28);
+    pub const command = Register32(base + 0x2c);
+    pub const argument = Register32(base + 0x30);
+    pub const response = Register32(base + 0x34);
+    pub const low_power = Register32(base + 0x40);
+    pub const dma_control = Register32(base + 0x44);
+    pub const dma_descriptor = Register32(base + 0x48);
+    pub const control_2 = Register32(base + 0x58);
+
+    pub const DmaDescriptor = extern struct {
+        next: u32,
+        memory: u32,
+        length: u32,
+        command: u32,
+    };
+
+    pub const reset = bit(3);
+    pub const start_operation = bit(2);
+    pub const resetting = bit(15);
+    pub const response_end = bit(2);
+    pub const program_done = bit(1);
+    pub const dma_read_done = bit(31);
+    pub const error_flags: u32 = 0x1f00;
+    pub const bus_width_4: u32 = 2 << 9;
+    pub const read_trigger_32: u32 = 1 << 14;
+    pub const write_trigger_32: u32 = 1 << 12;
+    pub const initialize = bit(7);
+    pub const response_busy = bit(6);
+    pub const data_enabled = bit(3);
+    pub const automatic_stop = bit(16);
+    pub const card_busy = bit(8);
+    pub const dma_descriptor_end = bit(1);
+};
+
+comptime {
+    if (@sizeOf(Msc0.DmaDescriptor) != 16) @compileError("X1000 MSC DMA descriptors are four words");
+}
 
 comptime {
     if (@sizeOf(Pdma.Descriptor) != 32) @compileError("X1000 PDMA descriptors are eight words");

@@ -134,6 +134,20 @@ pub const audio = struct {
     }
 };
 
+pub const storage = struct {
+    pub const card_power = x1000.Gpio.Pin{ .port = .b, .index = 10 };
+    pub const card_detect = x1000.Gpio.Pin{ .port = .b, .index = 11 };
+    pub const port_a_function_1: u32 = @as(u32, 0x3f) << 20;
+
+    pub const controller_clock_configuration = x1000.bit(31) |
+        x1000.Cpm.msc_clock_change_enable | 5;
+    pub const identification_clock_divider: u32 = 7;
+    pub const default_clock_divider: u32 = 1;
+    pub const high_speed_clock_divider: u32 = 0;
+    pub const default_bus_hz: u32 = 25_000_000;
+    pub const high_speed_bus_hz: u32 = 50_000_000;
+};
+
 pub const ButtonId = enum(u3) {
     play,
     volume_up,

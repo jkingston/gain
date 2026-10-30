@@ -59,6 +59,11 @@ pub fn build(b: *std.Build) void {
         .target = b.graph.host,
         .optimize = .Debug,
     }) });
+    const sd_tests = b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("src/sd.zig"),
+        .target = b.graph.host,
+        .optimize = .Debug,
+    }) });
     const playback_module = b.createModule(.{
         .root_source_file = b.path("src/playback.zig"),
         .target = b.graph.host,
@@ -92,6 +97,7 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run host-side tests");
     test_step.dependOn(&b.addRunArtifact(packer_tests).step);
     test_step.dependOn(&b.addRunArtifact(hardware_tests).step);
+    test_step.dependOn(&b.addRunArtifact(sd_tests).step);
     test_step.dependOn(&b.addRunArtifact(playback_sim_tests).step);
     test_step.dependOn(&b.addRunArtifact(storage_sim_tests).step);
 }
