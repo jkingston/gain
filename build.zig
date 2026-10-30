@@ -71,8 +71,27 @@ pub fn build(b: *std.Build) void {
     });
     playback_sim_module.addImport("playback", playback_module);
     const playback_sim_tests = b.addTest(.{ .root_module = playback_sim_module });
+    const fat32_module = b.createModule(.{
+        .root_source_file = b.path("src/fat32.zig"),
+        .target = b.graph.host,
+        .optimize = .Debug,
+    });
+    const wav_module = b.createModule(.{
+        .root_source_file = b.path("src/wav.zig"),
+        .target = b.graph.host,
+        .optimize = .Debug,
+    });
+    const storage_sim_module = b.createModule(.{
+        .root_source_file = b.path("tests/storage_sim.zig"),
+        .target = b.graph.host,
+        .optimize = .Debug,
+    });
+    storage_sim_module.addImport("fat32", fat32_module);
+    storage_sim_module.addImport("wav", wav_module);
+    const storage_sim_tests = b.addTest(.{ .root_module = storage_sim_module });
     const test_step = b.step("test", "Run host-side tests");
     test_step.dependOn(&b.addRunArtifact(packer_tests).step);
     test_step.dependOn(&b.addRunArtifact(hardware_tests).step);
     test_step.dependOn(&b.addRunArtifact(playback_sim_tests).step);
+    test_step.dependOn(&b.addRunArtifact(storage_sim_tests).step);
 }

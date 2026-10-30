@@ -4,11 +4,11 @@ zig = "0.17.0"
 [tasks.format]
 alias = "fmt"
 description = "Format Zig sources"
-run = "zig fmt --ast-check build.zig src tools"
+run = "zig fmt --ast-check build.zig src tests tools"
 
 [tasks.lint]
 description = "Check formatting and Zig syntax"
-run = "zig fmt --check --ast-check build.zig src tools"
+run = "zig fmt --check --ast-check build.zig src tests tools"
 
 [tasks.build]
 description = "Build the SPL and stage-two firmware"
@@ -19,7 +19,7 @@ description = "Run host-side tests"
 run = "zig build test --summary all"
 
 [tasks.fuzz]
-description = "Fuzz the host-side SPL image builder"
+description = "Fuzz production parsers and the SPL image builder"
 run = "zig build test --fuzz=100K --summary all"
 
 [tasks.check]
