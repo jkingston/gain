@@ -78,11 +78,26 @@ mise run check
 ```
 
 Useful individual tasks are `mise run format`, `mise run lint`,
-`mise run build`, `mise run test` and `mise run fuzz`. The lint task checks
+`mise run build`, `mise run test`, `mise run fuzz` and `mise run bench`. The lint task checks
 canonical Zig formatting and runs Zig's AST validation. The complete check
 then builds both firmware images and runs the host-side tests. The separate
 fuzz task runs at least 100,000 generated cases against the SPL image builder,
 WAV parser and FLAC metadata/frame decoder.
+
+`mise run bench` measures FLAC decoding, PCM packing and LPC reconstruction on
+the host. `mise run bench-f20` runs the corresponding RAM-only benchmarks on a
+connected F20 in the mask-ROM USB loop. Device results include the minimum,
+median, p95 and maximum time as a fraction of a 16,384-frame 192 kHz playback
+interval. The performance target is at most 70% for the maximum refill, with
+75% as the enforced release ceiling. The default device suite is read-only and
+returns to the ROM USB loop after every case. Cached-output and sustained-SD
+probes are opt-in because they test cache coherency and experimental storage
+paths rather than release behavior.
+
+After one successful suite, the F20 remains in the ROM USB loop with DRAM
+initialized. Set `GAIN_SKIP_SPL=1` for later benchmark invocations in that same
+power session so a rebuilt payload can be uploaded without resetting the
+device or re-running DDR initialization.
 
 The build places these images in `zig-out/bin`:
 

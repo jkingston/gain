@@ -3,6 +3,7 @@
     .section .startup, "ax", @progbits
     .global _start
     .extern spl_main
+    .extern _gp
 _start:
     mtc0  $zero, $18
     mtc0  $zero, $19
@@ -34,6 +35,9 @@ _start:
     ori   $v0, $v0, 2
     mtc0  $v0, $16, 7
     nop
+    # Zig may address the declarative DDR profiles through the small-data
+    # region, so initialize the ABI global pointer before entering Zig code.
+    la    $gp, _gp
     j     spl_main
     nop
 

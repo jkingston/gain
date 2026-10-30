@@ -22,6 +22,14 @@ run = "zig build test --summary all"
 description = "Fuzz production parsers and the SPL image builder"
 run = "zig build test --fuzz=100K --summary all"
 
+[tasks.bench]
+description = "Run host-side FLAC performance benchmarks"
+run = "zig build bench --summary all"
+
+[tasks.bench-f20]
+description = "Run RAM-only FLAC benchmarks on a mask-ROM F20"
+run = "tools/run_f20_bench.sh"
+
 [tasks.check]
 description = "Run every required project check"
 run = [

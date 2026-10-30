@@ -5,6 +5,7 @@
 //! CRC checked and decoded without floating point or heap allocation.
 
 const std = @import("std");
+const lpc = @import("flac_lpc.zig");
 
 pub const Error = error{
     Truncated,
@@ -288,7 +289,7 @@ fn decodeSubframe(bits: *BitReader, output: []i32, channel_depth: u6, coverage: 
         var coefficients: [32]i32 = undefined;
         for (coefficients[0..order]) |*coefficient| coefficient.* = try bits.readSigned(precision);
         try decodeResidual(bits, output, order, coverage);
-        try restoreLinear(output, order, coefficients[0..order], @intCast(shift));
+        try lpc.restore(output, order, coefficients[0..order], @intCast(shift));
     } else return error.InvalidSubframe;
 
     if (wasted != 0) {
@@ -351,16 +352,6 @@ fn restoreFixed(output: []i32, order: u6) Error!void {
             else => unreachable,
         };
         try assignSample(sample, @as(i64, sample.*) + prediction);
-    }
-}
-
-fn restoreLinear(output: []i32, order: u6, coefficients: []const i32, shift: u5) Error!void {
-    for (output[order..], order..) |*sample, index| {
-        var prediction: i64 = 0;
-        for (coefficients, 0..) |coefficient, past| {
-            prediction += @as(i64, coefficient) * output[index - past - 1];
-        }
-        try assignSample(sample, @as(i64, sample.*) + (prediction >> shift));
     }
 }
 
@@ -606,7 +597,7 @@ test "restore every fixed predictor order and LPC" {
     try restoreFixed(&order_four, 4);
     try std.testing.expectEqualSlices(i32, &.{ 0, 1, 8, 27, 64, 125 }, &order_four);
     var linear = [_]i32{ 2, 5, 0, 0 };
-    try restoreLinear(&linear, 2, &.{ 2, -1 }, 0);
+    try lpc.restore(&linear, 2, &.{ 2, -1 }, 0);
     try std.testing.expectEqualSlices(i32, &.{ 2, 5, 8, 11 }, &linear);
 }
 
@@ -614,7 +605,7 @@ test "reject predictor and stereo reconstruction overflow" {
     var fixed = [_]i32{ maximum_i32, 1 };
     try std.testing.expectError(error.InvalidSubframe, restoreFixed(&fixed, 1));
     var linear = [_]i32{ maximum_i32, 1 };
-    try std.testing.expectError(error.InvalidSubframe, restoreLinear(&linear, 1, &.{1}, 0));
+    try std.testing.expectError(error.InvalidSubframe, lpc.restore(&linear, 1, &.{1}, 0));
     var left = [_]i32{maximum_i32};
     var right = [_]i32{-1};
     try std.testing.expectError(error.InvalidSubframe, restoreStereo(8, &left, &right));

@@ -6,6 +6,7 @@ SECTIONS {
     .text : { *(.text*) } > TCSM
     .rodata : { *(.rodata*) } > TCSM
     .data : { *(.data*) *(.sdata*) } > TCSM
+    _gp = ALIGN(16) + 0x7ff0;
     .bss (NOLOAD) : { *(.sbss*) *(.bss*) *(COMMON) *(.scommon*) } > TCSM
     /DISCARD/ : { *(.MIPS.abiflags) *(.reginfo*) *(.note.*) *(.eh_frame) *(.rel.dyn) }
 }

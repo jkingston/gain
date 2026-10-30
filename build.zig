@@ -49,6 +49,80 @@ pub fn build(b: *std.Build) void {
     b.getInstallStep().dependOn(&b.addInstallFileWithDir(spl_image, .bin, "gain-spl.bin").step);
     b.getInstallStep().dependOn(&b.addInstallFileWithDir(stage2_raw.getOutput(), .bin, "gain-stage2.bin").step);
 
+    const benchmark_flac_module = b.createModule(.{
+        .root_source_file = b.path("tests/bench_flac.zig"),
+        .target = b.graph.host,
+        .optimize = .ReleaseFast,
+    });
+    const benchmark_f20 = b.createModule(.{
+        .root_source_file = b.path("src/f20.zig"),
+        .target = b.graph.host,
+        .optimize = .ReleaseFast,
+    });
+    benchmark_flac_module.addImport("f20", benchmark_f20);
+    const benchmark_flac = b.addExecutable(.{
+        .name = "bench-flac",
+        .root_module = benchmark_flac_module,
+    });
+    const benchmark_step = b.step("bench", "Run host-side FLAC performance benchmarks");
+    benchmark_step.dependOn(&b.addRunArtifact(benchmark_flac).step);
+
+    const f20_benchmark_module = b.createModule(.{
+        .root_source_file = b.path("tools/bench_f20.zig"),
+        .target = target,
+        .optimize = .ReleaseFast,
+        .strip = true,
+    });
+    f20_benchmark_module.addAssemblyFile(b.path("tools/bench_start.S"));
+    f20_benchmark_module.addImport("f20", b.createModule(.{
+        .root_source_file = b.path("src/f20.zig"),
+        .target = target,
+        .optimize = .ReleaseFast,
+    }));
+    const f20_benchmark = b.addExecutable(.{
+        .name = "gain-f20-bench.elf",
+        .root_module = f20_benchmark_module,
+    });
+    f20_benchmark.entry = .disabled;
+    f20_benchmark.setLinkerScript(b.path("tools/bench_f20.ld"));
+    const f20_benchmark_raw = f20_benchmark.addObjCopy(.{
+        .format = .binary,
+        .basename = "gain-f20-bench.bin",
+    });
+    const f20_benchmark_step = b.step("bench-f20", "Build the RAM-only F20 performance benchmark");
+    f20_benchmark_step.dependOn(&b.addInstallFileWithDir(
+        spl_image,
+        .bin,
+        "gain-spl.bin",
+    ).step);
+    f20_benchmark_step.dependOn(&b.addInstallFileWithDir(
+        f20_benchmark_raw.getOutput(),
+        .bin,
+        "gain-f20-bench.bin",
+    ).step);
+
+    const report_reader_module = b.createModule(.{
+        .root_source_file = b.path("tools/read_f20_bench.zig"),
+        .target = b.graph.host,
+        .optimize = .ReleaseSafe,
+    });
+    const report_reader = b.addExecutable(.{
+        .name = "read-f20-bench",
+        .root_module = report_reader_module,
+    });
+    const report_reader_run = b.addRunArtifact(report_reader);
+    if (b.option([]const u8, "report", "Path to an uploaded F20 benchmark report")) |path| {
+        report_reader_run.addArg(path);
+    }
+    const report_reader_step = b.step("read-f20-bench", "Print one F20 benchmark report");
+    report_reader_step.dependOn(&report_reader_run.step);
+
+    const benchmark_report_tests = b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("tools/f20_bench_report.zig"),
+        .target = b.graph.host,
+        .optimize = .Debug,
+    }) });
+
     const packer_tests = b.addTest(.{ .root_module = b.createModule(.{
         .root_source_file = b.path("tools/mkspl.zig"),
         .target = b.graph.host,
@@ -85,6 +159,11 @@ pub fn build(b: *std.Build) void {
         .optimize = .Debug,
     });
     const flac_unit_tests = b.addTest(.{ .root_module = flac_module });
+    const flac_lpc_tests = b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("src/flac_lpc.zig"),
+        .target = b.graph.host,
+        .optimize = .Debug,
+    }) });
     const flac_tests_module = b.createModule(.{
         .root_source_file = b.path("tests/flac_tests.zig"),
         .target = b.graph.host,
@@ -162,6 +241,8 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(f20_audio_tests).step);
     test_step.dependOn(&b.addRunArtifact(f20_media_tests).step);
     test_step.dependOn(&b.addRunArtifact(flac_unit_tests).step);
+    test_step.dependOn(&b.addRunArtifact(flac_lpc_tests).step);
+    test_step.dependOn(&b.addRunArtifact(benchmark_report_tests).step);
     test_step.dependOn(&b.addRunArtifact(flac_tests).step);
     test_step.dependOn(&b.addRunArtifact(f20_tests).step);
     test_step.dependOn(&b.addRunArtifact(playback_sim_tests).step);
