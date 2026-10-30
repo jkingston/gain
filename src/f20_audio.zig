@@ -7,6 +7,7 @@ pub const Descriptor = x1000.Pdma.Descriptor;
 pub const Buffer = audio.Buffer;
 pub const Config = audio.Config;
 pub const Event = audio.Event;
+pub const SampleFormat = audio.SampleFormat;
 pub const maximum_descriptors = audio.maximum_descriptors;
 pub const maximum_buffers = audio.maximum_buffers;
 

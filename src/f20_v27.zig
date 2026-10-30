@@ -80,6 +80,10 @@ pub const audio = struct {
     pub const SampleRate = enum(u32) {
         hz_44_100 = 44_100,
         hz_48_000 = 48_000,
+        hz_88_200 = 88_200,
+        hz_96_000 = 96_000,
+        hz_176_400 = 176_400,
+        hz_192_000 = 192_000,
     };
 
     pub const i2s_port_b_function_1: u32 = 0x1f;
@@ -97,12 +101,16 @@ pub const audio = struct {
 
     pub const dac_address: u7 = 0x48;
     pub const DacRegister = enum(u8) {
+        input_configuration = 1,
         master_mode_control = 10,
         dpll_settings = 12,
         left_volume = 15,
         right_volume = 16,
     };
-    pub const master_mode_stop_div_16_384_edges: u8 = 0x00;
+    pub const dac_input_16_bit_i2s: u8 = 0x00;
+    pub const dac_input_24_bit_i2s: u8 = 0x40;
+    pub const dac_input_32_bit_i2s: u8 = 0x80;
+    pub const master_mode_stop_divider_fast_lock: u8 = 0x0f;
     pub const dpll_bandwidth: u8 = 0xda;
 
     pub const source_clock_hz: u32 = 600_000_000;
@@ -114,8 +122,12 @@ pub const audio = struct {
 
     pub fn clockRatio(rate: SampleRate) ClockRatio {
         return switch (rate) {
-            .hz_48_000 => .{ .numerator = 64, .denominator = 3_125 },
             .hz_44_100 => .{ .numerator = 41, .denominator = 2_179 },
+            .hz_48_000 => .{ .numerator = 64, .denominator = 3_125 },
+            .hz_88_200 => .{ .numerator = 82, .denominator = 2_179 },
+            .hz_96_000 => .{ .numerator = 128, .denominator = 3_125 },
+            .hz_176_400 => .{ .numerator = 164, .denominator = 2_179 },
+            .hz_192_000 => .{ .numerator = 256, .denominator = 3_125 },
         };
     }
 
@@ -125,12 +137,16 @@ pub const audio = struct {
             ratio.numerator << 13 | ratio.denominator;
     }
 
-    pub fn clockErrorPpm(rate: SampleRate) u32 {
+    pub fn clockErrorPpb(rate: SampleRate) u32 {
         const ratio = clockRatio(rate);
         const expected = @as(u64, @backingInt(rate)) * master_clock_multiplier * ratio.denominator;
         const generated = @as(u64, source_clock_hz) * ratio.numerator;
         const difference = if (generated > expected) generated - expected else expected - generated;
-        return @intCast(difference * 1_000_000 / expected);
+        return @intCast(difference * 1_000_000_000 / expected);
+    }
+
+    pub fn clockErrorPpm(rate: SampleRate) u32 {
+        return clockErrorPpb(rate) / 1_000;
     }
 };
 
@@ -274,10 +290,19 @@ pub const ddr = struct {
 
 test "audio clock profiles stay within two ppm" {
     const testing = @import("std").testing;
-    try testing.expectEqual(@as(u32, 0xe0080c35), audio.clockWord(.hz_48_000));
-    try testing.expectEqual(@as(u32, 0xe0052883), audio.clockWord(.hz_44_100));
-    try testing.expectEqual(@as(u32, 0), audio.clockErrorPpm(.hz_48_000));
-    try testing.expect(audio.clockErrorPpm(.hz_44_100) <= 2);
+    const expected = [_]struct { rate: audio.SampleRate, word: u32, error_ppb: u32 }{
+        .{ .rate = .hz_44_100, .word = 0xe0052883, .error_ppb = 1_560 },
+        .{ .rate = .hz_48_000, .word = 0xe0080c35, .error_ppb = 0 },
+        .{ .rate = .hz_88_200, .word = 0xe00a4883, .error_ppb = 1_560 },
+        .{ .rate = .hz_96_000, .word = 0xe0100c35, .error_ppb = 0 },
+        .{ .rate = .hz_176_400, .word = 0xe0148883, .error_ppb = 1_560 },
+        .{ .rate = .hz_192_000, .word = 0xe0200c35, .error_ppb = 0 },
+    };
+    for (expected) |profile| {
+        try testing.expectEqual(profile.word, audio.clockWord(profile.rate));
+        try testing.expectEqual(profile.error_ppb, audio.clockErrorPpb(profile.rate));
+        try testing.expect(audio.clockErrorPpb(profile.rate) <= 2_000);
+    }
 }
 
 test "audio DMA descriptor matches the X1000 playback contract" {

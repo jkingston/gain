@@ -4,6 +4,39 @@ const i2c = @import("i2c.zig");
 pub const maximum_descriptors = 128;
 pub const maximum_buffers = 4;
 
+pub const SampleFormat = enum {
+    /// Two little-endian signed 16-bit channels packed into each DMA word.
+    pcm_s16_packed,
+    /// One signed 24-bit channel in the low bits of each 32-bit DMA word.
+    pcm_s24,
+    /// Signed 24-bit samples carried in 32-bit I2S channel slots.
+    pcm_s24_in_32_bit_slot,
+
+    pub fn bytesPerFrame(self: SampleFormat) u8 {
+        return switch (self) {
+            .pcm_s16_packed => 4,
+            .pcm_s24, .pcm_s24_in_32_bit_slot => 8,
+        };
+    }
+
+    fn aicControl(self: SampleFormat) u32 {
+        return switch (self) {
+            .pcm_s16_packed => x1000.Aic.packed_16_bit | x1000.Aic.stereo |
+                x1000.Aic.output_16_bit | x1000.Aic.input_16_bit,
+            .pcm_s24, .pcm_s24_in_32_bit_slot => x1000.Aic.stereo |
+                x1000.Aic.output_24_bit | x1000.Aic.input_24_bit,
+        };
+    }
+
+    fn dacInputConfiguration(self: SampleFormat, comptime Board: type) u8 {
+        return switch (self) {
+            .pcm_s16_packed => Board.dac_input_16_bit_i2s,
+            .pcm_s24 => Board.dac_input_24_bit_i2s,
+            .pcm_s24_in_32_bit_slot => Board.dac_input_32_bit_i2s,
+        };
+    }
+};
+
 pub const Error = error{
     InvalidConfig,
     CachedDmaMemory,
@@ -22,12 +55,14 @@ pub const Config = struct {
     descriptor_count: u8,
     buffer_count: u8,
     chunk_bytes: u24,
+    sample_format: SampleFormat = .pcm_s16_packed,
 
     pub fn valid(self: Config) bool {
         return self.descriptor_count >= self.buffer_count and
             self.descriptor_count <= maximum_descriptors and
             self.buffer_count >= 2 and self.buffer_count <= maximum_buffers and
-            self.chunk_bytes != 0 and self.chunk_bytes & 3 == 0;
+            self.chunk_bytes != 0 and
+            self.chunk_bytes % self.sample_format.bytesPerFrame() == 0;
     }
 };
 
@@ -112,10 +147,7 @@ pub fn Engine(comptime Board: type) type {
             self.buildDescriptorRing();
             x1000.memoryBarrier();
 
-            x1000.Aic.common_control.write(
-                x1000.Aic.packed_16_bit | x1000.Aic.stereo |
-                    x1000.Aic.output_16_bit | x1000.Aic.input_16_bit,
-            );
+            x1000.Aic.common_control.write(self.config.sample_format.aicControl());
             x1000.Aic.clearTransmitUnderrun();
             Board.output_mute.set(false);
             x1000.Cpm.ungate(.pdma);
@@ -219,8 +251,13 @@ pub fn Engine(comptime Board: type) type {
                 return error.DacCommunication;
             bus.writeRegister(
                 Board.dac_address,
+                @backingInt(Board.DacRegister.input_configuration),
+                self.config.sample_format.dacInputConfiguration(Board),
+            ) catch return error.DacCommunication;
+            bus.writeRegister(
+                Board.dac_address,
                 @backingInt(Board.DacRegister.master_mode_control),
-                Board.master_mode_stop_div_16_384_edges,
+                Board.master_mode_stop_divider_fast_lock,
             ) catch return error.DacCommunication;
             bus.writeRegister(
                 Board.dac_address,
@@ -231,11 +268,18 @@ pub fn Engine(comptime Board: type) type {
                 return error.DacCommunication;
             bus.writeRegister(Board.dac_address, @backingInt(Board.DacRegister.right_volume), attenuation) catch
                 return error.DacCommunication;
+            const input = bus.readRegister(
+                Board.dac_address,
+                @backingInt(Board.DacRegister.input_configuration),
+            ) catch return error.DacCommunication;
             const left = bus.readRegister(Board.dac_address, @backingInt(Board.DacRegister.left_volume)) catch
                 return error.DacCommunication;
             const right = bus.readRegister(Board.dac_address, @backingInt(Board.DacRegister.right_volume)) catch
                 return error.DacCommunication;
-            if (left != attenuation or right != attenuation) return error.DacVerification;
+            const expected_input = self.config.sample_format.dacInputConfiguration(Board);
+            if (input != expected_input or left != attenuation or right != attenuation) {
+                return error.DacVerification;
+            }
         }
 
         fn buildDescriptorRing(self: *Self) void {
@@ -286,4 +330,38 @@ test "descriptor status is converted from 16-byte offsets" {
     const testing = @import("std").testing;
     try testing.expectEqual(@as(?u7, 119), x1000.Pdma.descriptorIndexFromStatus(238 << 8));
     try testing.expectEqual(@as(?u7, null), x1000.Pdma.descriptorIndexFromStatus(239 << 8));
+}
+
+test "sample formats encode the verified stereo DMA layouts" {
+    const testing = @import("std").testing;
+    try testing.expectEqual(@as(u8, 4), SampleFormat.pcm_s16_packed.bytesPerFrame());
+    try testing.expectEqual(@as(u8, 8), SampleFormat.pcm_s24.bytesPerFrame());
+    try testing.expectEqual(@as(u8, 8), SampleFormat.pcm_s24_in_32_bit_slot.bytesPerFrame());
+    try testing.expectEqual(
+        x1000.Aic.packed_16_bit | x1000.Aic.stereo |
+            x1000.Aic.output_16_bit | x1000.Aic.input_16_bit,
+        SampleFormat.pcm_s16_packed.aicControl(),
+    );
+    try testing.expectEqual(
+        x1000.Aic.stereo | x1000.Aic.output_24_bit | x1000.Aic.input_24_bit,
+        SampleFormat.pcm_s24.aicControl(),
+    );
+}
+
+test "audio chunks contain complete sample frames" {
+    const testing = @import("std").testing;
+    const base = Config{ .descriptor_count = 4, .buffer_count = 2, .chunk_bytes = 100 };
+    try testing.expect(base.valid());
+    try testing.expect(!(Config{
+        .descriptor_count = 4,
+        .buffer_count = 2,
+        .chunk_bytes = 100,
+        .sample_format = .pcm_s24,
+    }).valid());
+    try testing.expect((Config{
+        .descriptor_count = 4,
+        .buffer_count = 2,
+        .chunk_bytes = 104,
+        .sample_format = .pcm_s24,
+    }).valid());
 }

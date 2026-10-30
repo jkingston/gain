@@ -42,6 +42,12 @@ The storage and playback path has been verified from RAM on the physical F20:
 underruns and a 32-frame FIFO low-water mark. It has no NAND write path, and
 the SD API is read-only.
 
+The PCM output path has also been verified on the physical F20 at 44.1, 48,
+88.2, 96, 176.4 and 192 kHz. Packed 16-bit, native 24-bit and 24-bit samples
+in 32-bit I2S slots all held DAC lock for three linked DMA cycles with no
+underruns and a 32-frame FIFO low-water mark. The 48 kHz clock family is exact;
+the 44.1 kHz family is 1.56 ppm low.
+
 ## Development
 
 Install [mise](https://mise.jdx.dev), then install the pinned Zig toolchain and
