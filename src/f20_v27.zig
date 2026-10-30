@@ -275,3 +275,18 @@ test "audio DMA descriptor matches the X1000 playback contract" {
     try testing.expectEqual(@as(u32, 6), descriptor.request);
     try testing.expectEqual(@as(u32, 960_000), descriptor.count);
 }
+
+test "audio DMA descriptor links within its four KiB page" {
+    const testing = @import("std").testing;
+    const descriptor = x1000.Pdma.Descriptor.audioPlayback(0x00080000, 9_600).linkedTo(119);
+    try testing.expectEqual(@as(u32, 0x00890703), descriptor.command);
+    try testing.expectEqual(@as(u32, 0xee002580), descriptor.count);
+}
+
+test "AIC transmit FIFO level preserves the full state" {
+    const testing = @import("std").testing;
+    try testing.expectEqual(@as(u7, 0), x1000.Aic.transmitLevelFromStatus(0x0000));
+    try testing.expectEqual(@as(u7, 63), x1000.Aic.transmitLevelFromStatus(0x3f00));
+    try testing.expectEqual(@as(u7, 64), x1000.Aic.transmitLevelFromStatus(0x4000));
+    try testing.expectEqual(@as(u7, 64), x1000.Aic.transmitLevelFromStatus(0x7f00));
+}

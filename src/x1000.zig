@@ -113,10 +113,18 @@ pub const Aic = struct {
     pub const stop_bit_clock = bit(12);
     pub const master_clock_enable = bit(4);
     pub const transmit_underrun = bit(5);
+    // The X1000 manual marks bit 14 as reserved. On F20 hardware it is the
+    // transmit FIFO full flag; bits 13:8 continue to encode levels 0 through 63.
+    pub const transmit_fifo_full = bit(14);
     pub const transmit_level_mask: u32 = 0x3f << 8;
 
-    pub inline fn transmitLevel() u6 {
-        return @truncate((status.read() & transmit_level_mask) >> 8);
+    pub fn transmitLevelFromStatus(value: u32) u7 {
+        if (value & transmit_fifo_full != 0) return 64;
+        return @truncate((value & transmit_level_mask) >> 8);
+    }
+
+    pub inline fn transmitLevel() u7 {
+        return transmitLevelFromStatus(status.read());
     }
 
     pub inline fn clearTransmitUnderrun() void {
@@ -156,6 +164,13 @@ pub const Pdma = struct {
                 .request = @backingInt(Request.i2s_transmit),
             };
         }
+
+        pub fn linkedTo(self: Descriptor, descriptor_index: u7) Descriptor {
+            var linked = self;
+            linked.command |= command_link;
+            linked.count |= @as(u32, descriptor_index) << 25;
+            return linked;
+        }
     };
 
     pub fn Channel(comptime index: usize) type {
@@ -176,6 +191,7 @@ pub const Pdma = struct {
     pub const command_request_interval_9 = @as(u32, 9) << 16;
     pub const command_transfer_size_auto = @as(u32, 7) << 8;
     pub const command_interrupt = bit(1);
+    pub const command_link = bit(0);
 
     pub const status_descriptor_8_words = bit(30);
     pub const status_descriptorless = bit(31);
