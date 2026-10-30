@@ -165,7 +165,8 @@ pub fn Volume(comptime Device: type) type {
                     const sector_lba = try self.volume.clusterLba(self.cluster) + sector_in_cluster;
                     const wanted = @min(output.len - written, @as(usize, self.remaining));
 
-                    if (offset_in_sector == 0 and wanted >= sector_bytes) {
+                    const destination = @intFromPtr(output.ptr) + written;
+                    if (offset_in_sector == 0 and wanted >= sector_bytes and destination & 3 == 0) {
                         const sectors_left = self.volume.sectors_per_cluster - @as(u8, @intCast(sector_in_cluster));
                         const whole_sectors = @min(wanted / sector_bytes, @as(usize, sectors_left));
                         const byte_count = whole_sectors * sector_bytes;

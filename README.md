@@ -34,6 +34,7 @@ current RAM-only build provides:
 - AXP192 status, battery voltage and power-off;
 - native read-only SD initialization at up to 50 MHz;
 - allocation-free FAT32 and RIFF/WAVE parsing;
+- allocation-free native FLAC decoding and streaming;
 - ES9018K2M setup and linked-PDMA PCM playback;
 - a watchdog-backed panic screen.
 
@@ -56,6 +57,16 @@ and descriptor handoffs across two descriptor-ring wraps at a 50 MHz SD clock,
 and restarted cleanly after shutdown. Exact sample conversion and ordering are
 also checked by the deterministic simulation.
 
+The native FLAC decoder covers constant, verbatim, fixed and LPC subframes,
+Rice and Rice2 residuals, wasted bits, CRC validation and every stereo
+decorrelation mode. The complete production path streamed a two-second
+24-bit/192 kHz FLAC from FAT32 on the physical microSD through an uncached SD
+bounce buffer, cached native decoding, PCM packing and linked DMA. All 24
+16,384-frame blocks completed with no underruns and a 32-frame FIFO low-water
+mark. The slowest complete fill used 87.1% of its interval before the next DMA
+event. A captured ReleaseSmall trace that missed a descriptor is retained as a
+deterministic regression; stage two is compiled with ReleaseFast.
+
 ## Development
 
 Install [mise](https://mise.jdx.dev), then install the pinned Zig toolchain and
@@ -70,8 +81,8 @@ Useful individual tasks are `mise run format`, `mise run lint`,
 `mise run build`, `mise run test` and `mise run fuzz`. The lint task checks
 canonical Zig formatting and runs Zig's AST validation. The complete check
 then builds both firmware images and runs the host-side tests. The separate
-fuzz task runs 100,000 generated cases against the SPL image builder and WAV
-parser.
+fuzz task runs at least 100,000 generated cases against the SPL image builder,
+WAV parser and FLAC metadata/frame decoder.
 
 The build places these images in `zig-out/bin`:
 
@@ -94,9 +105,11 @@ The source keeps SoC and board knowledge separate without a runtime HAL:
 | `src/fat32.zig` | Portable allocation-free FAT32 reader |
 | `src/wav.zig` | Portable bounded RIFF/WAVE parser |
 | `src/pcm.zig` | Portable allocation-free WAV PCM to DMA frame conversion |
+| `src/flac.zig` | Portable allocation-free native FLAC frame decoder |
+| `src/flac_pcm.zig` | Portable FLAC stream to fixed DMA chunk conversion |
 | `src/audio.zig` | Native AIC, ES9018K2M and linked-PDMA output |
 | `src/playback.zig` | Portable buffer lifecycle and descriptor state machine |
-| `src/f20_media.zig` | Allocation-free F20 WAV streaming and audio lifecycle |
+| `src/f20_media.zig` | Allocation-free F20 WAV/FLAC streaming and audio lifecycle |
 | `src/spl.zig` | Ordered clock and DRAM initialization flow |
 | `src/main.zig` | Device behavior and diagnostics |
 
@@ -118,6 +131,8 @@ Simulation targets portable policy and feeds the same modules used on device:
 | `tests/playback_sim.zig` | DMA/FIFO timing, refill interleavings, descriptor wraps and frame order through `src/playback.zig` |
 | `tests/storage_sim.zig` | MBR, fragmented FAT32 files and WAV chunks through `src/fat32.zig` and `src/wav.zig` |
 | `tests/media_pipeline_sim.zig` | Fragmented WAV input, irregular reads, exact PCM frames, partial EOF and buffer recycling through the complete portable media path |
+| `tests/flac_sim.zig` | 24-bit/192 kHz decoding, exact F20 buffer bounds, measured decode deadlines and missed-event rejection |
+| `tests/flac_pipeline_sim.zig` | FAT32 FLAC input, SD DMA alignment, bounce buffering, exact PCM chunks and captured device timing |
 | Inline source tests | Register encodings, clock ratios, descriptors and other pure hardware facts |
 
 The tests do not emulate the X1000. MMIO sequencing is checked by compiling

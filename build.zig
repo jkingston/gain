@@ -7,12 +7,12 @@ pub fn build(b: *std.Build) void {
         .abi = .none,
         .cpu_model = .{ .explicit = &std.Target.mips.cpu.mips32r2 },
     });
-    const optimize: std.builtin.OptimizeMode = .ReleaseSmall;
+    const spl_optimize: std.builtin.OptimizeMode = .ReleaseSmall;
 
     const spl_module = b.createModule(.{
         .root_source_file = b.path("src/spl.zig"),
         .target = target,
-        .optimize = optimize,
+        .optimize = spl_optimize,
         .strip = true,
     });
     spl_module.addAssemblyFile(b.path("src/spl_start.S"));
@@ -34,7 +34,7 @@ pub fn build(b: *std.Build) void {
     const stage2_module = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
         .target = target,
-        .optimize = optimize,
+        .optimize = .ReleaseFast,
         .strip = true,
     });
     stage2_module.addAssemblyFile(b.path("src/start.S"));
@@ -79,6 +79,19 @@ pub fn build(b: *std.Build) void {
         .target = b.graph.host,
         .optimize = .Debug,
     }) });
+    const flac_module = b.createModule(.{
+        .root_source_file = b.path("src/flac.zig"),
+        .target = b.graph.host,
+        .optimize = .Debug,
+    });
+    const flac_unit_tests = b.addTest(.{ .root_module = flac_module });
+    const flac_tests_module = b.createModule(.{
+        .root_source_file = b.path("tests/flac_tests.zig"),
+        .target = b.graph.host,
+        .optimize = .Debug,
+    });
+    flac_tests_module.addImport("flac", flac_module);
+    const flac_tests = b.addTest(.{ .root_module = flac_tests_module });
     const f20_tests = b.addTest(.{ .root_module = b.createModule(.{
         .root_source_file = b.path("src/f20.zig"),
         .target = b.graph.host,
@@ -126,6 +139,21 @@ pub fn build(b: *std.Build) void {
     });
     media_pipeline_sim_module.addImport("f20", f20_module);
     const media_pipeline_sim_tests = b.addTest(.{ .root_module = media_pipeline_sim_module });
+    const flac_sim_module = b.createModule(.{
+        .root_source_file = b.path("tests/flac_sim.zig"),
+        .target = b.graph.host,
+        .optimize = .Debug,
+    });
+    flac_sim_module.addImport("flac", flac_module);
+    flac_sim_module.addImport("playback", playback_module);
+    const flac_sim_tests = b.addTest(.{ .root_module = flac_sim_module });
+    const flac_pipeline_sim_module = b.createModule(.{
+        .root_source_file = b.path("tests/flac_pipeline_sim.zig"),
+        .target = b.graph.host,
+        .optimize = .Debug,
+    });
+    flac_pipeline_sim_module.addImport("f20", f20_module);
+    const flac_pipeline_sim_tests = b.addTest(.{ .root_module = flac_pipeline_sim_module });
     const test_step = b.step("test", "Run host-side tests");
     test_step.dependOn(&b.addRunArtifact(packer_tests).step);
     test_step.dependOn(&b.addRunArtifact(hardware_tests).step);
@@ -133,8 +161,12 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(audio_tests).step);
     test_step.dependOn(&b.addRunArtifact(f20_audio_tests).step);
     test_step.dependOn(&b.addRunArtifact(f20_media_tests).step);
+    test_step.dependOn(&b.addRunArtifact(flac_unit_tests).step);
+    test_step.dependOn(&b.addRunArtifact(flac_tests).step);
     test_step.dependOn(&b.addRunArtifact(f20_tests).step);
     test_step.dependOn(&b.addRunArtifact(playback_sim_tests).step);
     test_step.dependOn(&b.addRunArtifact(storage_sim_tests).step);
     test_step.dependOn(&b.addRunArtifact(media_pipeline_sim_tests).step);
+    test_step.dependOn(&b.addRunArtifact(flac_sim_tests).step);
+    test_step.dependOn(&b.addRunArtifact(flac_pipeline_sim_tests).step);
 }
