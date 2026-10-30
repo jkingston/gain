@@ -107,8 +107,8 @@ pub const audio = struct {
         left_volume = 15,
         right_volume = 16,
     };
-    pub const dac_input_16_bit_i2s: u8 = 0x00;
-    pub const dac_input_24_bit_i2s: u8 = 0x40;
+    // The X1000 keeps BCLK at 64fs, so both 16- and 24-bit samples occupy
+    // 32-bit I2S channel slots at the ES9018K2M input.
     pub const dac_input_32_bit_i2s: u8 = 0x80;
     pub const master_mode_stop_divider_fast_lock: u8 = 0x0f;
     pub const dpll_bandwidth: u8 = 0xda;

@@ -74,6 +74,11 @@ pub fn build(b: *std.Build) void {
         .target = b.graph.host,
         .optimize = .Debug,
     }) });
+    const f20_media_tests = b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("src/f20_media.zig"),
+        .target = b.graph.host,
+        .optimize = .Debug,
+    }) });
     const f20_tests = b.addTest(.{ .root_module = b.createModule(.{
         .root_source_file = b.path("src/f20.zig"),
         .target = b.graph.host,
@@ -109,13 +114,27 @@ pub fn build(b: *std.Build) void {
     storage_sim_module.addImport("fat32", fat32_module);
     storage_sim_module.addImport("wav", wav_module);
     const storage_sim_tests = b.addTest(.{ .root_module = storage_sim_module });
+    const f20_module = b.createModule(.{
+        .root_source_file = b.path("src/f20.zig"),
+        .target = b.graph.host,
+        .optimize = .Debug,
+    });
+    const media_pipeline_sim_module = b.createModule(.{
+        .root_source_file = b.path("tests/media_pipeline_sim.zig"),
+        .target = b.graph.host,
+        .optimize = .Debug,
+    });
+    media_pipeline_sim_module.addImport("f20", f20_module);
+    const media_pipeline_sim_tests = b.addTest(.{ .root_module = media_pipeline_sim_module });
     const test_step = b.step("test", "Run host-side tests");
     test_step.dependOn(&b.addRunArtifact(packer_tests).step);
     test_step.dependOn(&b.addRunArtifact(hardware_tests).step);
     test_step.dependOn(&b.addRunArtifact(sd_tests).step);
     test_step.dependOn(&b.addRunArtifact(audio_tests).step);
     test_step.dependOn(&b.addRunArtifact(f20_audio_tests).step);
+    test_step.dependOn(&b.addRunArtifact(f20_media_tests).step);
     test_step.dependOn(&b.addRunArtifact(f20_tests).step);
     test_step.dependOn(&b.addRunArtifact(playback_sim_tests).step);
     test_step.dependOn(&b.addRunArtifact(storage_sim_tests).step);
+    test_step.dependOn(&b.addRunArtifact(media_pipeline_sim_tests).step);
 }

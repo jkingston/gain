@@ -10,9 +10,30 @@ pub const Config = struct {
             self.buffer_count <= maximum_buffers and
             self.descriptor_count >= self.buffer_count and
             self.descriptor_count <= 128 and
-            self.total_chunks >= self.buffer_count;
+            self.total_chunks >= self.buffer_count and
+            (self.total_chunks <= self.descriptor_count or
+                self.descriptor_count % self.buffer_count == 0);
     }
 };
+
+test "long streams require descriptor and buffer rings to realign at wrap" {
+    const testing = @import("std").testing;
+    try testing.expect((Config{
+        .buffer_count = 3,
+        .descriptor_count = 120,
+        .total_chunks = 240,
+    }).valid());
+    try testing.expect(!(Config{
+        .buffer_count = 3,
+        .descriptor_count = 128,
+        .total_chunks = 240,
+    }).valid());
+    try testing.expect((Config{
+        .buffer_count = 3,
+        .descriptor_count = 5,
+        .total_chunks = 5,
+    }).valid());
+}
 
 pub const SlotState = enum {
     free,

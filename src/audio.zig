@@ -5,17 +5,17 @@ pub const maximum_descriptors = 128;
 pub const maximum_buffers = 4;
 
 pub const SampleFormat = enum {
-    /// Two little-endian signed 16-bit channels packed into each DMA word.
+    /// Two little-endian signed 16-bit channels packed into each DMA word and
+    /// serialized in the F20's fixed 32-bit I2S channel slots.
     pcm_s16_packed,
-    /// One signed 24-bit channel in the low bits of each 32-bit DMA word.
+    /// One signed 24-bit channel in the low bits of each 32-bit DMA word and
+    /// serialized in a 32-bit I2S channel slot.
     pcm_s24,
-    /// Signed 24-bit samples carried in 32-bit I2S channel slots.
-    pcm_s24_in_32_bit_slot,
 
     pub fn bytesPerFrame(self: SampleFormat) u8 {
         return switch (self) {
             .pcm_s16_packed => 4,
-            .pcm_s24, .pcm_s24_in_32_bit_slot => 8,
+            .pcm_s24 => 8,
         };
     }
 
@@ -23,16 +23,8 @@ pub const SampleFormat = enum {
         return switch (self) {
             .pcm_s16_packed => x1000.Aic.packed_16_bit | x1000.Aic.stereo |
                 x1000.Aic.output_16_bit | x1000.Aic.input_16_bit,
-            .pcm_s24, .pcm_s24_in_32_bit_slot => x1000.Aic.stereo |
+            .pcm_s24 => x1000.Aic.stereo |
                 x1000.Aic.output_24_bit | x1000.Aic.input_24_bit,
-        };
-    }
-
-    fn dacInputConfiguration(self: SampleFormat, comptime Board: type) u8 {
-        return switch (self) {
-            .pcm_s16_packed => Board.dac_input_16_bit_i2s,
-            .pcm_s24 => Board.dac_input_24_bit_i2s,
-            .pcm_s24_in_32_bit_slot => Board.dac_input_32_bit_i2s,
         };
     }
 };
@@ -60,6 +52,7 @@ pub const Config = struct {
     pub fn valid(self: Config) bool {
         return self.descriptor_count >= self.buffer_count and
             self.descriptor_count <= maximum_descriptors and
+            self.descriptor_count % self.buffer_count == 0 and
             self.buffer_count >= 2 and self.buffer_count <= maximum_buffers and
             self.chunk_bytes != 0 and
             self.chunk_bytes % self.sample_format.bytesPerFrame() == 0;
@@ -206,6 +199,9 @@ pub fn Engine(comptime Board: type) type {
         }
 
         pub fn stop(self: *Self) void {
+            // `stop` is safe before `start`; a clean boot leaves PDMA gated and
+            // touching its registers in that state stalls the X1000 bus.
+            x1000.Cpm.ungate(.pdma);
             channel.status.write(0);
             x1000.Pdma.doorbell.write(0);
             x1000.Pdma.descriptor_interrupt_clear.write(x1000.Pdma.clear_all_but_channel_0);
@@ -252,7 +248,7 @@ pub fn Engine(comptime Board: type) type {
             bus.writeRegister(
                 Board.dac_address,
                 @backingInt(Board.DacRegister.input_configuration),
-                self.config.sample_format.dacInputConfiguration(Board),
+                Board.dac_input_32_bit_i2s,
             ) catch return error.DacCommunication;
             bus.writeRegister(
                 Board.dac_address,
@@ -276,8 +272,7 @@ pub fn Engine(comptime Board: type) type {
                 return error.DacCommunication;
             const right = bus.readRegister(Board.dac_address, @backingInt(Board.DacRegister.right_volume)) catch
                 return error.DacCommunication;
-            const expected_input = self.config.sample_format.dacInputConfiguration(Board);
-            if (input != expected_input or left != attenuation or right != attenuation) {
+            if (input != Board.dac_input_32_bit_i2s or left != attenuation or right != attenuation) {
                 return error.DacVerification;
             }
         }
@@ -336,7 +331,6 @@ test "sample formats encode the verified stereo DMA layouts" {
     const testing = @import("std").testing;
     try testing.expectEqual(@as(u8, 4), SampleFormat.pcm_s16_packed.bytesPerFrame());
     try testing.expectEqual(@as(u8, 8), SampleFormat.pcm_s24.bytesPerFrame());
-    try testing.expectEqual(@as(u8, 8), SampleFormat.pcm_s24_in_32_bit_slot.bytesPerFrame());
     try testing.expectEqual(
         x1000.Aic.packed_16_bit | x1000.Aic.stereo |
             x1000.Aic.output_16_bit | x1000.Aic.input_16_bit,
@@ -363,5 +357,19 @@ test "audio chunks contain complete sample frames" {
         .buffer_count = 2,
         .chunk_bytes = 104,
         .sample_format = .pcm_s24,
+    }).valid());
+}
+
+test "cyclic descriptor rings remain aligned with reusable buffers" {
+    const testing = @import("std").testing;
+    try testing.expect((Config{
+        .descriptor_count = 120,
+        .buffer_count = 3,
+        .chunk_bytes = 9_600,
+    }).valid());
+    try testing.expect(!(Config{
+        .descriptor_count = 128,
+        .buffer_count = 3,
+        .chunk_bytes = 9_600,
     }).valid());
 }

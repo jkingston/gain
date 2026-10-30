@@ -43,10 +43,18 @@ underruns and a 32-frame FIFO low-water mark. It has no NAND write path, and
 the SD API is read-only.
 
 The PCM output path has also been verified on the physical F20 at 44.1, 48,
-88.2, 96, 176.4 and 192 kHz. Packed 16-bit, native 24-bit and 24-bit samples
-in 32-bit I2S slots all held DAC lock for three linked DMA cycles with no
-underruns and a 32-frame FIFO low-water mark. The 48 kHz clock family is exact;
-the 44.1 kHz family is 1.56 ppm low.
+88.2, 96, 176.4 and 192 kHz. Packed 16-bit and native 24-bit DMA layouts use
+the X1000's fixed 32-bit I2S channel slots. Every rate held DAC lock for three
+linked DMA cycles with no underruns and a 32-frame FIFO low-water mark. The
+48 kHz clock family is exact; the 44.1 kHz family is 1.56 ppm low.
+
+The complete media path has been verified audibly from microSD with both 16-bit
+and packed 24-bit stereo WAV files. Each six-second track streamed 288,000
+frames through FAT32, WAV parsing, PCM packing and linked DMA. The 24-bit test
+preserved distinct left, right and stereo sections, completed 240 buffer loads
+and descriptor handoffs across two descriptor-ring wraps at a 50 MHz SD clock,
+and restarted cleanly after shutdown. Exact sample conversion and ordering are
+also checked by the deterministic simulation.
 
 ## Development
 
@@ -85,8 +93,10 @@ The source keeps SoC and board knowledge separate without a runtime HAL:
 | `src/sd.zig` | Native X1000 read-only SD controller |
 | `src/fat32.zig` | Portable allocation-free FAT32 reader |
 | `src/wav.zig` | Portable bounded RIFF/WAVE parser |
+| `src/pcm.zig` | Portable allocation-free WAV PCM to DMA frame conversion |
 | `src/audio.zig` | Native AIC, ES9018K2M and linked-PDMA output |
 | `src/playback.zig` | Portable buffer lifecycle and descriptor state machine |
+| `src/f20_media.zig` | Allocation-free F20 WAV streaming and audio lifecycle |
 | `src/spl.zig` | Ordered clock and DRAM initialization flow |
 | `src/main.zig` | Device behavior and diagnostics |
 
@@ -107,6 +117,7 @@ Simulation targets portable policy and feeds the same modules used on device:
 |---|---|
 | `tests/playback_sim.zig` | DMA/FIFO timing, refill interleavings, descriptor wraps and frame order through `src/playback.zig` |
 | `tests/storage_sim.zig` | MBR, fragmented FAT32 files and WAV chunks through `src/fat32.zig` and `src/wav.zig` |
+| `tests/media_pipeline_sim.zig` | Fragmented WAV input, irregular reads, exact PCM frames, partial EOF and buffer recycling through the complete portable media path |
 | Inline source tests | Register encodings, clock ratios, descriptors and other pure hardware facts |
 
 The tests do not emulate the X1000. MMIO sequencing is checked by compiling
