@@ -305,6 +305,8 @@ pub fn Volume(comptime Device: type) type {
             if (file.size != 0 and !self.validCluster(file.first_cluster)) return error.BadCluster;
             return .{
                 .volume = self,
+                .size = file.size,
+                .first_cluster = file.first_cluster,
                 .remaining = file.size,
                 .cluster = file.first_cluster,
             };
@@ -313,6 +315,8 @@ pub fn Volume(comptime Device: type) type {
         pub const Reader = struct {
             volume: *Self,
             remaining: u32,
+            size: u32,
+            first_cluster: u32,
             cluster: u32,
             cluster_offset: u32 = 0,
             position: u32 = 0,
@@ -350,6 +354,25 @@ pub fn Volume(comptime Device: type) type {
                     }
                 }
                 return written;
+            }
+
+            /// Seek without reading file contents. Forward seeks retain the
+            /// current FAT traversal; backwards seeks restart at the first cluster.
+            pub fn seekTo(self: *Reader, target: u32) !void {
+                if (target > self.size) return error.InvalidSeek;
+                const cluster_bytes = @as(u32, self.volume.sectors_per_cluster) * sector_bytes;
+                var cluster = if (target >= self.position) self.cluster else self.first_cluster;
+                var base = if (target >= self.position) self.position - self.cluster_offset else 0;
+                // EOF at a cluster boundary need not traverse a nonexistent link.
+                while (@as(u64, base) + cluster_bytes < target or (@as(u64, base) + cluster_bytes == target and target < self.size)) {
+                    cluster = try self.volume.nextCluster(cluster);
+                    base += cluster_bytes;
+                }
+                // Publish the new position only after successful FAT traversal.
+                self.cluster = cluster;
+                self.cluster_offset = target - base;
+                self.position = target;
+                self.remaining = self.size - target;
             }
 
             fn consume(self: *Reader, count: usize) void {

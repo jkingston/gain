@@ -253,7 +253,54 @@ pub fn build(b: *std.Build) void {
     });
     flac_pipeline_sim_module.addImport("f20", f20_module);
     const flac_pipeline_sim_tests = b.addTest(.{ .root_module = flac_pipeline_sim_module });
+    const codec_tests_step = b.step("test-codecs", "Run production decoder and container integration tests");
+    for ([_]std.builtin.OptimizeMode{ .ReleaseSafe, .ReleaseFast }) |mode| {
+        const codec_module = b.createModule(.{ .root_source_file = b.path("src/f20.zig"), .target = b.graph.host, .optimize = mode, .link_libc = true });
+        @import("build_codecs.zig").add(b, codec_module, b.graph.host, mode, false);
+        const codec_tests_module = b.createModule(.{ .root_source_file = b.path("tests/codec_stream_tests.zig"), .target = b.graph.host, .optimize = mode, .link_libc = true });
+        codec_tests_module.addImport("gain", codec_module);
+        const codec_tests = b.addTest(.{ .root_module = codec_tests_module, .use_llvm = true });
+        codec_tests_step.dependOn(&b.addRunArtifact(codec_tests).step);
+        const bridge_module = b.createModule(.{ .root_source_file = b.path("src/codec_backend.zig"), .target = b.graph.host, .optimize = mode, .link_libc = true });
+        @import("build_codecs.zig").add(b, bridge_module, b.graph.host, mode, false);
+        codec_tests_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = bridge_module, .use_llvm = true })).step);
+    }
+    // Independently link every selected engine for the actual target.
+    // The check has no hardware startup and is not installed.
+    const native_codecs = b.createModule(.{ .root_source_file = b.path("src/f20.zig"), .target = target, .optimize = .ReleaseFast });
+    @import("build_codecs.zig").add(b, native_codecs, target, .ReleaseFast, true);
+    const codec_link_module = b.createModule(.{ .root_source_file = b.path("tests/codec_compile_check.zig"), .target = target, .optimize = .ReleaseFast });
+    codec_link_module.addImport("gain", native_codecs);
+    const codec_link_check = b.addExecutable(.{ .name = "gain-codec-link-check", .root_module = codec_link_module });
+    codec_link_check.entry = .disabled;
+    _ = codec_link_check.getEmittedBin();
+    codec_link_check.setLinkerScript(b.path("stage2.ld"));
+    b.step("check-codecs-f20", "Compile and link the complete codec path for freestanding MIPS").dependOn(&codec_link_check.step);
+    codec_tests_step.dependOn(&codec_link_check.step);
+    const codec_fuzz_module = b.createModule(.{ .root_source_file = b.path("tests/codec_fuzz.zig"), .target = b.graph.host, .optimize = .ReleaseSafe });
+    codec_fuzz_module.addImport("codecs", b.createModule(.{ .root_source_file = b.path("src/codec_api.zig"), .target = b.graph.host, .optimize = .ReleaseSafe }));
+    const codec_fuzz_tests = b.addTest(.{ .root_module = codec_fuzz_module });
+    const codec_fuzz_run = b.addRunArtifact(codec_fuzz_tests);
+    codec_tests_step.dependOn(&codec_fuzz_run.step);
+    const codec_fuzz_step = b.step("fuzz-codecs", "Fuzz container parsing and PCM conversion");
+    codec_fuzz_step.dependOn(&codec_fuzz_run.step);
+    const container_fuzz_module = b.createModule(.{ .root_source_file = b.path("tests/container_fuzz.zig"), .target = b.graph.host, .optimize = .ReleaseSafe });
+    container_fuzz_module.addImport("gain", b.createModule(.{ .root_source_file = b.path("src/f20.zig"), .target = b.graph.host, .optimize = .ReleaseSafe }));
+    for ([_][]const u8{ "fuzz MP4", "fuzz Ogg" }) |filter| {
+        const container_fuzz_run = b.addRunArtifact(b.addTest(.{ .root_module = container_fuzz_module, .filters = &.{filter} }));
+        codec_fuzz_step.dependOn(&container_fuzz_run.step);
+        codec_tests_step.dependOn(&container_fuzz_run.step);
+    }
+    const pipeline_tests_step = b.step("test-pipeline", "Run buffered media pipeline regressions");
+    for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |mode| {
+        for ([_][]const u8{ "src/aiff.zig", "src/pcm_sample.zig", "src/buffer_regions.zig", "src/byte_ring.zig", "src/input_stream.zig", "src/codec_pool.zig", "src/codec_runtime.zig", "src/media_source.zig", "src/f20_memory.zig", "src/pcm_reservoir.zig", "src/audio_output.zig" }) |source| {
+            const tests = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path(source), .target = b.graph.host, .optimize = mode }) });
+            pipeline_tests_step.dependOn(&b.addRunArtifact(tests).step);
+        }
+    }
     const test_step = b.step("test", "Run host-side tests");
+    test_step.dependOn(codec_tests_step);
+    test_step.dependOn(pipeline_tests_step);
     test_step.dependOn(&b.addRunArtifact(packer_tests).step);
     test_step.dependOn(&b.addRunArtifact(hardware_tests).step);
     test_step.dependOn(&b.addRunArtifact(sd_tests).step);

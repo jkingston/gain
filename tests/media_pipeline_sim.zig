@@ -82,15 +82,16 @@ test "fragmented WAV files feed exact DMA frames through the production pipeline
 test "PCM planning rejects media the hardware path cannot preserve" {
     var info = testWaveInfo();
     info.encoding = .ieee_float;
-    try std.testing.expectError(error.UnsupportedEncoding, pcm.Plan.fromWave(info));
+    try std.testing.expectError(error.UnsupportedSampleFormat, pcm.Plan.fromWave(info));
     info = testWaveInfo();
-    info.channels = 1;
+    info.channels = 3;
     try std.testing.expectError(error.UnsupportedChannels, pcm.Plan.fromWave(info));
     info = testWaveInfo();
     info.bits_per_sample = 32;
     info.valid_bits_per_sample = 32;
     info.block_align = 8;
-    try std.testing.expectError(error.UnsupportedSampleFormat, pcm.Plan.fromWave(info));
+    info.data_bytes = 8;
+    try std.testing.expectEqual(pcm.OutputFormat.signed_24_in_u32, (try pcm.Plan.fromWave(info)).output_format);
     info = testWaveInfo();
     info.channel_mask = 4;
     try std.testing.expectError(error.InvalidChannelMask, pcm.Plan.fromWave(info));
@@ -344,4 +345,76 @@ fn write32(bytes: []u8, offset: usize, value: u32) void {
     bytes[offset + 1] = @truncate(value >> 8);
     bytes[offset + 2] = @truncate(value >> 16);
     bytes[offset + 3] = @truncate(value >> 24);
+}
+
+test "FAT seeking crosses fragmented clusters, rewinds and rejects out of range atomically" {
+    var card = MemoryCard.init(48000, .signed_16);
+    var scratch: [512]u8 = undefined;
+    var volume = try Volume.mount(&card, &scratch);
+    const file = try volume.findRoot("PIPE    WAV".*);
+    var reader = try volume.reader(file);
+    for ([_]u32{ 511, 512, 513, 1023, 1024, 10, 0, file.size, 512, 0 }) |position| {
+        try reader.seekTo(position);
+        var output: [21]u8 = undefined;
+        const count = try reader.read(&output);
+        try std.testing.expectEqualSlices(u8, card.image[position..][0..count], output[0..count]);
+        const previous = reader;
+        try std.testing.expectError(error.InvalidSeek, reader.seekTo(file.size + 1));
+        try std.testing.expectEqual(previous.position, reader.position);
+        try std.testing.expectEqual(previous.cluster, reader.cluster);
+        try std.testing.expectEqual(previous.remaining, reader.remaining);
+    }
+}
+
+test "all integer PCM layouts stream exact samples over arbitrary short reads and chunk boundaries" {
+    const Reader = struct {
+        bytes: []const u8,
+        position: usize = 0,
+        pub fn read(self: *@This(), output: []u8) !usize {
+            const count = @min(@as(usize, 7), @min(output.len, self.bytes.len - self.position));
+            @memcpy(output[0..count], self.bytes[self.position..][0..count]);
+            self.position += count;
+            return count;
+        }
+    };
+    for ([_]u16{ 1, 2 }) |channels| for ([_]u4{ 1, 2, 3, 4 }) |bytes| for ([_]std.builtin.Endian{ .little, .big }) |endian| {
+        const precision: u7 = if (bytes == 4) 24 else @as(u7, bytes) * 8;
+        const format = pcm.Sample.Format{ .bytes = bytes, .valid_bits = precision, .endian = endian };
+        const plan = try pcm.Plan.fromFormat(48000, channels, format, 257);
+        var source: [257 * 8]u8 = @splat(0);
+        for (0..257) |frame| for (0..channels) |channel| {
+            const signed: i32 = @intCast(@as(i64, @intCast(frame)) - 128 + @as(i64, @intCast(channel * 17)));
+            const sample_bits: u32 = @bitCast(signed);
+            // A bounded signal exactly representable at each source precision.
+            const container = if (bytes == 4) sample_bits << 8 else sample_bits;
+            const start = (frame * channels + channel) * bytes;
+            for (0..bytes) |byte| source[start + (if (endian == .little) byte else bytes - 1 - byte)] = @truncate(container >> @as(u5, @intCast(byte * 8)));
+        };
+        var reader = Reader{ .bytes = source[0 .. 257 * channels * bytes] };
+        var stream = pcm.Stream(Reader).fromPlan(&reader, plan);
+        var output: [56]u8 = undefined;
+        var frame: usize = 0;
+        while (true) {
+            const fill = try stream.fill(&output);
+            const stride = plan.output_format.bytesPerFrame();
+            for (0..fill.frames) |index| for (0..2) |channel| {
+                const actual_channel = if (channels == 1) 0 else channel;
+                const input = source[((frame + index) * channels + actual_channel) * bytes ..];
+                const expected = format.decode(input) >> @as(u5, if (stride == 4) 16 else 8);
+                const offset = index * stride + channel * (stride / 2);
+                if (stride == 4) {
+                    const value: i16 = @bitCast(std.mem.readInt(u16, output[offset..][0..2], .little));
+                    try std.testing.expectEqual(expected, value);
+                } else {
+                    const value = std.mem.readInt(u32, output[offset..][0..4], .little);
+                    try std.testing.expectEqual(@as(u32, @bitCast(expected)) & 0xffffff, value);
+                }
+            };
+            frame += fill.frames;
+            for (output[fill.bytes..]) |value| try std.testing.expectEqual(@as(u8, 0), value);
+            if (fill.end) break;
+        }
+        try std.testing.expectEqual(@as(usize, 257), frame);
+        try std.testing.expectEqual(reader.bytes.len, reader.position);
+    };
 }

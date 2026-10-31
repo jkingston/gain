@@ -7,6 +7,7 @@ pub const Error = error{
     InvalidOutputBuffer,
     FormatChanged,
     TooManyChunks,
+    SampleOutOfRange,
 };
 
 pub const Plan = struct {
@@ -14,20 +15,27 @@ pub const Plan = struct {
     output_format: pcm.OutputFormat,
     frames: u64,
     block_frames: u16,
+    bits_per_sample: u6,
 
     pub fn fromStreamInfo(info: flac.StreamInfo) Error!Plan {
         if (info.total_samples == 0) return error.MissingSampleCount;
-        const output_format: pcm.OutputFormat = switch (info.bits_per_sample) {
-            16 => .signed_16_packed,
-            24 => .signed_24_in_u32,
-            else => return error.UnsupportedSampleFormat,
-        };
+        if (info.maximum_block_size < 16 or info.sample_rate == 0 or info.bits_per_sample < 4 or info.bits_per_sample > 24) return error.UnsupportedSampleFormat;
+        const output_format: pcm.OutputFormat = if (info.bits_per_sample <= 16) .signed_16_packed else .signed_24_in_u32;
         return .{
             .sample_rate = info.sample_rate,
             .output_format = output_format,
             .frames = info.total_samples,
             .block_frames = info.maximum_block_size,
+            .bits_per_sample = info.bits_per_sample,
         };
+    }
+
+    /// Coding blocks and output DMA periods are independent. Short decoded
+    /// frames are combined without enlarging the per-frame codec workspace.
+    pub fn withMinimumFrames(self: Plan, frames: u16) Plan {
+        var result = self;
+        result.block_frames = @max(result.block_frames, frames);
+        return result;
     }
 
     pub fn chunkBytes(self: Plan) u24 {
@@ -95,13 +103,14 @@ pub fn Stream(comptime Reader: type) type {
                 const available = frame.block_size - self.frame_offset;
                 const capacity = self.plan.block_frames - written_frames;
                 const count: u16 = @intCast(@min(available, capacity));
-                packFrames(
+                try packFrames(
                     words,
                     written_frames,
                     self.decoder.left[self.frame_offset..][0..count],
                     self.decoder.right[self.frame_offset..][0..count],
                     self.plan.output_format,
                     self.gain_q24,
+                    self.plan.bits_per_sample,
                 );
                 written_frames += count;
                 self.frame_offset += count;
@@ -129,18 +138,27 @@ fn packFrames(
     right: []const i32,
     format: pcm.OutputFormat,
     gain_q24: u32,
-) void {
+    source_bits: u6,
+) Error!void {
+    if (source_bits < 4 or source_bits > 24) return error.UnsupportedSampleFormat;
+    const target_bits: u6 = if (format == .signed_16_packed) 16 else 24;
+    if (source_bits > target_bits) return error.UnsupportedSampleFormat;
+    const shift: u5 = @intCast(target_bits - source_bits);
+    const minimum: i32 = -(@as(i32, 1) << @as(u5, @intCast(source_bits - 1)));
+    const maximum = -(minimum + 1);
     switch (format) {
         .signed_16_packed => for (left, right, 0..) |left_sample, right_sample, index| {
+            if (left_sample < minimum or left_sample > maximum or right_sample < minimum or right_sample > maximum) return error.SampleOutOfRange;
             const target = @as(usize, first_frame) + index;
-            const left_bits: u16 = @bitCast(@as(i16, @intCast(scaleSample(left_sample, gain_q24))));
-            const right_bits: u16 = @bitCast(@as(i16, @intCast(scaleSample(right_sample, gain_q24))));
+            const left_bits: u16 = @bitCast(@as(i16, @intCast(scaleSample(left_sample << shift, gain_q24))));
+            const right_bits: u16 = @bitCast(@as(i16, @intCast(scaleSample(right_sample << shift, gain_q24))));
             output[target] = @as(u32, left_bits) | @as(u32, right_bits) << 16;
         },
         .signed_24_in_u32 => for (left, right, 0..) |left_sample, right_sample, index| {
+            if (left_sample < minimum or left_sample > maximum or right_sample < minimum or right_sample > maximum) return error.SampleOutOfRange;
             const target = (@as(usize, first_frame) + index) * 2;
-            output[target] = @as(u32, @bitCast(scaleSample(left_sample, gain_q24))) & 0x00ff_ffff;
-            output[target + 1] = @as(u32, @bitCast(scaleSample(right_sample, gain_q24))) & 0x00ff_ffff;
+            output[target] = @as(u32, @bitCast(scaleSample(left_sample << shift, gain_q24))) & 0x00ff_ffff;
+            output[target + 1] = @as(u32, @bitCast(scaleSample(right_sample << shift, gain_q24))) & 0x00ff_ffff;
         },
     }
 }
@@ -160,12 +178,37 @@ test "fixed-point gain scales both PCM layouts symmetrically" {
     const left = [_]i32{ 32_000, -32_000 };
     const right = [_]i32{ -16_000, 16_000 };
     var packed_16: [2]u32 = undefined;
-    packFrames(&packed_16, 0, &left, &right, .signed_16_packed, unity_gain_q24 / 2);
+    try packFrames(&packed_16, 0, &left, &right, .signed_16_packed, unity_gain_q24 / 2, 16);
     try std.testing.expectEqual(@as(u16, @bitCast(@as(i16, 16_000))), @as(u16, @truncate(packed_16[0])));
     try std.testing.expectEqual(@as(u16, @bitCast(@as(i16, -8_000))), @as(u16, @truncate(packed_16[0] >> 16)));
 
     var packed_24: [4]u32 = undefined;
-    packFrames(&packed_24, 0, &left, &right, .signed_24_in_u32, unity_gain_q24 / 2);
+    try packFrames(&packed_24, 0, &left, &right, .signed_24_in_u32, unity_gain_q24 / 2, 24);
     try std.testing.expectEqual(@as(u32, 16_000), packed_24[0]);
     try std.testing.expectEqual(@as(u32, @bitCast(@as(i32, -8_000))) & 0x00ff_ffff, packed_24[1]);
+}
+
+test "every supported FLAC precision preserves amplitude with exact zero padding" {
+    const testing = @import("std").testing;
+    for (4..25) |bits| {
+        const precision: u6 = @intCast(bits);
+        const values = [_]i32{ -(@as(i32, 1) << @as(u5, @intCast(bits - 1))), 0, (@as(i32, 1) << @as(u5, @intCast(bits - 1))) - 1 };
+        var output: [6]u32 = undefined;
+        const format: pcm.OutputFormat = if (bits <= 16) .signed_16_packed else .signed_24_in_u32;
+        try packFrames(&output, 0, &values, &values, format, unity_gain_q24, precision);
+        const target: u6 = if (bits <= 16) 16 else 24;
+        const shift: u5 = @intCast(target - precision);
+        for (values, 0..) |value, index| {
+            if (bits <= 16) {
+                const expected: u16 = @bitCast(@as(i16, @intCast(value << shift)));
+                try testing.expectEqual(@as(u32, expected) | @as(u32, expected) << 16, output[index]);
+            } else {
+                const expected = @as(u32, @bitCast(value << shift)) & 0xffffff;
+                try testing.expectEqual(expected, output[index * 2]);
+                try testing.expectEqual(expected, output[index * 2 + 1]);
+            }
+        }
+        const bad = [_]i32{values[2] + 1};
+        try testing.expectError(error.SampleOutOfRange, packFrames(&output, 0, &bad, &bad, format, unity_gain_q24, precision));
+    }
 }

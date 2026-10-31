@@ -1,6 +1,6 @@
 ENTRY(_start)
-/* Keep stage two below the framebuffer at physical address 0x40000. */
-MEMORY { DRAM : ORIGIN = 0x80004000, LENGTH = 0x3c000 }
+/* RAM ownership is documented and checked in src/f20_memory.zig. */
+MEMORY { DRAM : ORIGIN = 0x80004000, LENGTH = 0x1fc000 }
 SECTIONS {
     .startup : { KEEP(*(.startup)) } > DRAM
     .vectors 0x80004180 : { KEEP(*(.vectors)) } > DRAM
@@ -8,7 +8,7 @@ SECTIONS {
     .rodata : { *(.rodata*) } > DRAM
     .data : {
         _data_start = .;
-        *(.data*) *(.sdata*)
+        *(.data*) *(.sdata*) *(.got*)
         _data_end = .;
     } > DRAM
     _gp = ALIGN(16) + 0x7ff0;
@@ -18,6 +18,9 @@ SECTIONS {
         . = ALIGN(4);
         _bss_end = .;
     } > DRAM
-    /DISCARD/ : { *(.MIPS.abiflags) *(.reginfo*) *(.note.*) *(.eh_frame) *(.rel.dyn) }
+    /DISCARD/ : { *(.MIPS.abiflags) *(.reginfo*) *(.note.*) *(.eh_frame*) *(.rel.dyn) }
 }
 ASSERT(SIZEOF(.startup) <= 0x180, "startup overlaps exception vector")
+ASSERT(_bss_end <= 0x80200000, "stage two overlaps LCD descriptors")
+
+_irq_stack_top = 0x81fde000;

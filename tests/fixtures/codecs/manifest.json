@@ -1,0 +1,282 @@
+{
+  "reference_encoding": "interleaved little-endian IEEE float32, presentation trimmed",
+  "fixtures": [
+    {
+      "name": "free-format",
+      "origin": "Synthetic stereo-cbr with bitrate index cleared in every MPEG header; identical coded samples and reference",
+      "files": {
+        "free-format.mp3": "e4993d5f2fbee57472f72c15b0fa4b5989512182dd116716a90a9be7bde1f08e",
+        "stereo-cbr.reference.f32le": "4c7c43b393bbf9a1ccd7212602455c05aac87867ee946031c8406a26c230eadf"
+      }
+    },
+    {
+      "name": "aac44",
+      "origin": "Synthetic audio generated with FFmpeg; independent FFmpeg float32 reference",
+      "files": {
+        "aac44.m4a": "c9029713c65de875e4efcddf3b91ddd67935ac01989897403b5d78882e541f1a",
+        "aac44.reference.f32le": "d823efa4e4c9e0b8b46eacfa09946cb1582d8a563bfda2f9c3ec31aa8e34edb8"
+      }
+    },
+    {
+      "name": "aac48-fast",
+      "origin": "Synthetic audio generated with FFmpeg; independent FFmpeg float32 reference",
+      "files": {
+        "aac48-fast.m4a": "796e9a908c04904e4655f32e77a7902a8db669e011175c1134cb07dafb518e3b",
+        "aac48-fast.reference.f32le": "0967782e1dd229cd04c2e6b8d3dc75c0e78aaf8e2be549891565e32f323ed09d"
+      }
+    },
+    {
+      "name": "alac16",
+      "origin": "Synthetic audio generated with FFmpeg; independent FFmpeg float32 reference",
+      "files": {
+        "alac16.m4a": "c33a5e6ba25087d4fad56884debe530362e81c293ded760d8f7e40ba5e4e7e26",
+        "alac16.reference.f32le": "b4e8594f48ac834430af8f53200ebd25776d34d00f43501a0c0946a039267d69"
+      }
+    },
+    {
+      "name": "alac24-high",
+      "origin": "Synthetic audio generated with FFmpeg; independent FFmpeg float32 reference",
+      "files": {
+        "alac24-high.m4a": "b988a916b2526d4448509ee82fdacc17758e8596abc5ee9735c98264c1043360",
+        "alac24-high.reference.f32le": "5d391f331d7934313386e6bcd36914a0885d9625990edf3d48430b558d955fe7"
+      }
+    },
+    {
+      "name": "vorbis44",
+      "origin": "Synthetic PCM encoded by pinned libvorbis 1.3.7; independently decoded by FFmpeg; continuations/chains repacketized with corrected CRC/serial",
+      "files": {
+        "vorbis44.ogg": "63dc3458ae46170d75114f993850a4f4c7c95d93d43c4b9d66ba3f09a401d662",
+        "vorbis44.reference.f32le": "a95ee4967993e962fb80e603b36d04de978751ede5942a78207bc0a5bfe30f96"
+      }
+    },
+    {
+      "name": "vorbis48",
+      "origin": "Synthetic PCM encoded by pinned libvorbis 1.3.7; independently decoded by FFmpeg; continuations/chains repacketized with corrected CRC/serial",
+      "files": {
+        "vorbis48.ogg": "1f2fb7a891f236cd71f758e42d27f2f5d27725bae6314bbfeb214063ca6506a8",
+        "vorbis48.reference.f32le": "6590e005629aab44e99f7ab15e6da620c70b0006c0a541ddf17ba18fdb05689c"
+      }
+    },
+    {
+      "name": "opus48",
+      "origin": "Synthetic audio generated with FFmpeg; independent FFmpeg float32 reference",
+      "files": {
+        "opus48.opus": "f920b9fede8cbea75be9b5d7b2c2e9617351786c3edf5abb1dd9af793deb7560",
+        "opus48.reference.f32le": "370c3b728797506cea2c9a582b5f3d508dfad28914a919de80825229264cb86d"
+      }
+    },
+    {
+      "name": "vorbis-continued",
+      "origin": "Synthetic PCM encoded by pinned libvorbis 1.3.7; independently decoded by FFmpeg; continuations/chains repacketized with corrected CRC/serial",
+      "files": {
+        "vorbis-continued.ogg": "11dd08f5a3ba8a77e1923f5ec86b526c53fdf6430df0b90073820cda1f70119b",
+        "vorbis44.reference.f32le": "a95ee4967993e962fb80e603b36d04de978751ede5942a78207bc0a5bfe30f96"
+      }
+    },
+    {
+      "name": "vorbis-chain",
+      "origin": "Synthetic PCM encoded by pinned libvorbis 1.3.7; independently decoded by FFmpeg; continuations/chains repacketized with corrected CRC/serial",
+      "files": {
+        "vorbis-chain.ogg": "edf306cf3601315d5809754b50907aeca78fae7be72a31c4678e93c653fe5e55",
+        "vorbis-chain.reference.f32le": "20881556528fabe813cb8311a1bd614bb6c9ceb5e0c11da23813f895b8fa08c6"
+      }
+    },
+    {
+      "name": "opus-chain",
+      "origin": "Synthetic audio generated with FFmpeg; independent FFmpeg float32 reference; two logical streams with distinct serials and concatenated presentation references",
+      "files": {
+        "opus-chain.ogg": "2453acf7149700fc88b39767d303d0a8150fb85a3a7b5a36396efa5ad84a376e",
+        "opus-chain.reference.f32le": "d8aab623592a503d549acce7cd127add2c7b5fc7ae347028c795def4b1cb294f"
+      }
+    },
+    {
+      "name": "aac44-nopns",
+      "origin": "Synthetic audio generated with FFmpeg; independent FFmpeg float32 reference",
+      "files": {
+        "aac44-nopns.m4a": "d3d930ecb666023f010a1e35ecddf7d980de3971f4f8f7178f8a154ec217d18e",
+        "aac44-nopns.reference.f32le": "4e675de6d42f8d7d35ccf87c0028ff634c2608b09555d77373a36f62d6239784"
+      }
+    },
+    {
+      "name": "aac48-nopns",
+      "origin": "Synthetic audio generated with FFmpeg; independent FFmpeg float32 reference",
+      "files": {
+        "aac48-nopns.m4a": "809bb4a040754feb45ec1f08d81936aa70e6fac4309dd2e05cfbdcc13915fa93",
+        "aac48-nopns.reference.f32le": "9e20bb13756963f7a43f9815159355c2870b3cfb195646087686ef76731dec02"
+      }
+    },
+    {
+      "name": "stereo-cbr",
+      "origin": "Synthetic audio generated with FFmpeg; independent FFmpeg float32 reference",
+      "files": {
+        "stereo-cbr.mp3": "2b34942a75b6179b8275b830a9763b294014b3e2834b925a047d8ff346908c64",
+        "stereo-cbr.reference.f32le": "4c7c43b393bbf9a1ccd7212602455c05aac87867ee946031c8406a26c230eadf"
+      }
+    },
+    {
+      "name": "stereo-dense",
+      "origin": "Synthetic audio generated with FFmpeg; independent FFmpeg float32 reference",
+      "files": {
+        "stereo-dense.mp3": "e9ce84d0b1ac52827635678b8df64b3969841c8dcdce707c81934e278a099347",
+        "stereo-dense.reference.f32le": "298f85bb1ca352c672df04f3094aad9be30b20a19eb86f538711e6c5a9207068"
+      }
+    },
+    {
+      "name": "stereo-vbr",
+      "origin": "Synthetic audio generated with FFmpeg; independent FFmpeg float32 reference",
+      "files": {
+        "stereo-vbr.mp3": "18b78e869e83a0eea7a616cf6d90770801e9e09de77a22475194d059f796a2e5",
+        "stereo-vbr.reference.f32le": "ecf00cfa643da882c2114db2e33e17d680fd11b069f2b9a248cb374fd7019e32"
+      }
+    },
+    {
+      "name": "speech-low",
+      "origin": "Synthetic audio generated with FFmpeg; independent FFmpeg float32 reference",
+      "files": {
+        "speech-low.mp3": "693462c3578c945d643e7b7ff05d91c6f2d248079f8c9bd53a51f188f6e9e4da",
+        "speech-low.reference.f32le": "72dd2e3eb8f76f9a037ad98219bd13172fe0f742b9556fb5a00ab5687d96c15f"
+      }
+    },
+    {
+      "name": "mono-32k",
+      "origin": "Synthetic audio generated with FFmpeg; independent FFmpeg float32 reference",
+      "files": {
+        "mono-32k.mp3": "19f620f3dba5656716157e1dab9215c5accb000aeb4ec9e90334099d90822fd8",
+        "mono-32k.reference.f32le": "18434fa168fa857d919d9c757eeae1bd7828eb22ad30a7e653c68e05bbd41d26"
+      }
+    },
+    {
+      "name": "stereo-24k",
+      "origin": "Synthetic audio generated with FFmpeg; independent FFmpeg float32 reference",
+      "files": {
+        "stereo-24k.mp3": "8ef8f44583dd52c659b7d167a7f0a3533acd1303a4a62f5a5d0157d149b14b1c",
+        "stereo-24k.reference.f32le": "c955ebea7ca8394a6abdebd98afb8b33b2d6ed66330ea4093709feb5071478ee"
+      }
+    },
+    {
+      "name": "stereo44",
+      "origin": "Jeffrey C. Ollie zig-mp3 synthetic test vector at 630798ae9e98bffe641c44d70571f206421f4e24; independently decoded by FFmpeg (UPSTREAM-MIT.txt)",
+      "files": {
+        "stereo44.mp3": "5de0dbdcf72652f7d59bfb35ee8c5dde2ccb136aee34620fe6aab89bc348a109",
+        "stereo44.reference.f32le": "139112d6b3c97c89611a9090c75074e97ea7d3841865b30491301c519962c82e"
+      }
+    },
+    {
+      "name": "mono22",
+      "origin": "Jeffrey C. Ollie zig-mp3 synthetic test vector at 630798ae9e98bffe641c44d70571f206421f4e24; independently decoded by FFmpeg (UPSTREAM-MIT.txt)",
+      "files": {
+        "mono22.mp3": "a4255181232fddaf74cbf153797c188a40abfc4e4f42ce0633b53038b3ce0501",
+        "mono22.reference.f32le": "de4dd06ec5e9ab85abb6e7efea9e44854f788c4100dc71707708b4f701d217af"
+      }
+    },
+    {
+      "name": "mono11",
+      "origin": "Jeffrey C. Ollie zig-mp3 synthetic test vector at 630798ae9e98bffe641c44d70571f206421f4e24; independently decoded by FFmpeg (UPSTREAM-MIT.txt)",
+      "files": {
+        "mono11.mp3": "07a9540d631a23c8feabe40e82ac8f002572feb754631a9dc25e723202ba0c7e",
+        "mono11.reference.f32le": "826c3f07dfc4b8a88604e7d9e30fa50c04ebb5c1f9bad73dedb8e6512acf765c"
+      }
+    },
+    {
+      "name": "layer1",
+      "origin": "Jeffrey C. Ollie zig-mp3 synthetic test vector at 630798ae9e98bffe641c44d70571f206421f4e24; independently decoded by FFmpeg (UPSTREAM-MIT.txt)",
+      "files": {
+        "layer1.mp1": "d4fbdce234e53b051af0a24c87e7731fc16c3130a756a284330d3af8d8b1ec87",
+        "layer1.reference.f32le": "b051f77193d5dc2f3a5629a9dbe0844f7a8cb93b35830b4ab0ea4908ece2cd5a"
+      }
+    },
+    {
+      "name": "layer2",
+      "origin": "Jeffrey C. Ollie zig-mp3 synthetic test vector at 630798ae9e98bffe641c44d70571f206421f4e24; independently decoded by FFmpeg (UPSTREAM-MIT.txt)",
+      "files": {
+        "layer2.mp2": "92b7dcbc57372a47ce7cf028f1972cc6b60d63a509cffdb2a0cc8898bd661bb6",
+        "layer2.reference.f32le": "841d55372ee5b5ba8b99ac89fa9f30283ab7725dc6ebd74c9effcbf37c07361f"
+      }
+    },
+    {
+      "name": "tagged-gapless",
+      "origin": "Synthetic stereo PCM encoded by LAME with ID3v2 and Xing/LAME trim; independent FFmpeg reference",
+      "files": {
+        "tagged-gapless.mp3": "8af531709e3c668ee9dc4c3a8997e1a4de612c5f1551109c576b8890ddc35269",
+        "tagged.reference.f32le": "b4a399b7c9aa17248bbc15e5466924a1b5d445082cda07302365a8a57419be5e"
+      }
+    },
+    {
+      "name": "flac-16",
+      "origin": "Synthetic audio generated with FFmpeg; independent FFmpeg float32 reference",
+      "files": {
+        "flac-16.flac": "bbdb2e9d27c657d9680100c218d3ea729644d8e8a8ebe31ecbbc14f58450672b",
+        "flac-16.reference.f32le": "3e80bd5444c92a5c82861253487647bc3a95df8202c10a3e341765e20b8ed08a"
+      }
+    },
+    {
+      "name": "flac-24",
+      "origin": "Synthetic audio generated with FFmpeg; independent FFmpeg float32 reference",
+      "files": {
+        "flac-24.flac": "e53d4871b3696101081938bc15bb11a2e73aa158b8a8ca30ffd3976360462f64",
+        "flac-24.reference.f32le": "12f862e94eb9e930d33b9f89b60b58605b14c8df8ab619913fcfb37f8c65acf0"
+      }
+    },
+    {
+      "name": "wave16",
+      "origin": "Synthetic audio generated with FFmpeg; independent FFmpeg float32 reference",
+      "files": {
+        "wave16.wav": "49fd116ee21aab509ae25f2ae1ca378257b9885281fdbbf139b001f755a089aa",
+        "wave16.reference.f32le": "3e80bd5444c92a5c82861253487647bc3a95df8202c10a3e341765e20b8ed08a"
+      }
+    },
+    {
+      "name": "wave-mono8",
+      "origin": "Synthetic audio generated with FFmpeg; independent FFmpeg float32 reference",
+      "files": {
+        "wave-mono8.wav": "fae8b9e30a7a38f4c805fd5abbfd199889b3d19ae0c14d7f4c5f57aa25bb9d66",
+        "wave-mono8.reference.f32le": "fa67f88175733840ca3ef19130e10c611b8e5e149e5e1504f768fa94f96bacd3"
+      }
+    },
+    {
+      "name": "wave-float",
+      "origin": "Synthetic audio generated with FFmpeg; independent FFmpeg float32 reference",
+      "files": {
+        "wave-float.wav": "18e62623c4d1e833f8c971c931c371e6ba2c79bdd15d05a29af63f8ff27559d4",
+        "wave-float.reference.f32le": "08818ca886c1c78a7d6420fb7d3a341b681d5b931d3afddd4ec061e7ed0550c6"
+      }
+    },
+    {
+      "name": "aiff24",
+      "origin": "Synthetic audio generated with FFmpeg; independent FFmpeg float32 reference",
+      "files": {
+        "aiff24.aiff": "6a9978fe9b9d2985a63b0571cfe01f0c8d166354986df821bf381d90794146f4",
+        "aiff24.reference.f32le": "12f862e94eb9e930d33b9f89b60b58605b14c8df8ab619913fcfb37f8c65acf0"
+      }
+    },
+    {
+      "name": "aifc-float64",
+      "origin": "Synthetic audio generated with FFmpeg; independent FFmpeg float32 reference",
+      "files": {
+        "aifc-float64.aiff": "ce0ebc476130823441cac2d4c3d3649e2e3d8e7f686d4663ed11a682f79b2480",
+        "aifc-float64.reference.f32le": "12f862e94eb9e930d33b9f89b60b58605b14c8df8ab619913fcfb37f8c65acf0"
+      }
+    },
+    {
+      "name": "aac-co64-v1-chapters.m4a",
+      "origin": "Synthetic AAC MP4; co64/v1/chpl or separated chunks; independent FFprobe sample oracle",
+      "files": {
+        "aac-co64-v1-chapters.m4a": "9187fac4b9fb70eb0acc38ae6a0323a5883e6c3d037d7e76ae052cd6b6c1f671"
+      }
+    },
+    {
+      "name": "aac-multichunk.m4a",
+      "origin": "Synthetic AAC MP4; co64/v1/chpl or separated chunks; independent FFprobe sample oracle",
+      "files": {
+        "aac-multichunk.m4a": "d340dc25bf5e152a8d39c1987d7cea015fe2546fb76058461846a0b9d858b3b8"
+      }
+    },
+    {
+      "name": "oracle.zig",
+      "origin": "Synthetic AAC MP4; co64/v1/chpl or separated chunks; independent FFprobe sample oracle",
+      "files": {
+        "oracle.zig": "13d0b3ab702f07239d5006b3076d4ff3a1f74059f20d7ffc6d8750a5875875d5"
+      }
+    }
+  ]
+}

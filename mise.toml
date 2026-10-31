@@ -4,11 +4,11 @@ zig = "0.17.0"
 [tasks.format]
 alias = "fmt"
 description = "Format Zig sources"
-run = "zig fmt --ast-check build.zig src tests tools"
+run = "zig fmt --ast-check build.zig build_codecs.zig build_opus.zig src tests tools"
 
 [tasks.lint]
 description = "Check formatting and Zig syntax"
-run = "zig fmt --check --ast-check build.zig src tests tools"
+run = "zig fmt --check --ast-check build.zig build_codecs.zig build_opus.zig src tests tools"
 
 [tasks.build]
 description = "Build the SPL and stage-two firmware"
@@ -37,3 +37,15 @@ run = [
     { task = "build" },
     { task = "test" },
 ]
+
+[tasks.fuzz-codecs]
+description = "Fuzz container parsers and PCM conversion with 100,000 cases"
+run = "zig build fuzz-codecs --fuzz=100K --summary all"
+
+[tasks.test-codecs]
+description = "Run decoder accuracy, seek, cancellation and buffered pipeline tests"
+run = "zig build test-codecs --summary all"
+
+[tasks.test-pipeline]
+description = "Run deterministic executive, input, memory and output regressions"
+run = "zig build test-pipeline --summary all"

@@ -157,8 +157,8 @@ test "WAV parser accepts 24-bit extensible PCM" {
 test "WAV parser never escapes arbitrary input" {
     try std.testing.fuzz({}, fuzzWave, .{ .corpus = &.{
         "",
-        "RIFF\x04\x00\x00\x00WAVE",
-        "RIFF\xff\xff\xff\xffWAVEfmt ",
+        "\xff\xff\xff\xffRIFF\x04\x00\x00\x00WAVE",
+        "\xff\xff\xff\xffRIFF\xff\xff\xff\xffWAVEfmt ",
     } });
 }
 

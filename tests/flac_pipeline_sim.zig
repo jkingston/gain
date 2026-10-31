@@ -255,3 +255,36 @@ fn write32(bytes: []u8, offset: usize, value: u32) void {
     bytes[offset + 2] = @truncate(value >> 16);
     bytes[offset + 3] = @truncate(value >> 24);
 }
+
+test "FLAC output periods combine coding blocks and pad short tracks without dropping samples" {
+    const Reader = struct {
+        position: usize = 0,
+        pub fn read(self: *@This(), output: []u8) !usize {
+            const count = @min(output.len, encoded.len - self.position);
+            @memcpy(output[0..count], encoded[self.position..][0..count]);
+            self.position += count;
+            return count;
+        }
+    };
+    var reader = Reader{};
+    var compressed: [7416]u8 = undefined;
+    var left: [4096]i32 = undefined;
+    var right: [4096]i32 = undefined;
+    var stream = try flac_pcm.Stream(Reader).init(&reader, &compressed, &left, &right);
+    stream.plan = stream.plan.withMinimumFrames(24000);
+    var output: [24000 * 8]u8 align(4) = undefined;
+    const fill = try stream.fill(&output);
+    try std.testing.expect(fill.end);
+    try std.testing.expectEqual(@as(u32, reference.len / 8), fill.frames);
+    for (0..fill.frames) |frame| for (0..2) |channel| {
+        const offset = frame * 8 + channel * 4;
+        const expected: i32 = @bitCast(std.mem.readInt(u32, reference[offset..][0..4], .little));
+        const actual = std.mem.readInt(u32, output[offset..][0..4], .little);
+        try std.testing.expectEqual(@as(u32, @bitCast(expected >> 8)) & 0xffffff, actual);
+    };
+    for (output[fill.bytes..]) |byte| try std.testing.expectEqual(@as(u8, 0), byte);
+    const silence = try stream.fill(&output);
+    try std.testing.expect(silence.end and silence.frames == 0 and silence.bytes == 0);
+    for (output) |byte| try std.testing.expectEqual(@as(u8, 0), byte);
+    try std.testing.expectEqual(@as(u32, 1), try stream.plan.chunkCount());
+}
