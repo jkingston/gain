@@ -31,59 +31,169 @@ current RAM-only build provides:
 - a freestanding Zig runtime with exception vectors;
 - a 320 x 240 RGB565 display driver;
 - all buttons and both wheel directions;
-- AXP192 status, battery voltage and power-off;
+- identified AXP192 power, battery/USB voltage, current telemetry and power-off;
+- configured headphone/line jack inputs with debouncing support;
 - native read-only SD initialization at up to 50 MHz;
-- allocation-free FAT32 directory traversal, long names and RIFF/WAVE parsing;
-- allocation-free native FLAC decoding and streaming;
-- ES9018K2M setup and linked-PDMA PCM playback;
+- allocation-free FAT32 traversal, seeking, long names, WAV and AIFF parsing;
+- native FLAC decoding and bounded C backends for MP3, AAC, ALAC, Vorbis and Opus;
+- identified ES9018K2M, filters, de-emphasis, mute and output routing;
+- linked-PDMA PCM playback with source-validated buffer ownership;
 - a folder browser and now-playing screen with track and volume controls;
-- fixed-point software volume and bounded, priority-aware display updates;
+- DAC hardware volume and bounded, priority-aware display updates;
 - a watchdog-backed panic screen.
 
-The storage and playback path has been verified from RAM on the physical F20:
-120 50 ms chunks streamed from microSD with 120 descriptor handoffs, no audio
-underruns and a 32-frame FIFO low-water mark. It has no NAND write path, and
-the SD API is read-only.
+The player uses separate preemptive output, UI, control, codec and storage tasks.
+Compressed input arrives in SD bursts, decoding publishes canonical Q1.31 PCM,
+and output fills fixed-duration DMA periods. Only control performs DAC I2C.
+Only storage reads the card. The firmware has no NAND write path; SD access is
+read-only.
 
-The PCM output path has also been verified on the physical F20 at 44.1, 48,
-88.2, 96, 176.4 and 192 kHz. Packed 16-bit and native 24-bit DMA layouts use
-the X1000's fixed 32-bit I2S channel slots. Every rate held DAC lock for three
-linked DMA cycles with no underruns and a 32-frame FIFO low-water mark. The
-48 kHz clock family is exact; the 44.1 kHz family is 1.56 ppm low.
+The PCM clock and DMA path is verified at 8, 11.025, 12, 16, 22.05, 24,
+32, 44.1, 48, 64, 88.2, 96, 176.4 and 192 kHz. All fourteen rates hold DAC
+lock through hardware-volume and output-routing changes with no underruns and
+a 32-frame FIFO minimum. Low rates reuse the 11.2896/12.288 MHz clock families
+with integer BCLK division. The 48 kHz family is exact; the 44.1 kHz family is
+1.56 ppm low. The F20 serial interface uses fixed 32-bit I2S slots and sends
+16-bit packed or 24-bit PCM.
 
-The complete media path has been verified audibly from microSD with both 16-bit
-and packed 24-bit stereo WAV files. Each six-second track streamed 288,000
-frames through FAT32, WAV parsing, PCM packing and linked DMA. The 24-bit test
-preserved distinct left, right and stereo sections, completed 240 buffer loads
-and descriptor handoffs across two descriptor-ring wraps at a 50 MHz SD clock,
-and restarted cleanly after shutdown. Exact sample conversion and ordering are
-also checked by the deterministic simulation.
+The DAC locks to silence before source playback, preserving the track opening.
+Its identity comes from status register 64, rather than configuration register
+0. Register 10 uses the ESS revision/rate-specific lock setting. Output route
+changes mute first and settle in pollable stages. Filter changes require idle
+audio. Any DAC control failure asserts the independent analogue mute.
+[ESS register reference](https://clara.nz/docs/hardware/ESS%20Technology/ES9018K2M-datasheet-v3.7-2021-04-22.pdf).
 
-The native FLAC decoder covers constant, verbatim, fixed and LPC subframes,
-Rice and Rice2 residuals, wasted bits, CRC validation and every stereo
-decorrelation mode. The complete production path streamed a two-second
-24-bit/192 kHz FLAC from FAT32 on the physical microSD through an uncached SD
-bounce buffer, cached native decoding, PCM packing and linked DMA. All 24
-16,384-frame blocks completed with no underruns and a 32-frame FIFO low-water
-mark. The slowest complete fill used 87.1% of its interval before the next DMA
-event. A captured ReleaseSmall trace that missed a descriptor is retained as a
-deterministic regression; stage two is compiled with ReleaseFast.
+DMA completion is corroborated with the live source address. X1000 CDOA can identify the current fetch or its successor during a
+descriptor handoff, so its value alone cannot establish buffer release.
+The observer handles completion/fetch windows, duplicate observations, wrap
+and coalesced events, with a bounded failure for incoherent register samples.
+Captured volume-change failures have deterministic regressions.
 
-The optimized FLAC path keeps two compressed-input chunks in caller-owned
-uncached memory. FAT32 and physical SD reads run ahead while audio DMA is
-playing, so refill only copies prefetched bytes, decodes and packs PCM. On the
-physical F20, the full 24-block 24-bit/192 kHz workload peaked at 48.75 ms per
-refill, or 57.12% of its interval; the slowest prefetch took 4.76 ms. The
-standalone hardware benchmark samples 16 blocks per invocation to remain
-inside the X1000 ROM USB command window.
+The native pipeline qualification covers 32 synthetic codec/container fixtures
+with expected presentation lengths, volume changes, clean shutdown and zero
+underruns. The worst observed DMA fill was about 1.02 ms for a 10 ms period
+at 192 kHz. A separate 30-second real-SD/UI run at 96 kHz completed 3,001 DMA
+periods and 598 volume changes without underruns. These are bounded workloads,
+not claims about every file, analogue performance or battery life.
 
-The interactive player has been verified on the physical F20 with FLAC from the
-microSD card. Previous/next, Back and repeated volume changes work during
-playback. A blocking LCD update originally reproduced missed descriptor events
-and a buffer overrun; deterministic tests retain that failure. The current
-direct-mode fallback prioritizes audio service and limits each display dispatch
-to 32 pixels. Repeated volume changes completed without an error or audible
-interruption. Internal LCD DMA remains the planned production display path.
+The interactive player uses a shared declarative renderer for its browser and
+now-playing views. Declarations own their copied text, use fixed command/text
+budgets, clip glyphs to their widget, and accept a theme. The desktop adapter
+uses the same view declarations and rasterizer. Its media list is fixture data;
+the device browser continues to read the actual FAT32 microSD.
+
+Presentation is hybrid: volume, progress and selection rows use true region
+DMA; initial presentation and screen changes use full-frame DMA. Odd dirty
+widths expand to an even window, including at the right edge. The cached CPU
+canvas is separate from uncached immutable DMA sources. Every transfer follows
+prepare, commit, EOF, bus drain, disable acknowledgement and source release.
+A fault retains ownership. EOF alone never permits source reuse or direct-mode
+fallback. Late region deadlines are re-sampled against panel scanout.
+
+The rendering/backend qualification includes panel readback, browser/player
+slides, region updates, odd geometry and canvas mutation after snapshot
+preparation. The player uses screen cuts and prepares its initial full snapshot
+before audio starts. UI work is preemptible by the output task. Rendering and
+DMA-source ownership remain independently tested portable policies.
+
+## Media support
+
+| Format | Current native decoder |
+|---|---|
+| FLAC | Mono/stereo, 4–24-bit; CRC, fixed/LPC, Rice/Rice2 and stereo modes |
+| WAV | Mono/stereo PCM 8/16/24/32-bit; extensible valid bits; IEEE float32/64 |
+| AIFF | Mono/stereo signed PCM up to 32-bit, including non-byte-aligned precision |
+| AIFF-C | NONE/twos/sowt PCM and fl32/fl64; other compression types rejected |
+| MPEG audio | Layers I/II/III, MPEG-1/2/2.5, free format and Xing/LAME trim |
+| AAC/M4A | AAC in bounded MP4 sample tables; edit/presentation trimming |
+| ALAC/M4A | Mono/stereo 16/24-bit in MP4 |
+| Ogg Vorbis | Continued packets, CRC validation and compatible chained streams |
+| Ogg Opus | Preskip/end trim and compatible chained streams |
+| Raw ADTS AAC, WavPack, Musepack | Not implemented |
+| DSD, multichannel downmix, resampling | Not implemented |
+
+The browser filters supported file extensions; the decoder detects content.
+Every format shares stop/previous/next/volume controls. Mono duplicates into
+stereo. Native integer sources up to 24-bit retain exact samples; higher
+precision is reduced to 24-bit with deterministic TPDF dither at final output.
+NaNs become silence and out-of-range float values clip. PCM conversion uses
+integer operations and caller-owned buffers. C codecs allocate from a bounded,
+caller-owned arena and release their allocations on completion or cancellation.
+
+Third-party codec implementations are pinned, unmodified sources under `vendor/`.
+All gain-owned adapters, allocation/runtime services and safety checks are Zig.
+The build translates upstream C headers into Zig declarations. The ALAC adapter
+binds the pinned decoder's non-virtual C++ ABI and checks audio element lengths
+before decoding; its zero-denominator predictor cases are handled in Zig.
+The desktop SDL adapter is also Zig.
+
+DMA periods are 10 ms, or 20/40 ms at 22.05/11.025 kHz to preserve integral
+native-rate frames. Startup primes PCM before playback. EOF clears cyclic
+buffers with silence before the output FIFO drains. Linked-descriptor interrupts
+wake output directly; a one-period watchdog bounds a missing notification.
+
+MP4 has direct sample lookup. MP3, FLAC and Ogg decoder seeking currently
+replays from the beginning; the player UI provides track navigation rather than
+scrubbing. MP4/Ogg title parsing is available to decoder callers. Full ID3,
+artist/album, ReplayGain and artwork integration remain incomplete. Analogue
+noise/distortion, switching quality and battery savings require separate
+measurement or listening tests.
+
+PMIC telemetry does not fabricate measurements when an ADC is disabled or I2C
+fails. Jack GPIOs are explicitly configured as inputs before their levels are
+used. The charge-current API can only reduce the existing setting; it does not
+negotiate a USB current budget or change battery voltage settings. Bluetooth
+transport/A2DP, native USB mass storage/audio, RTC, PWM brightness and suspend
+are not implemented. USB development currently uses the X1000 ROM interface.
+
+## Player qualification
+
+`mise run check` builds both firmware images and the RAM qualification image,
+runs the deterministic codec, storage, scheduling, presentation and application
+controller tests, and checks the host USB runner with a mocked transport.
+Upstream C/C++ decoders remain vendored; all gain-owned bridges are Zig.
+
+The physical player checks use the same folder browser, player controller,
+renderer, decoder pipeline and memory factory as the interactive firmware.
+The runner uploads only RAM, returns to the USB ROM loop after each campaign,
+and initializes DRAM only when the PHY reports a cold state. It never writes
+flash or the SD filesystem. Python 3 and the existing X1000 `usbboot` host tool
+are required for these optional hardware checks.
+
+```sh
+GAIN_USBBOOT=/path/to/usbboot mise run check-player-f20 -- --output /tmp/gain-player-matrix
+GAIN_USBBOOT=/path/to/usbboot mise run check-player-f20 -- --mode mixed --repeat 3 --output /tmp/gain-player-mixed
+GAIN_USBBOOT=/path/to/usbboot mise run check-player-f20 -- --mode sd --seconds 180 --output /tmp/gain-player-sd
+GAIN_USBBOOT=/path/to/usbboot mise run check-player-f20 -- --mode sd-fault --seconds 12 --output /tmp/gain-player-fault
+```
+
+The matrix uses synthetic fixtures with known frame counts and rates, and
+compares device PCM checksums with the host decoder through the same pipeline.
+The host decoder is separately checked against independent sample references. Mixed
+mode replays every fixture in the same process to exercise format/rate changes,
+allocator cleanup and task reuse. SD mode browses the actual card and chooses a
+supported file of at least 32 MiB; it requires the file to last for the requested
+duration. Fault mode injects a read error after playback starts, exercising the
+production cancellation and mute path without requiring physical card removal.
+`--mode stop`, `next`, `previous` and `truncated` provide focused checks;
+`--fixture` selects one fixture. Reports, image hashes and JSON results must be
+saved outside the source checkout. The image and report reader are rebuilt by
+default; `--skip-build` is only for an already-built qualification image.
+
+Fixture regression ceilings are 25% of one DMA period for refill, 256 KiB of
+requested decoder heap, 500 ms to DMA start, 10 ms per UI callback, 35 ms
+between UI callbacks, 50 microseconds per interrupt handler, and at least 4 KiB
+free in each task stack. These are fixture budgets, not limits claimed for all
+possible media. Production checks stack bounds at dispatch and stack fences at
+session completion; full stack painting is enabled only for qualification.
+
+The 32-fixture device campaign measured a worst startup of about 241 ms, refill
+of 1.02 ms, UI callback of 5.3 ms and UI interval of 22 ms. Maximum codec stack
+usage was below 69 KiB and UI stack usage below 10 KiB. A 96-track mixed-format
+campaign and a separate 180-second, 96 kHz real-SD/UI run completed without
+underruns; the latter completed 18,003 output periods. Injected SD read failure
+returned `CardRemoved`, and subsequent playback succeeded. These checks do not
+establish physical hot-removal behaviour or analogue audio quality.
 
 ## Development
 
@@ -102,6 +212,28 @@ complete check then builds both firmware images and runs the host-side tests.
 The separate fuzz task runs at least 100,000 generated cases against the SPL
 image builder, WAV parser and FLAC metadata/frame decoder.
 
+`mise run test-ui` runs deterministic presentation, coordinator, rendering and
+geometry tests in Debug and ReleaseFast. It is also part of `mise run check`.
+`mise run fuzz-ui` runs 100,000 generated region/alignment/canary cases from a
+single fuzz corpus owner. The general `mise run fuzz` includes these alongside
+parser fuzzing.
+
+Install SDL3 to run `mise run sim`. On a Homebrew macOS installation use
+`SDL_PREFIX=/opt/homebrew/opt/sdl3 mise run sim`. Keys: Up/Down select,
+Enter plays, Escape returns, +/- adjusts volume, and T changes theme.
+`mise run sim-check` runs the same adapter headlessly through scripted screen,
+volume and theme changes and captures BMPs under `/tmp`.
+
+`mise run bench-ui-f20` runs a RAM-only physical UI qualification and returns to
+the ROM USB loop. Use `GAIN_SKIP_SPL=1` only when DRAM is already initialized.
+`GAIN_USBBOOT` selects the host USB tool, and `GAIN_UI_REPORT` optionally saves
+its report. The host reader rejects incomplete campaigns, pixel mismatches and
+performance regressions: full rendering/live slides at most 3 ms, full snapshot
+preparation at most 5 ms, region rendering plus preparation at most 3 ms, and
+full-frame DMA at most 18 ms. These are isolated-job ceilings, not an end-to-end
+animation or concurrent audio guarantee. The runner writes no persistent
+storage and leaves ROM USB untouched during the bounded campaign.
+
 `mise run bench` measures FLAC decoding, PCM packing and LPC reconstruction on
 the host. `mise run bench-f20` runs the corresponding benchmarks and the
 physical SD read-ahead path on a connected F20 in the mask-ROM USB loop. Device
@@ -113,9 +245,9 @@ Cached-output and synchronous sustained-SD probes are opt-in because they test
 cache coherency and the superseded blocking storage path.
 
 After one successful suite, the F20 remains in the ROM USB loop with DRAM
-initialized. Set `GAIN_SKIP_SPL=1` for later benchmark invocations in that same
-power session so a rebuilt payload can be uploaded without resetting the
-device or re-running DDR initialization.
+initialized. All hardware runners inspect the PHY and skip training when DRAM
+is already warm. `GAIN_SKIP_SPL=1` additionally refuses cold training for an
+explicitly warm-only benchmark invocation; an unexpected PHY state is rejected.
 
 The build places these images in `zig-out/bin`:
 
@@ -141,9 +273,24 @@ The source keeps SoC and board knowledge separate without a runtime HAL:
 | `src/flac.zig` | Portable allocation-free native FLAC frame decoder |
 | `src/flac_pcm.zig` | Portable FLAC stream to fixed DMA chunk conversion |
 | `src/audio.zig` | Native AIC, ES9018K2M and linked-PDMA output |
+| `src/media_decoder.zig` | Shared WAV/AIFF/FLAC/MP3/AAC/ALAC/Vorbis/Opus producer and canonical PCM contract |
+| `src/input_stream.zig` | Bounded storage producer, codec consumer and acknowledged seeks |
+| `src/executive.zig` | Portable task priorities, event latching and deadlines |
+| `src/task_dispatch.zig` | Shared context and trap transitions |
+| `src/codec_pool.zig` | Caller-owned bounded C decoder allocations |
 | `src/playback.zig` | Portable buffer lifecycle and descriptor state machine |
-| `src/f20_media.zig` | Allocation-free F20 WAV/FLAC streaming and audio lifecycle |
+| `src/f20_media.zig` | Shared playback status and control types |
+| `src/f20_player.zig` | F20 task wiring, memory factory, cancellation, output and control ownership |
 | `src/spl.zig` | Ordered clock and DRAM initialization flow |
+| `src/ui.zig` | Bounded declarations, text ownership, clipping, themes and live slide rendering |
+| `src/player_view.zig` | Portable browser/player views and hybrid browser damage |
+| `src/player_presenter.zig` | Portable initial preparation and asynchronous playback update coordination |
+| `src/presentation.zig` | Portable DMA source ownership, geometry expansion and snapshot packing |
+| `src/display_phase.zig` | Tested scanline projection and conservative F20 region windows |
+| `src/f20_display.zig` | F20 panel I/O, calibration and LCD DMA adapter |
+| `src/file_browser.zig` | Shared folder navigation, filtering, selection and rendering |
+| `src/player_screen.zig` | Shared playback input and view controller |
+| `src/task_stack.zig` | Stack bounds, fences and optional high-water measurement |
 | `src/main.zig` | Device behavior and diagnostics |
 
 Small register and pin operations are explicitly inlined. Fixed LPDDR writes
@@ -152,8 +299,10 @@ boundaries remain imperative. Opaque panel and DRAM values are kept together
 as named, board-specific profiles.
 
 The SPL has a 10 KiB code limit imposed by both the linker and image packer.
-Stage two has a 240 KiB link region ending at the framebuffer boundary. A
-budget overflow therefore fails the build.
+Stage two has a 2 MiB link region. `src/f20_memory.zig` owns the physical RAM
+reservations for firmware, display, storage, decoder scratch, PCM and task stacks.
+Linker assertions reject code/BSS overflow; compile-time region checks reject
+overlap, including cached/uncached aliases.
 
 ## Simulation
 
@@ -166,7 +315,30 @@ Simulation targets portable policy and feeds the same modules used on device:
 | `tests/media_pipeline_sim.zig` | Fragmented WAV input, irregular reads, exact PCM frames, partial EOF and buffer recycling through the complete portable media path |
 | `tests/flac_sim.zig` | 24-bit/192 kHz decoding, exact F20 buffer bounds, measured decode deadlines and missed-event rejection |
 | `tests/flac_pipeline_sim.zig` | FAT32 FLAC input, SD DMA alignment, bounce buffering, exact PCM chunks and captured device timing |
+| `src/presentation.zig` tests | Four captured LCD truncation images, delayed FIFO drain/ACK, source lifetime, faults, timeout, timer wrap and event pressure |
+| `src/player_presenter.zig` tests | The actual player coordinator against deterministic delayed DMA, concurrent volume/progress updates, priority/coalescing and failure propagation |
+| `src/player_view.zig` tests | Every slide offset against independent pixel composition, region/full render equivalence, selection damage, themes and bounded maximum metadata |
+| `src/ui.zig` tests | Relocatable text, capacity failure atomicity, widget/surface clipping and canaries |
+| `tests/codec_stream_tests.zig` | 32 fixtures; independent PCM references, trim/seek/reset, fragmented reads, cancellation, card removal and allocation cleanup |
+| `tests/codec_pipeline_sim.zig` | Production buffered input, decoders, PCM reservoir and DMA packing under three seeded storage schedules per fixture |
+| `tests/container_fuzz.zig` | MP4 atoms, offsets, sample cursors, Ogg pages/continuations and output canaries |
+| `tests/ui_fuzz.zig` | Generated even-width expansion, packed row correctness and destination canaries |
 | Inline source tests | Register encodings, clock ratios, descriptors and other pure hardware facts |
+
+`mise run test-codecs` checks the shared producer in ReleaseSafe and ReleaseFast
+and links every engine for freestanding MIPS. `zig build check-codecs-f20` runs
+that compile/link gate alone; its image has no hardware startup and is never
+installed or deployed.
+`mise run test-pipeline` checks executive/input/output policy in Debug and
+ReleaseFast. `mise run fuzz-codecs` runs separate 100,000-case campaigns for
+PCM/WAV/AIFF, MP4 and Ogg. Ordinary `mise run check` includes the fixed fuzz
+corpora; extended fuzzing is explicit.
+
+The shared multi-codec path is enabled in the device player. Scheduler/FPU,
+codec fixtures and SD/UI concurrency also have RAM-only hardware qualification.
+Host simulations control event order; they do not emulate CPU instruction timing
+or establish battery consumption. Longer field use and power measurements remain
+separate qualification work.
 
 The tests do not emulate the X1000. MMIO sequencing is checked by compiling
 the concrete F20 specializations and by RAM-only tests on the physical device.
@@ -174,7 +346,8 @@ the concrete F20 specializations and by RAM-only tests on the physical device.
 ## RAM boot
 
 The development boot uses the X1000 mask ROM and a compatible `usbboot` host
-tool. It does not modify storage.
+tool. It does not modify storage. Run the SPL command only after a cold reset;
+never retrain DRAM while reusing a warm ROM USB session.
 
 ```sh
 usbboot --cpu x1000 --stage1 zig-out/bin/gain-spl.bin
@@ -189,6 +362,5 @@ stage two and calls gain's handoff at `0xf4001a00`.
 
 ## License
 
-gain is released under the [MIT License](LICENSE).
-
-
+gain is released under the [MIT License](LICENSE). Vendored code retains its
+upstream notices; pinned sources and local changes are listed in `vendor/sources.json`.

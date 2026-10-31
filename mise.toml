@@ -56,6 +56,7 @@ run = [
     { task = "lint" },
     { task = "build" },
     { task = "test" },
+    { task = "test-tools" },
 ]
 
 [tasks.fuzz-codecs]
@@ -69,3 +70,11 @@ run = "zig build test-codecs --summary all"
 [tasks.test-pipeline]
 description = "Run deterministic executive, input, memory and output regressions"
 run = "zig build test-pipeline --summary all"
+
+[tasks.check-player-f20]
+description = "Qualify the production player over RAM-only USB (set GAIN_USBBOOT; pass --output)"
+run = "python3 tools/run_player_checks.py"
+
+[tasks.test-tools]
+description = "Test RAM-only qualification transport policy with mocked USB"
+run = "python3 -m unittest discover -s tools -p 'test_*.py'"

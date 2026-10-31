@@ -51,6 +51,31 @@ pub fn build(b: *std.Build) void {
     b.getInstallStep().dependOn(&b.addInstallFileWithDir(spl_image, .bin, "gain-spl.bin").step);
     b.getInstallStep().dependOn(&b.addInstallFileWithDir(stage2_raw.getOutput(), .bin, "gain-stage2.bin").step);
 
+    const player_check_api = b.createModule(.{ .root_source_file = b.path("src/f20.zig"), .target = target, .optimize = .ReleaseFast });
+    @import("build_codecs.zig").add(b, player_check_api, target, .ReleaseFast, true);
+    const player_check_module = b.createModule(.{ .root_source_file = b.path("tools/player_check.zig"), .target = target, .optimize = .ReleaseFast });
+    player_check_module.addImport("gain", player_check_api);
+    player_check_module.addAssemblyFile(b.path("tools/player_check_start.S"));
+    player_check_module.addAssemblyFile(b.path("src/x1000_context.S"));
+    const player_check = b.addExecutable(.{ .name = "gain-player-check.elf", .root_module = player_check_module });
+    player_check.entry = .disabled;
+    player_check.setLinkerScript(b.path("stage2.ld"));
+    const player_check_step = b.step("player-check-f20", "Build bounded RAM-only production player qualification");
+    player_check_step.dependOn(&b.addInstallArtifact(player_check, .{}).step);
+    player_check_step.dependOn(&b.addInstallFileWithDir(spl_image, .bin, "gain-spl.bin").step);
+    const player_check_raw = player_check.addObjCopy(.{ .format = .binary, .basename = "gain-player-check.bin" });
+    player_check_step.dependOn(&b.addInstallFileWithDir(player_check_raw.getOutput(), .bin, "gain-player-check.bin").step);
+    const player_reader = b.addExecutable(.{ .name = "read-player-check", .root_module = b.createModule(.{ .root_source_file = b.path("tools/read_player_check.zig"), .target = b.graph.host, .optimize = .ReleaseSafe }) });
+    player_check_step.dependOn(&b.addInstallArtifact(player_reader, .{}).step);
+    b.getInstallStep().dependOn(&player_check.step);
+    const reference_api = b.createModule(.{ .root_source_file = b.path("src/f20.zig"), .target = b.graph.host, .optimize = .ReleaseFast, .link_libc = true });
+    @import("build_codecs.zig").add(b, reference_api, b.graph.host, .ReleaseFast, false);
+    const reference_module = b.createModule(.{ .root_source_file = b.path("tools/player_reference.zig"), .target = b.graph.host, .optimize = .ReleaseFast, .link_libc = true });
+    reference_module.addImport("gain", reference_api);
+    reference_module.addImport("fixtures", b.createModule(.{ .root_source_file = b.path("tests/codec_fixtures.zig"), .target = b.graph.host, .optimize = .ReleaseFast }));
+    const reference = b.addExecutable(.{ .name = "player-reference", .root_module = reference_module, .use_llvm = true });
+    player_check_step.dependOn(&b.addInstallArtifact(reference, .{}).step);
+
     // SDL is optional; ordinary firmware/test builds need no desktop library.
     const simulator_module = b.createModule(.{ .root_source_file = b.path("tools/ui_sim.zig"), .target = b.graph.host, .optimize = .ReleaseFast });
     // A single root module avoids duplicate type identities between view/UI.
@@ -331,7 +356,7 @@ pub fn build(b: *std.Build) void {
     }
     const pipeline_tests_step = b.step("test-pipeline", "Run shared executive, session and PCM pipeline regressions");
     for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |mode| {
-        for ([_][]const u8{ "src/file_browser.zig", "src/player_screen.zig", "src/f20_player.zig", "src/buffer_regions.zig", "src/executive.zig", "src/task_context.zig", "src/task_stack.zig", "src/task_dispatch.zig", "src/byte_ring.zig", "src/input_stream.zig", "src/codec_pool.zig", "src/codec_runtime.zig", "src/media_source.zig", "src/f20_memory.zig", "src/pcm_reservoir.zig", "src/audio_output.zig" }) |source| {
+        for ([_][]const u8{ "tools/player_check_report.zig", "tools/player_pcm_checksum.zig", "src/file_browser.zig", "src/player_screen.zig", "src/f20_player.zig", "src/buffer_regions.zig", "src/executive.zig", "src/task_context.zig", "src/task_stack.zig", "src/task_dispatch.zig", "src/byte_ring.zig", "src/input_stream.zig", "src/codec_pool.zig", "src/codec_runtime.zig", "src/media_source.zig", "src/f20_memory.zig", "src/pcm_reservoir.zig", "src/audio_output.zig" }) |source| {
             const tests = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path(source), .target = b.graph.host, .optimize = mode }) });
             pipeline_tests_step.dependOn(&b.addRunArtifact(tests).step);
         }

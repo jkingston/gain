@@ -9,3 +9,5 @@ dist/
 *.bin
 *.map
 
+__pycache__/
+*.pyc
