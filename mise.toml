@@ -38,13 +38,21 @@ run = "zig build test-ui --summary all"
 description = "Fuzz display packing and bounds with 100,000 cases"
 run = "zig build fuzz-ui --fuzz=100K --summary all"
 
+[tasks.build-sim]
+description = "Build the generic F20 simulator (SDL3 required)"
+run = 'zig build build-sim ${SDL_PREFIX:+-Dsdl-prefix="$SDL_PREFIX"}'
+
 [tasks.sim]
-description = "Run desktop UI (SDL3; set SDL_PREFIX when needed)"
-run = 'zig build sim ${SDL_PREFIX:+-Dsdl-prefix="$SDL_PREFIX"}'
+description = "Run a native app in the F20 simulator (set GAIN_SIM_APP)"
+run = 'zig build sim -Dsim-app="${GAIN_SIM_APP:?Set GAIN_SIM_APP to a native app library}" ${SDL_PREFIX:+-Dsdl-prefix="$SDL_PREFIX"}'
 
 [tasks.sim-check]
-description = "Run scripted desktop UI smoke test without a display"
-run = 'SDL_VIDEODRIVER=dummy GAIN_UI_SMOKE=1 zig build sim ${SDL_PREFIX:+-Dsdl-prefix="$SDL_PREFIX"}'
+description = "Run native simulator release qualification headlessly"
+run = 'zig build test-sim ${SDL_PREFIX:+-Dsdl-prefix="$SDL_PREFIX"} --summary all'
+
+[tasks.fuzz-sim]
+description = "Fuzz bounded simulator JSON commands without SDL"
+run = "zig build test-sim-core --fuzz=100K --summary all"
 
 [tasks.bench-ui-f20]
 description = "Run RAM-only UI pixel and performance qualification on the F20"

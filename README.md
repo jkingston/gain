@@ -78,9 +78,9 @@ not claims about every file, analogue performance or battery life.
 
 The interactive player uses a shared declarative renderer for its browser and
 now-playing views. Declarations own their copied text, use fixed command/text
-budgets, clip glyphs to their widget, and accept a theme. The desktop adapter
-uses the same view declarations and rasterizer. Its media list is fixture data;
-the device browser continues to read the actual FAT32 microSD.
+budgets, clip glyphs to their widget, and accept a theme. The desktop simulator presents the same framebuffer format and physical inputs;
+apps own their rendering and navigation. The device browser reads the actual
+FAT32 microSD.
 
 Presentation is hybrid: volume, progress and selection rows use true region
 DMA; initial presentation and screen changes use full-frame DMA. Odd dirty
@@ -218,11 +218,113 @@ geometry tests in Debug and ReleaseFast. It is also part of `mise run check`.
 single fuzz corpus owner. The general `mise run fuzz` includes these alongside
 parser fuzzing.
 
-Install SDL3 to run `mise run sim`. On a Homebrew macOS installation use
-`SDL_PREFIX=/opt/homebrew/opt/sdl3 mise run sim`. Keys: Up/Down select,
-Enter plays, Escape returns, +/- adjusts volume, and T changes theme.
-`mise run sim-check` runs the same adapter headlessly through scripted screen,
-volume and theme changes and captures BMPs under `/tmp`.
+### Desktop simulator
+
+The generic F20 simulator loads a native app module, presents its 320 x 240
+RGB565 screen and forwards wheel/button events. It contains no music library,
+theme selector or navigation model. UI experiments and mock media stay outside
+the production repository. The host does not simulate the CPU, panel scanout,
+audio hardware or SD controller.
+
+Install SDL3 and build the optional host:
+
+```sh
+mise run build-sim
+zig-out/bin/gain-sim --app /absolute/path/app.dylib --watch
+```
+
+`SDL_PREFIX=/opt/homebrew/opt/sdl3 mise run build-sim` selects a different SDL3
+prefix on macOS. `mise run sim` also runs an app when `GAIN_SIM_APP` is set.
+Firmware builds and the ordinary host tests do not require SDL3.
+
+The framebuffer uses the production UI's geometry and RGB565 representation.
+The host chooses the largest integer scale fitting the **physical renderer
+pixels**, including Retina/fractional desktop densities, and letterboxes the
+result. Texture filtering is nearest-neighbour. Pixels stay square and uniformly
+sized; desktop DPI is not a claim about the F20's physical screen size.
+
+| F20 input | Desktop input |
+|---|---|
+| Wheel backward/forward | Mouse wheel or Up/Down (K/J) |
+| Play/centre | Enter or Space |
+| Back | Esc or Backspace |
+| Menu | M |
+| Previous/Next | `[` / `]` |
+| Volume up/down | `+` / `-` |
+| Power | P |
+
+Button events include press, release and repeat. Wheel fractions accumulate
+rather than rounding every trackpad sample up. Focus loss releases held inputs;
+keyboard aliases release only after their final source. F5 reloads the current
+module. `--watch` reloads rebuilt module files after their size/time stamp settles.
+
+Apps export `gain_app_api`, returning `simulator.Api` from
+[src/simulator.zig](src/simulator.zig). Its ABI version, structure size, geometry,
+format and callbacks are validated before activation. `init` and `input` receive
+monotonic milliseconds; `frame` writes native pixels and reports whether they
+changed. Optional paired `save`/`restore` callbacks preserve app state up to
+64 KiB. Save must leave the running app intact; restore validates its own state
+format, including an empty snapshot if save returns zero. A rejected, oversized
+or incompatible snapshot retains the running app.
+Snapshots must serialize data rather than retain pointers into the old module.
+Apps without snapshot callbacks restart on reload. Optional `deinit` releases
+app-owned resources before unloading, including candidates whose restore failed.
+
+An app using gain's renderer should import **one** module rooted at
+`src/ui_api.zig`, then use that module's `.ui` and `.simulator` exports. This
+avoids duplicate ownership/type identities for the shared UI sources. Apps that
+only need the pixel/input contract may import `src/simulator.zig` directly. The
+module ABI is desktop development tooling, independent of any future firmware
+extension system.
+
+For source-triggered rebuilds, the stdlib-only Python helper runs an argument
+list without a shell and preserves the old app after build/reload failures:
+
+```sh
+python3 tools/sim.py run --app /absolute/path/app.dylib \
+  --project /path/to/app-project --watch /path/to/app-project/src \
+  --build mise exec -- zig build
+```
+
+Watch all relevant source/asset paths with repeated `--watch`; build files and
+assets are not inferred. Compiler outputs and caches are excluded. Host source
+changes require rebuilding and restarting the host.
+
+The native host prints its private control directory. `--control-dir PATH`
+chooses a **new** directory explicitly; an existing directory is rejected so two
+instances cannot consume the same commands. Commands and screenshots do not
+require accessibility permission:
+
+```sh
+python3 tools/sim.py control --directory /printed/session input --button volume_up
+python3 tools/sim.py control --directory /printed/session input --button select --phase press
+python3 tools/sim.py control --directory /printed/session input --button select --phase release
+python3 tools/sim.py control --directory /printed/session capture --path '/tmp/native screen.bmp'
+python3 tools/sim.py control --directory /printed/session capture --window --path /tmp/window.bmp
+python3 tools/sim.py control --directory /printed/session reload
+python3 tools/sim.py control --directory /printed/session quit
+```
+
+Requests/responses are atomic UTF-8 JSON with explicit success/failure and
+geometry in physical pixels. There is one in-flight request per instance. A
+retry with the same request ID repeats the last response without applying the
+input twice; retry before issuing a different command. Failures are never
+reported as successful captures or reloads. Module copies live in the instance
+directory and are removed when unloaded. The final response remains readable
+after clean shutdown; the Python run helper owns and cleans its temporary tree.
+
+`--headless --capture FILE.bmp` captures one native frame and exits. Native
+captures exclude window scaling; `--window` captures the composed renderer,
+including letterboxing. These are UI pixels, not a simulation of LCD timing.
+
+`mise run sim-check` tests real dynamic module loading, every input/phase,
+request retry IDs, rejected ABI/entry points, transactional restoration failures,
+actual changed-code reload, independent instances, Unicode paths, capture errors
+and exact pixel scaling using an every-pixel RGB pattern. It runs headlessly
+with SDL3. `zig build test-sim -Dsim-visible=true` repeats qualification with a
+native window and its actual display density. The SDL-independent policies and
+Python transport/watcher tests also run in `mise run check`; `mise run fuzz-sim`
+fuzzes bounded JSON requests with at least 100,000 generated cases.
 
 `mise run bench-ui-f20` runs a RAM-only physical UI qualification and returns to
 the ROM USB loop. Use `GAIN_SKIP_SPL=1` only when DRAM is already initialized.

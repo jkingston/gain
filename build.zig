@@ -76,28 +76,46 @@ pub fn build(b: *std.Build) void {
     const reference = b.addExecutable(.{ .name = "player-reference", .root_module = reference_module, .use_llvm = true });
     player_check_step.dependOn(&b.addInstallArtifact(reference, .{}).step);
 
-    // SDL is optional; ordinary firmware/test builds need no desktop library.
-    const simulator_module = b.createModule(.{ .root_source_file = b.path("tools/ui_sim.zig"), .target = b.graph.host, .optimize = .ReleaseFast });
-    // A single root module avoids duplicate type identities between view/UI.
-    const sim_api = b.createModule(.{ .root_source_file = b.path("src/ui_api.zig"), .target = b.graph.host, .optimize = .ReleaseFast });
-    simulator_module.addImport("gain_ui", sim_api);
-    const sdl_prefix = b.option([]const u8, "sdl-prefix", "SDL3 installation prefix (optional)") orelse
-        if (b.graph.host.result.os.tag == .macos) "/opt/homebrew" else "/usr";
-    const sdl_headers = b.addTranslateC(.{
-        .root_source_file = .{ .cwd_relative = b.pathJoin(&.{ sdl_prefix, "include", "SDL3", "SDL.h" }) },
-        .target = b.graph.host,
-        .optimize = .ReleaseFast,
-    });
+    // SDL is optional: firmware and ordinary host tests do not build it.
+    const simulator_api = b.createModule(.{ .root_source_file = b.path("src/simulator.zig"), .target = b.graph.host, .optimize = .ReleaseSafe });
+    const simulator_module = b.createModule(.{ .root_source_file = b.path("tools/sim.zig"), .target = b.graph.host, .optimize = .ReleaseSafe, .link_libc = true });
+    simulator_module.addImport("gain_simulator", simulator_api);
+    const sdl_prefix = b.option([]const u8, "sdl-prefix", "SDL3 installation prefix") orelse if (b.graph.host.result.os.tag == .macos) "/opt/homebrew" else "/usr";
+    const sdl_headers = b.addTranslateC(.{ .root_source_file = .{ .cwd_relative = b.pathJoin(&.{ sdl_prefix, "include/SDL3/SDL.h" }) }, .target = b.graph.host, .optimize = .ReleaseSafe });
     sdl_headers.addSystemIncludePath(.{ .cwd_relative = b.pathJoin(&.{ sdl_prefix, "include" }) });
     simulator_module.addImport("sdl", sdl_headers.createModule());
     simulator_module.addLibraryPath(.{ .cwd_relative = b.pathJoin(&.{ sdl_prefix, "lib" }) });
     simulator_module.addRPath(.{ .cwd_relative = b.pathJoin(&.{ sdl_prefix, "lib" }) });
     simulator_module.linkSystemLibrary("SDL3", .{});
-    simulator_module.link_libc = true;
-    const simulator = b.addExecutable(.{ .name = "gain-ui-sim", .root_module = simulator_module });
+    const simulator = b.addExecutable(.{ .name = "gain-sim", .root_module = simulator_module });
+    b.step("build-sim", "Build the generic F20 desktop simulator").dependOn(&b.addInstallArtifact(simulator, .{}).step);
     const simulator_run = b.addRunArtifact(simulator);
-    b.step("sim", "Run the desktop UI simulator").dependOn(&simulator_run.step);
-    b.step("build-sim", "Build the desktop UI simulator").dependOn(&b.addInstallArtifact(simulator, .{}).step);
+    if (b.option([]const u8, "sim-app", "Native app library to run")) |path| simulator_run.addArgs(&.{ "--app", path });
+    if (b.option(bool, "sim-watch", "Reload the app when its built module changes") orelse false) simulator_run.addArg("--watch");
+    b.step("sim", "Run a native app in the F20 simulator (-Dsim-app=PATH)").dependOn(&simulator_run.step);
+    const sim_core_module = b.createModule(.{ .root_source_file = b.path("tools/sim_core.zig"), .target = b.graph.host, .optimize = .Debug });
+    sim_core_module.addImport("gain_simulator", simulator_api);
+    const sim_unit_tests = b.addTest(.{ .root_module = sim_core_module });
+    const sim_policy_step = b.step("test-sim-core", "Test simulator policies without SDL");
+    sim_policy_step.dependOn(&b.addRunArtifact(sim_unit_tests).step);
+    const sim_check = b.addSystemCommand(&.{ "python3", "tools/check_sim.py", "--sim" });
+    sim_check.addArtifactArg(simulator);
+    if (b.option(bool, "sim-visible", "Run simulator qualification in a visible native window") orelse false) sim_check.addArg("--visible");
+    const SimFixture = enum { good, bad_version, reject, oversized, missing, changed };
+    for (std.enums.values(SimFixture)) |variant| {
+        const name = if (variant == .bad_version) "bad-version" else @tagName(variant);
+        const fixture_module = b.createModule(.{ .root_source_file = b.path("tests/sim_app.zig"), .target = b.graph.host, .optimize = .ReleaseSafe, .link_libc = true });
+        fixture_module.addImport("gain_simulator", simulator_api);
+        const fixture_options = b.addOptions();
+        fixture_options.addOption(SimFixture, "variant", variant);
+        fixture_module.addOptions("sim_fixture", fixture_options);
+        const fixture = b.addLibrary(.{ .name = b.fmt("sim-{s}", .{name}), .linkage = .dynamic, .root_module = fixture_module });
+        sim_check.addArg(b.fmt("--{s}", .{name}));
+        sim_check.addArtifactArg(fixture);
+    }
+    const sim_test_step = b.step("test-sim", "Qualify native loading, reload, input and pixel presentation headlessly");
+    sim_test_step.dependOn(sim_policy_step);
+    sim_test_step.dependOn(&sim_check.step);
 
     const ui_benchmark_module = b.createModule(.{ .root_source_file = b.path("tools/bench_ui.zig"), .target = target, .optimize = .ReleaseFast });
     ui_benchmark_module.addAssemblyFile(b.path("tools/bench_start.S"));
@@ -386,6 +404,7 @@ pub fn build(b: *std.Build) void {
     b.step("check-codecs-f20", "Compile and link the complete codec path for freestanding MIPS").dependOn(&codec_link_check.step);
     codec_tests_step.dependOn(&codec_link_check.step);
     const test_step = b.step("test", "Run host-side tests");
+    test_step.dependOn(sim_policy_step);
     test_step.dependOn(codec_tests_step);
     test_step.dependOn(pipeline_tests_step);
     test_step.dependOn(display_tests_step);
