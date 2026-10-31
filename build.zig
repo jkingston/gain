@@ -38,6 +38,8 @@ pub fn build(b: *std.Build) void {
         .strip = true,
     });
     stage2_module.addAssemblyFile(b.path("src/start.S"));
+    stage2_module.addAssemblyFile(b.path("src/x1000_context.S"));
+    @import("build_codecs.zig").add(b, stage2_module, target, .ReleaseFast, true);
     const stage2 = b.addExecutable(.{ .name = "gain-stage2.elf", .root_module = stage2_module });
     stage2.entry = .disabled;
     stage2.setLinkerScript(b.path("stage2.ld"));
@@ -48,6 +50,46 @@ pub fn build(b: *std.Build) void {
     b.getInstallStep().dependOn(&b.addInstallFileWithDir(spl_raw.getOutput(), .bin, "gain-spl.raw").step);
     b.getInstallStep().dependOn(&b.addInstallFileWithDir(spl_image, .bin, "gain-spl.bin").step);
     b.getInstallStep().dependOn(&b.addInstallFileWithDir(stage2_raw.getOutput(), .bin, "gain-stage2.bin").step);
+
+    // SDL is optional; ordinary firmware/test builds need no desktop library.
+    const simulator_module = b.createModule(.{ .root_source_file = b.path("tools/ui_sim.zig"), .target = b.graph.host, .optimize = .ReleaseFast });
+    // A single root module avoids duplicate type identities between view/UI.
+    const sim_api = b.createModule(.{ .root_source_file = b.path("src/ui_api.zig"), .target = b.graph.host, .optimize = .ReleaseFast });
+    simulator_module.addImport("gain_ui", sim_api);
+    const sdl_prefix = b.option([]const u8, "sdl-prefix", "SDL3 installation prefix (optional)") orelse
+        if (b.graph.host.result.os.tag == .macos) "/opt/homebrew" else "/usr";
+    const sdl_headers = b.addTranslateC(.{
+        .root_source_file = .{ .cwd_relative = b.pathJoin(&.{ sdl_prefix, "include", "SDL3", "SDL.h" }) },
+        .target = b.graph.host,
+        .optimize = .ReleaseFast,
+    });
+    sdl_headers.addSystemIncludePath(.{ .cwd_relative = b.pathJoin(&.{ sdl_prefix, "include" }) });
+    simulator_module.addImport("sdl", sdl_headers.createModule());
+    simulator_module.addLibraryPath(.{ .cwd_relative = b.pathJoin(&.{ sdl_prefix, "lib" }) });
+    simulator_module.addRPath(.{ .cwd_relative = b.pathJoin(&.{ sdl_prefix, "lib" }) });
+    simulator_module.linkSystemLibrary("SDL3", .{});
+    simulator_module.link_libc = true;
+    const simulator = b.addExecutable(.{ .name = "gain-ui-sim", .root_module = simulator_module });
+    const simulator_run = b.addRunArtifact(simulator);
+    b.step("sim", "Run the desktop UI simulator").dependOn(&simulator_run.step);
+    b.step("build-sim", "Build the desktop UI simulator").dependOn(&b.addInstallArtifact(simulator, .{}).step);
+
+    const ui_benchmark_module = b.createModule(.{ .root_source_file = b.path("tools/bench_ui.zig"), .target = target, .optimize = .ReleaseFast });
+    ui_benchmark_module.addAssemblyFile(b.path("tools/bench_start.S"));
+    ui_benchmark_module.addImport("gain", b.createModule(.{ .root_source_file = b.path("src/f20.zig"), .target = target, .optimize = .ReleaseFast }));
+    const ui_benchmark = b.addExecutable(.{ .name = "gain-ui-bench.elf", .root_module = ui_benchmark_module });
+    ui_benchmark.entry = .disabled;
+    ui_benchmark.setLinkerScript(b.path("tools/bench_ui.ld"));
+    b.getInstallStep().dependOn(&ui_benchmark.step);
+    const ui_benchmark_raw = ui_benchmark.addObjCopy(.{ .format = .binary, .basename = "gain-ui-bench.bin" });
+    const ui_benchmark_step = b.step("bench-ui-f20", "Build RAM-only UI ownership/performance qualification");
+    ui_benchmark_step.dependOn(&b.addInstallArtifact(ui_benchmark, .{}).step);
+    ui_benchmark_step.dependOn(&b.addInstallFileWithDir(ui_benchmark_raw.getOutput(), .bin, "gain-ui-bench.bin").step);
+    ui_benchmark_step.dependOn(&b.addInstallFileWithDir(spl_image, .bin, "gain-spl.bin").step);
+    const ui_reader = b.addExecutable(.{ .name = "read-ui-bench", .root_module = b.createModule(.{ .root_source_file = b.path("tools/read_ui_bench.zig"), .target = b.graph.host, .optimize = .ReleaseSafe }) });
+    const ui_reader_run = b.addRunArtifact(ui_reader);
+    if (b.option([]const u8, "ui-report", "UI benchmark report path")) |path| ui_reader_run.addArg(path);
+    b.step("read-ui-bench", "Validate one F20 UI benchmark report").dependOn(&ui_reader_run.step);
 
     const benchmark_flac_module = b.createModule(.{
         .root_source_file = b.path("tests/bench_flac.zig"),
@@ -253,6 +295,47 @@ pub fn build(b: *std.Build) void {
     });
     flac_pipeline_sim_module.addImport("f20", f20_module);
     const flac_pipeline_sim_tests = b.addTest(.{ .root_module = flac_pipeline_sim_module });
+    const display_tests_step = b.step("test-ui", "Run UI and presentation regressions in Debug and ReleaseFast");
+    for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |mode| {
+        for ([_][]const u8{ "src/ui.zig", "src/presentation.zig", "src/display_phase.zig", "src/player_view.zig", "src/player_presenter.zig", "tools/ui_bench_report.zig" }) |source| {
+            const tests = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path(source), .target = b.graph.host, .optimize = mode }) });
+            display_tests_step.dependOn(&b.addRunArtifact(tests).step);
+        }
+    }
+    const ui_fuzz_module = b.createModule(.{ .root_source_file = b.path("tests/ui_fuzz.zig"), .target = b.graph.host, .optimize = .ReleaseSafe });
+    ui_fuzz_module.addImport("gain_ui", b.createModule(.{ .root_source_file = b.path("src/ui_api.zig"), .target = b.graph.host, .optimize = .ReleaseSafe }));
+    const ui_fuzz_tests = b.addTest(.{ .root_module = ui_fuzz_module });
+    const ui_fuzz_run = b.addRunArtifact(ui_fuzz_tests);
+    display_tests_step.dependOn(&ui_fuzz_run.step);
+    b.step("fuzz-ui", "Fuzz display packing from one corpus owner").dependOn(&ui_fuzz_run.step);
+    const hardware_support_step = b.step("test-hardware", "Run codec and board protocol tests in Debug and ReleaseFast");
+    for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |mode| {
+        for ([_][]const u8{ "src/aiff.zig", "src/flac_pcm.zig", "src/pcm_sample.zig", "src/es9018k2m.zig", "src/axp192.zig", "src/pdma_frontier.zig", "src/dac_lock.zig", "src/output_route.zig", "src/audio.zig" }) |source| {
+            const tests = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path(source), .target = b.graph.host, .optimize = mode }) });
+            hardware_support_step.dependOn(&b.addRunArtifact(tests).step);
+        }
+    }
+    const codec_fuzz_module = b.createModule(.{ .root_source_file = b.path("tests/codec_fuzz.zig"), .target = b.graph.host, .optimize = .ReleaseSafe });
+    codec_fuzz_module.addImport("codecs", b.createModule(.{ .root_source_file = b.path("src/codec_api.zig"), .target = b.graph.host, .optimize = .ReleaseSafe }));
+    const codec_fuzz_tests = b.addTest(.{ .root_module = codec_fuzz_module });
+    const codec_fuzz_run = b.addRunArtifact(codec_fuzz_tests);
+    hardware_support_step.dependOn(&codec_fuzz_run.step);
+    const codec_fuzz_step = b.step("fuzz-codecs", "Fuzz container parsing and PCM conversion");
+    codec_fuzz_step.dependOn(&codec_fuzz_run.step);
+    const container_fuzz_module = b.createModule(.{ .root_source_file = b.path("tests/container_fuzz.zig"), .target = b.graph.host, .optimize = .ReleaseSafe });
+    container_fuzz_module.addImport("gain", b.createModule(.{ .root_source_file = b.path("src/f20.zig"), .target = b.graph.host, .optimize = .ReleaseSafe }));
+    for ([_][]const u8{ "fuzz MP4", "fuzz Ogg" }) |filter| {
+        const container_fuzz_run = b.addRunArtifact(b.addTest(.{ .root_module = container_fuzz_module, .filters = &.{filter} }));
+        codec_fuzz_step.dependOn(&container_fuzz_run.step);
+        hardware_support_step.dependOn(&container_fuzz_run.step);
+    }
+    const pipeline_tests_step = b.step("test-pipeline", "Run shared executive, session and PCM pipeline regressions");
+    for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |mode| {
+        for ([_][]const u8{ "src/file_browser.zig", "src/player_screen.zig", "src/f20_player.zig", "src/buffer_regions.zig", "src/executive.zig", "src/task_context.zig", "src/task_stack.zig", "src/task_dispatch.zig", "src/byte_ring.zig", "src/input_stream.zig", "src/codec_pool.zig", "src/codec_runtime.zig", "src/media_source.zig", "src/f20_memory.zig", "src/pcm_reservoir.zig", "src/audio_output.zig" }) |source| {
+            const tests = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path(source), .target = b.graph.host, .optimize = mode }) });
+            pipeline_tests_step.dependOn(&b.addRunArtifact(tests).step);
+        }
+    }
     const codec_tests_step = b.step("test-codecs", "Run production decoder and container integration tests");
     for ([_]std.builtin.OptimizeMode{ .ReleaseSafe, .ReleaseFast }) |mode| {
         const codec_module = b.createModule(.{ .root_source_file = b.path("src/f20.zig"), .target = b.graph.host, .optimize = mode, .link_libc = true });
@@ -277,30 +360,11 @@ pub fn build(b: *std.Build) void {
     codec_link_check.setLinkerScript(b.path("stage2.ld"));
     b.step("check-codecs-f20", "Compile and link the complete codec path for freestanding MIPS").dependOn(&codec_link_check.step);
     codec_tests_step.dependOn(&codec_link_check.step);
-    const codec_fuzz_module = b.createModule(.{ .root_source_file = b.path("tests/codec_fuzz.zig"), .target = b.graph.host, .optimize = .ReleaseSafe });
-    codec_fuzz_module.addImport("codecs", b.createModule(.{ .root_source_file = b.path("src/codec_api.zig"), .target = b.graph.host, .optimize = .ReleaseSafe }));
-    const codec_fuzz_tests = b.addTest(.{ .root_module = codec_fuzz_module });
-    const codec_fuzz_run = b.addRunArtifact(codec_fuzz_tests);
-    codec_tests_step.dependOn(&codec_fuzz_run.step);
-    const codec_fuzz_step = b.step("fuzz-codecs", "Fuzz container parsing and PCM conversion");
-    codec_fuzz_step.dependOn(&codec_fuzz_run.step);
-    const container_fuzz_module = b.createModule(.{ .root_source_file = b.path("tests/container_fuzz.zig"), .target = b.graph.host, .optimize = .ReleaseSafe });
-    container_fuzz_module.addImport("gain", b.createModule(.{ .root_source_file = b.path("src/f20.zig"), .target = b.graph.host, .optimize = .ReleaseSafe }));
-    for ([_][]const u8{ "fuzz MP4", "fuzz Ogg" }) |filter| {
-        const container_fuzz_run = b.addRunArtifact(b.addTest(.{ .root_module = container_fuzz_module, .filters = &.{filter} }));
-        codec_fuzz_step.dependOn(&container_fuzz_run.step);
-        codec_tests_step.dependOn(&container_fuzz_run.step);
-    }
-    const pipeline_tests_step = b.step("test-pipeline", "Run buffered media pipeline regressions");
-    for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |mode| {
-        for ([_][]const u8{ "src/aiff.zig", "src/pcm_sample.zig", "src/buffer_regions.zig", "src/byte_ring.zig", "src/input_stream.zig", "src/codec_pool.zig", "src/codec_runtime.zig", "src/media_source.zig", "src/f20_memory.zig", "src/pcm_reservoir.zig", "src/audio_output.zig" }) |source| {
-            const tests = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path(source), .target = b.graph.host, .optimize = mode }) });
-            pipeline_tests_step.dependOn(&b.addRunArtifact(tests).step);
-        }
-    }
     const test_step = b.step("test", "Run host-side tests");
     test_step.dependOn(codec_tests_step);
     test_step.dependOn(pipeline_tests_step);
+    test_step.dependOn(display_tests_step);
+    test_step.dependOn(hardware_support_step);
     test_step.dependOn(&b.addRunArtifact(packer_tests).step);
     test_step.dependOn(&b.addRunArtifact(hardware_tests).step);
     test_step.dependOn(&b.addRunArtifact(sd_tests).step);

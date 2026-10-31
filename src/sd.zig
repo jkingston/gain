@@ -32,6 +32,42 @@ const Command = struct {
     blocks: u16 = 0,
 };
 
+/// Pure command-completion policy, shared by polling and IRQ-backed waits.
+/// A DMA completion also proves a response is ready even if its earlier flag
+/// was coalesced. Error flags always take precedence over a completion.
+const Completion = struct {
+    done: u32,
+    response_pending: bool,
+    const Decision = struct {
+        failed: bool = false,
+        read_response: bool = false,
+        acknowledge_response: bool = false,
+        complete: bool = false,
+    };
+    fn observe(self: *Completion, flags: u32) Decision {
+        if (flags & x1000.Msc0.error_flags != 0) return .{ .failed = true };
+        const complete = flags & self.done != 0;
+        const response = self.response_pending and (complete or flags & x1000.Msc0.response_end != 0);
+        if (response) self.response_pending = false;
+        return .{
+            .read_response = response,
+            .acknowledge_response = response and flags & x1000.Msc0.response_end != 0,
+            .complete = complete,
+        };
+    }
+    fn waitMask(self: Completion) u32 {
+        return self.done | x1000.Msc0.error_flags | if (self.response_pending) x1000.Msc0.response_end else @as(u32, 0);
+    }
+};
+
+/// Optional task suspension between hardware events. Initialization and callers
+/// without an executive retain the polling path.
+pub const Waiter = struct {
+    context: *anyopaque,
+    prepare: *const fn (*anyopaque, u32) void,
+    wait: *const fn (*anyopaque, u32) void,
+};
+
 /// Native, read-only SD controller. Board supplies compile-time wiring and
 /// clocks; the caller supplies uncached DMA storage so no cache maintenance is
 /// needed in the playback path.
@@ -45,6 +81,7 @@ pub fn Controller(comptime Board: type) type {
         };
 
         resources: Resources,
+        waiter: ?Waiter = null,
         attributes: u32 = x1000.Msc0.read_trigger_32 |
             x1000.Msc0.write_trigger_32 | x1000.Msc0.initialize,
         high_capacity: bool = false,
@@ -63,7 +100,6 @@ pub fn Controller(comptime Board: type) type {
             }
 
             var self = Self{ .resources = resources };
-            x1000.Timer.initialize();
             Board.card_power.output(true);
             Board.card_detect.input();
             x1000.Timer.delayMicroseconds(5_000);
@@ -93,6 +129,7 @@ pub fn Controller(comptime Board: type) type {
         }
 
         pub fn readBlocks(self: *Self, first_lba: u32, output: []u8) Error!void {
+            if (Board.card_detect.get()) return error.CardAbsent;
             if (output.len == 0 or output.len % sector_bytes != 0 or
                 @intFromPtr(output.ptr) & 3 != 0)
             {
@@ -207,6 +244,10 @@ pub fn Controller(comptime Board: type) type {
         }
 
         fn issue(self: *Self, command: Command, response_words: *[4]u32) Error!void {
+            defer if (self.waiter != null) {
+                x1000.Msc0.interrupt_mask.write(0xffffffff);
+                x1000.Interrupts.mask(.msc0);
+            };
             self.last_command = command.index;
             var attributes = self.attributes | @backingInt(command.response);
             self.attributes &= ~x1000.Msc0.initialize;
@@ -245,25 +286,32 @@ pub fn Controller(comptime Board: type) type {
             x1000.Msc0.control.write(x1000.Msc0.start_operation);
             if (command.data != null) x1000.Msc0.dma_control.write(1);
 
-            var response_read = command.response == .none;
+            var completion = Completion{ .done = done, .response_pending = command.response != .none };
             const start = x1000.Timer.now();
             while (x1000.Timer.elapsed(start) < x1000.Timer.milliseconds(5_000)) {
                 const flags = x1000.Msc0.interrupt_flags.read();
-                if (flags & x1000.Msc0.error_flags != 0) {
+                const decision = completion.observe(flags);
+                if (decision.failed) {
                     self.recordFailure(flags);
                     return error.CommandFailed;
                 }
-                if (!response_read and flags & x1000.Msc0.response_end != 0) {
-                    readResponse(command.response, response_words);
-                    response_read = true;
-                    x1000.Msc0.interrupt_flags.write(x1000.Msc0.response_end);
-                }
-                if (flags & done != 0) {
-                    if (!response_read and command.response != .none) readResponse(command.response, response_words);
+                if (decision.read_response) readResponse(command.response, response_words);
+                if (decision.acknowledge_response) x1000.Msc0.interrupt_flags.write(x1000.Msc0.response_end);
+                if (decision.complete) {
                     x1000.Msc0.dma_control.write(0);
                     self.last_status = x1000.Msc0.status.read();
                     self.last_flags = flags;
                     return;
+                }
+                if (self.waiter) |waiter| {
+                    const wanted = completion.waitMask();
+                    waiter.prepare(waiter.context, wanted);
+                    // Preparation may race completion. Never sleep after the
+                    // hardware predicate has already become true.
+                    if (x1000.Msc0.interrupt_flags.read() & wanted != 0) continue;
+                    const elapsed = x1000.Timer.elapsed(start);
+                    const timeout = x1000.Timer.milliseconds(5_000);
+                    if (elapsed < timeout) waiter.wait(waiter.context, timeout - elapsed);
                 }
             }
             self.recordFailure(x1000.Msc0.interrupt_flags.read());
@@ -365,4 +413,49 @@ test "read-only controller declarations compile as one board specialization" {
         const high_speed_bus_hz: u32 = 50_000_000;
     };
     @import("std").testing.refAllDecls(Controller(MockBoard));
+}
+
+test "SD response and DMA completion remain correct under coalesced IRQ observations" {
+    const testing = @import("std").testing;
+    for (0..8) |response_at| for (0..8) |dma_at| {
+        var state = Completion{ .done = x1000.Msc0.dma_read_done, .response_pending = true };
+        var reads: usize = 0;
+        var finished = false;
+        for (0..8) |step| {
+            var flags: u32 = 0;
+            if (step >= response_at) flags |= x1000.Msc0.response_end;
+            if (step >= dma_at) flags |= x1000.Msc0.dma_read_done;
+            const decision = state.observe(flags);
+            reads += @intFromBool(decision.read_response);
+            try testing.expect(!decision.failed);
+            if (!state.response_pending) try testing.expectEqual(@as(u32, 0), state.waitMask() & x1000.Msc0.response_end);
+            if (decision.complete) {
+                finished = true;
+                break;
+            }
+        }
+        try testing.expect(finished);
+        try testing.expectEqual(@as(usize, 1), reads);
+    };
+}
+test "SD errors dominate completion and no-response commands never read the response FIFO" {
+    const testing = @import("std").testing;
+    var state = Completion{ .done = x1000.Msc0.dma_read_done, .response_pending = true };
+    const failure = state.observe(x1000.Msc0.dma_read_done | x1000.Msc0.response_end | (1 << 8));
+    try testing.expect(failure.failed and !failure.read_response and !failure.complete);
+    state = .{ .done = x1000.Msc0.response_end, .response_pending = false };
+    const complete = state.observe(x1000.Msc0.response_end);
+    try testing.expect(complete.complete and !complete.read_response and !complete.acknowledge_response);
+}
+test "SD wait mask changes only after consuming a response and always includes errors" {
+    const testing = @import("std").testing;
+    var state = Completion{ .done = x1000.Msc0.dma_read_done, .response_pending = true };
+    const before = state.waitMask();
+    try testing.expect(!state.observe(0).complete);
+    try testing.expectEqual(before, state.waitMask());
+    const response = state.observe(x1000.Msc0.response_end);
+    try testing.expect(response.read_response and response.acknowledge_response and !response.complete);
+    try testing.expectEqual(x1000.Msc0.dma_read_done | x1000.Msc0.error_flags, state.waitMask());
+    try testing.expect(!state.observe(x1000.Msc0.response_end).read_response);
+    try testing.expect(state.observe(x1000.Msc0.dma_read_done).complete);
 }

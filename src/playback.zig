@@ -90,6 +90,15 @@ pub const State = struct {
         return self;
     }
 
+    /// Bound a stream whose length became known after decoder EOF. Buffered
+    /// work beyond the limit is ignored; already-played chunks cannot be undone.
+    pub fn finishAfter(self: *State, total_chunks: u32) Error!void {
+        if (self.finished or total_chunks <= self.chunks_completed or
+            total_chunks < self.config.buffer_count or total_chunks > self.config.total_chunks)
+            return error.InvalidConfig;
+        self.config.total_chunks = total_chunks;
+    }
+
     pub fn currentChunk(self: State) ?u32 {
         if (self.finished) return null;
         return self.chunks_completed;
@@ -207,4 +216,19 @@ test "coalesced descriptor notifications catch up within the buffer margin" {
     }
     try testing.expectEqual(@as(u32, 2), state.chunks_completed);
     try testing.expectError(error.DescriptorOverrun, state.completionsTo(5));
+}
+
+test "decoder EOF bounds a live stream without replaying queued tail buffers" {
+    var state = try State.init(.{ .buffer_count = 3, .descriptor_count = 12, .total_chunks = 0xffffffff });
+    for (0..4) |_| {
+        const transition = try state.advance(state.nextDescriptor());
+        if (transition.refill) |refill| try state.completeRefill(refill);
+    }
+    try @import("std").testing.expectError(error.InvalidConfig, state.finishAfter(4));
+    try state.finishAfter(9);
+    while (!state.finished) {
+        const transition = try state.advance(state.nextDescriptor());
+        if (transition.refill) |refill| try state.completeRefill(refill);
+    }
+    try @import("std").testing.expectEqual(@as(u32, 9), state.chunks_completed);
 }

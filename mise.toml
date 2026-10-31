@@ -30,6 +30,26 @@ run = "zig build bench --summary all"
 description = "Run RAM-only FLAC benchmarks on a mask-ROM F20"
 run = "tools/run_f20_bench.sh"
 
+[tasks.test-ui]
+description = "Run deterministic UI and display regressions in Debug and ReleaseFast"
+run = "zig build test-ui --summary all"
+
+[tasks.fuzz-ui]
+description = "Fuzz display packing and bounds with 100,000 cases"
+run = "zig build fuzz-ui --fuzz=100K --summary all"
+
+[tasks.sim]
+description = "Run desktop UI (SDL3; set SDL_PREFIX when needed)"
+run = 'zig build sim ${SDL_PREFIX:+-Dsdl-prefix="$SDL_PREFIX"}'
+
+[tasks.sim-check]
+description = "Run scripted desktop UI smoke test without a display"
+run = 'SDL_VIDEODRIVER=dummy GAIN_UI_SMOKE=1 zig build sim ${SDL_PREFIX:+-Dsdl-prefix="$SDL_PREFIX"}'
+
+[tasks.bench-ui-f20]
+description = "Run RAM-only UI pixel and performance qualification on the F20"
+run = "tools/run_ui_bench.sh"
+
 [tasks.check]
 description = "Run every required project check"
 run = [

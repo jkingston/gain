@@ -1,3 +1,4 @@
+pub const memory = @import("f20_memory.zig");
 const x1000 = @import("x1000.zig");
 
 pub const clock = struct {
@@ -12,14 +13,20 @@ pub const power_switches = [_]u32{ 0x00, 0x10, 0x18, 0x08 };
 pub const display = struct {
     pub const width = 320;
     pub const height = 240;
-    pub const framebuffer_address = 0xa0040000;
-    // Fixed uncached workspace below the SD DMA descriptor and above the
-    // read-ahead buffers. Full frames transfer directly from the framebuffer;
-    // only packed dirty regions use the staging area.
-    pub const dma_descriptor_address = 0xa007e000;
-    pub const dma_command_address = 0xa007e100;
-    pub const dma_staging_address = 0xa00c0000;
+    // Cached CPU canvas and a separate uncached immutable DMA snapshot. Both
+    // follow audio buffers/descriptors and end below cached FLAC workspaces.
+    pub const framebuffer_address = memory.canvas.cached();
+    pub const dma_snapshot_address = memory.display_snapshot.uncached();
+    pub const dma_descriptor_address = memory.lcd_descriptors.uncached();
+    pub const dma_command_address = memory.lcd_descriptors.uncached() + 0x100;
+    pub const dma_staging_address = memory.display_staging.uncached();
     pub const dma_staging_pixel_capacity = width * 42;
+    /// This DMA path accepts only word-aligned, tightly packed RGB565 in
+    /// uncached KSEG1 RAM. Cached aliases require an explicit cache protocol.
+    pub fn validDmaSource(address: usize, w: u16, h: u16) bool {
+        if (address < 0xa0000000 or address >= 0xa2000000 or address & 3 != 0 or w == 0 or h == 0 or w & 1 != 0) return false;
+        return @as(u64, address) + @as(u64, w) * h * 2 <= 0xa2000000;
+    }
     pub const clock_divider = 29;
     pub const clock_configuration: u32 = 0x90000000 | clock_divider;
     pub const mcu_configuration: u32 = 0x00000100;
@@ -85,6 +92,14 @@ pub const display = struct {
 
 pub const audio = struct {
     pub const SampleRate = enum(u32) {
+        hz_8_000 = 8_000,
+        hz_11_025 = 11_025,
+        hz_12_000 = 12_000,
+        hz_16_000 = 16_000,
+        hz_22_050 = 22_050,
+        hz_24_000 = 24_000,
+        hz_32_000 = 32_000,
+        hz_64_000 = 64_000,
         hz_44_100 = 44_100,
         hz_48_000 = 48_000,
         hz_88_200 = 88_200,
@@ -121,18 +136,32 @@ pub const audio = struct {
     pub const dpll_bandwidth: u8 = 0xda;
 
     pub const source_clock_hz: u32 = 600_000_000;
-    pub const master_clock_multiplier: u32 = 256;
-    pub const bit_clock_divider: u32 = 3;
+    /// Keep low-rate clocks in the proven 11.2896/12.288 MHz families.
+    /// BCLK is always 64fs; deriving it with a larger integer divider avoids
+    /// the much larger error of synthesizing a new 256fs low-rate clock.
+    pub fn masterClockMultiplier(rate: SampleRate) u32 {
+        return switch (rate) {
+            .hz_8_000 => 1536,
+            .hz_11_025, .hz_12_000 => 1024,
+            .hz_16_000 => 768,
+            .hz_22_050, .hz_24_000 => 512,
+            .hz_32_000, .hz_64_000 => 384,
+            else => 256,
+        };
+    }
+    pub fn bitClockDivider(rate: SampleRate) u32 {
+        return masterClockMultiplier(rate) / 64 - 1;
+    }
     pub const dma_fifo_prime_frames: u8 = 24;
 
     const ClockRatio = struct { numerator: u32, denominator: u32 };
 
     pub fn clockRatio(rate: SampleRate) ClockRatio {
         return switch (rate) {
-            .hz_44_100 => .{ .numerator = 41, .denominator = 2_179 },
-            .hz_48_000 => .{ .numerator = 64, .denominator = 3_125 },
+            .hz_11_025, .hz_22_050, .hz_44_100 => .{ .numerator = 41, .denominator = 2_179 },
+            .hz_8_000, .hz_12_000, .hz_16_000, .hz_24_000, .hz_32_000, .hz_48_000 => .{ .numerator = 64, .denominator = 3_125 },
             .hz_88_200 => .{ .numerator = 82, .denominator = 2_179 },
-            .hz_96_000 => .{ .numerator = 128, .denominator = 3_125 },
+            .hz_64_000, .hz_96_000 => .{ .numerator = 128, .denominator = 3_125 },
             .hz_176_400 => .{ .numerator = 164, .denominator = 2_179 },
             .hz_192_000 => .{ .numerator = 256, .denominator = 3_125 },
         };
@@ -146,7 +175,7 @@ pub const audio = struct {
 
     pub fn clockErrorPpb(rate: SampleRate) u32 {
         const ratio = clockRatio(rate);
-        const expected = @as(u64, @backingInt(rate)) * master_clock_multiplier * ratio.denominator;
+        const expected = @as(u64, @backingInt(rate)) * masterClockMultiplier(rate) * ratio.denominator;
         const generated = @as(u64, source_clock_hz) * ratio.numerator;
         const difference = if (generated > expected) generated - expected else expected - generated;
         return @intCast(difference * 1_000_000_000 / expected);
@@ -335,4 +364,32 @@ test "AIC transmit FIFO level preserves the full state" {
     try testing.expectEqual(@as(u7, 63), x1000.Aic.transmitLevelFromStatus(0x3f00));
     try testing.expectEqual(@as(u7, 64), x1000.Aic.transmitLevelFromStatus(0x4000));
     try testing.expectEqual(@as(u7, 64), x1000.Aic.transmitLevelFromStatus(0x7f00));
+}
+
+test "display DMA rejects cached misaligned and out of RAM sources" {
+    const t = @import("std").testing;
+    try t.expect(display.validDmaSource(display.dma_snapshot_address, 320, 240));
+    try t.expect(display.validDmaSource(display.dma_staging_address, 306, 23));
+    try t.expect(!display.validDmaSource(display.framebuffer_address, 320, 240));
+    try t.expect(!display.validDmaSource(display.dma_staging_address + 2, 306, 23));
+    try t.expect(!display.validDmaSource(0xa1fffffc, 320, 240));
+    try t.expect(!display.validDmaSource(0xa2000000, 2, 1));
+    try t.expect(!display.validDmaSource(display.dma_staging_address, 319, 23));
+}
+
+test "display sources fit their checked physical RAM reservations" {
+    const t = @import("std").testing;
+    try t.expectEqual(memory.canvas.cached(), display.framebuffer_address);
+    try t.expectEqual(memory.display_snapshot.uncached(), display.dma_snapshot_address);
+    try t.expectEqual(memory.display_staging.uncached(), display.dma_staging_address);
+    try t.expect(display.dma_staging_pixel_capacity * 2 <= memory.display_staging.bytes);
+    try t.expect(display.width * display.height * 2 <= memory.canvas.bytes);
+    try t.expect(display.width * display.height * 2 <= memory.display_snapshot.bytes);
+}
+
+test "every audio rate keeps BCLK at 64fs and clock error below two ppm" {
+    for (@import("std").enums.values(audio.SampleRate)) |rate| {
+        try @import("std").testing.expectEqual(@as(u32, 64), audio.masterClockMultiplier(rate) / (audio.bitClockDivider(rate) + 1));
+        try @import("std").testing.expect(audio.clockErrorPpb(rate) <= 2000);
+    }
 }

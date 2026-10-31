@@ -1,5 +1,7 @@
     .set noreorder
     .set noat
+    .set mips32r2
+    .set fp=32
     .section .startup, "ax", @progbits
     .global _start
     .extern gain_main
@@ -22,9 +24,10 @@ _start:
 2:
     li    $t0, 0x80004000
     mtc0  $t0, $15, 1
-    li    $t0, 0x0000fc00
+    li    $t0, 0x2000fc00
     mtc0  $t0, $12
     ehb
+    ctc1  $zero, $31
     jal   gain_main
     nop
 3:
@@ -35,10 +38,7 @@ _start:
     .global exception_vector
     .extern exception_panic
 exception_vector:
-    mfc0  $a0, $13
-    mfc0  $a1, $14
-    mfc0  $a2, $12
-    jal   exception_panic
+    j     gain_x1000_interrupt
     nop
 4:
     b     4b

@@ -4,6 +4,7 @@ const sd = @import("sd.zig");
 const builtin = @import("builtin");
 
 pub const Controller = sd.Controller(board.storage);
+pub const Waiter = sd.Waiter;
 pub const DmaDescriptor = x1000.Msc0.DmaDescriptor;
 pub const fat32 = @import("fat32.zig");
 pub const wav = @import("wav.zig");
@@ -127,6 +128,15 @@ pub fn ReadAheadReader(comptime Inner: type) type {
             return written;
         }
 
+        pub fn seekTo(self: *Self, position: u32) !void {
+            try self.inner.seekTo(position);
+            self.starts = @splat(0);
+            self.ends = @splat(0);
+            self.head = 0;
+            self.queued = 0;
+            self.end_of_input = false;
+        }
+
         pub fn bufferedBytes(self: Self) usize {
             var bytes: usize = 0;
             for (0..self.queued) |queued_index| {
@@ -193,4 +203,33 @@ test "read-ahead rejects overlapping buffers" {
         error.InvalidReadAheadBuffer,
         ReadAheadReader(Source).init(&source, .{ storage[0..515], storage[512..1_027] }),
     );
+}
+
+test "read-ahead seeking flushes stale prefetched bytes and reopens EOF" {
+    const std = @import("std");
+    const Source = struct {
+        position: usize = 0,
+        pub fn read(self: *@This(), output: []u8) !usize {
+            const count = @min(output.len, 2000 - self.position);
+            for (output[0..count], self.position..) |*byte, index| byte.* = @truncate(index);
+            self.position += count;
+            return count;
+        }
+        pub fn seekTo(self: *@This(), target: u32) !void {
+            if (target > 2000) return error.InvalidSeek;
+            self.position = target;
+        }
+    };
+    var source = Source{};
+    var first: [516]u8 align(4) = undefined;
+    var second: [516]u8 align(4) = undefined;
+    var reader = try ReadAheadReader(Source).init(&source, .{ &first, &second });
+    try reader.prefetch();
+    for ([_]u32{ 1600, 1998, 2000, 1, 1000, 0 }) |position| {
+        try reader.seekTo(position);
+        try std.testing.expectEqual(@as(usize, 0), reader.bufferedBytes());
+        var output: [17]u8 = undefined;
+        const count = try reader.read(&output);
+        for (output[0..count], position..) |value, expected| try std.testing.expectEqual(@as(u8, @truncate(expected)), value);
+    }
 }

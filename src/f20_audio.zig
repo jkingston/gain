@@ -3,6 +3,8 @@ const board = @import("f20_v27.zig");
 const audio = @import("audio.zig");
 const pcm = @import("pcm.zig");
 
+pub const Output = audio.Output;
+pub const Processing = audio.Processing;
 pub const Engine = audio.Engine(board.audio);
 pub const Descriptor = x1000.Pdma.Descriptor;
 pub const Buffer = audio.Buffer;
@@ -13,15 +15,10 @@ pub const maximum_descriptors = audio.maximum_descriptors;
 pub const maximum_buffers = audio.maximum_buffers;
 
 pub fn sampleRate(hz: u32) ?board.audio.SampleRate {
-    return switch (hz) {
-        44_100 => .hz_44_100,
-        48_000 => .hz_48_000,
-        88_200 => .hz_88_200,
-        96_000 => .hz_96_000,
-        176_400 => .hz_176_400,
-        192_000 => .hz_192_000,
-        else => null,
-    };
+    inline for (@import("std").enums.values(board.audio.SampleRate)) |rate| {
+        if (hz == @backingInt(rate)) return rate;
+    }
+    return null;
 }
 
 pub fn sampleFormat(format: pcm.OutputFormat) SampleFormat {

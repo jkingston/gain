@@ -26,12 +26,7 @@ wait_for_rom() {
 cd "$repo"
 zig build bench-f20 --summary all
 
-"$usbboot" --cpu x1000 --cpuinfo
-if [[ "$skip_spl" != 1 ]]; then
-    "$usbboot" --cpu x1000 --stage1 "$spl"
-    wait_for_rom
-fi
-"$usbboot" --cpu x1000 --cpuinfo
+python3 tools/prepare_usb.py "$usbboot" "$spl" "$skip_spl"
 "$usbboot" --cpu x1000 --addr 0x80800000 \
     --download tests/fixtures/flac-device-192.flac
 "$usbboot" --cpu x1000 --cpuinfo

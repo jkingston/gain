@@ -159,7 +159,18 @@ pub const Pdma = struct {
 
     pub const enabled_with_request_forwarding: u32 = 0xf8000001;
     pub const channel_0 = bit(0);
-    pub const clear_all_but_channel_0: u32 = 0xffff_fffe;
+    const descriptor_channels: u32 = 0xff;
+
+    /// DIC clears selected pending bits by writing zero. Preserve other live
+    /// channels and leave reserved bits zero; writing ~channel_0 kept PDMAD
+    /// asserted on the F20 and caused an interrupt storm.
+    pub fn descriptorAcknowledgement(pending: u32, channels: u32) u32 {
+        return pending & ~channels & descriptor_channels;
+    }
+
+    pub fn acknowledgeDescriptors(channels: u32) void {
+        descriptor_interrupt_clear.write(descriptorAcknowledgement(descriptor_pending.read(), channels));
+    }
 
     pub const Request = enum(u6) {
         i2s_transmit = 0x06,
@@ -228,6 +239,51 @@ pub const Pdma = struct {
         return @intCast(offset / 2);
     }
 };
+
+/// CPU interrupt routing. Sources are level-triggered: mask at entry, service
+/// and acknowledge in the owning task, then unmask after the work is complete.
+pub const Interrupts = struct {
+    const base = 0xb0001000;
+    // Linked-descriptor completion has its own PDMAD source. PDMA reports
+    // channel termination/faults and does not wake a cyclic audio refill.
+    pub const Source = enum(u6) { aic = 1, pdma = 10, pdma_descriptor = 11, msc0 = 37 };
+    pub fn bank(source: Source) u1 {
+        return @intCast(@backingInt(source) / 32);
+    }
+    pub fn maskFor(source: Source) u32 {
+        return @as(u32, 1) << @as(u5, @truncate(@backingInt(source)));
+    }
+    pub fn mask(source: Source) void {
+        write32(base + @as(u32, bank(source)) * 0x20 + 8, maskFor(source));
+    }
+    pub fn unmask(source: Source) void {
+        write32(base + @as(u32, bank(source)) * 0x20 + 12, maskFor(source));
+    }
+    pub fn pending(source: Source) bool {
+        return read32(base + @as(u32, bank(source)) * 0x20 + 16) & maskFor(source) != 0;
+    }
+    pub fn maskAll() void {
+        write32(base + 8, 0xffffffff);
+        write32(base + 0x28, 0xffffffff);
+    }
+    pub fn masks() [2]u32 {
+        return .{ read32(base + 4), read32(base + 0x24) };
+    }
+    pub fn restore(values: [2]u32) void {
+        write32(base + 4, values[0]);
+        write32(base + 0x24, values[1]);
+    }
+};
+test "INTC sources select the documented CPU banks and bits" {
+    const testing = @import("std").testing;
+    try testing.expectEqual(@as(u1, 0), Interrupts.bank(.pdma));
+    try testing.expectEqual(@as(u32, 1 << 10), Interrupts.maskFor(.pdma));
+    try testing.expectEqual(@as(u1, 0), Interrupts.bank(.pdma_descriptor));
+    try testing.expectEqual(@as(u32, 1 << 11), Interrupts.maskFor(.pdma_descriptor));
+    try testing.expectEqual(@as(u32, 1 << 1), Interrupts.maskFor(.aic));
+    try testing.expectEqual(@as(u1, 1), Interrupts.bank(.msc0));
+    try testing.expectEqual(@as(u32, 1 << 5), Interrupts.maskFor(.msc0));
+}
 
 pub const Msc0 = struct {
     const base = 0xb3450000;
@@ -382,7 +438,7 @@ pub const Gpio = struct {
         }
 
         pub inline fn set(self: Pin, high: bool) void {
-            self.register(if (high) Offset.output_set else Offset.output_clear).* = self.mask();
+            if (high) self.register(Offset.output_set).* = self.mask() else self.register(Offset.output_clear).* = self.mask();
         }
 
         pub inline fn get(self: Pin) bool {
@@ -524,3 +580,15 @@ pub const Ddr = struct {
     pub const phy_training_complete: u32 = 0x1f;
     pub const phy_training_error_mask: u32 = 0x60;
 };
+
+test "descriptor acknowledgement clears only claimed channels without reserved bits" {
+    const testing = @import("std").testing;
+    // Captured channel-zero completion: the old ~1 write left PDMAD asserted.
+    try testing.expectEqual(@as(u32, 0), Pdma.descriptorAcknowledgement(1, Pdma.channel_0));
+    // Other pending channels retain their bits, including channel seven.
+    try testing.expectEqual(@as(u32, 0x82), Pdma.descriptorAcknowledgement(0x83, Pdma.channel_0));
+    try testing.expectEqual(@as(u32, 0x02), Pdma.descriptorAcknowledgement(0x83, 0x81));
+    // Even a noisy reserved-bit read must not propagate reserved ones to DIC.
+    try testing.expectEqual(@as(u32, 0xfe), Pdma.descriptorAcknowledgement(0xffffffff, Pdma.channel_0));
+    try testing.expectEqual(@as(u32, 0), Pdma.descriptorAcknowledgement(0, Pdma.channel_0));
+}
