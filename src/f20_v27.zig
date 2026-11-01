@@ -1,5 +1,6 @@
 pub const memory = @import("f20_memory.zig");
 const x1000 = @import("x1000.zig");
+pub const usb_detect = x1000.Gpio.Pin{ .port = .d, .index = 3 };
 
 pub const clock = struct {
     // Verified clock words from the F20 V2.7 boot path.

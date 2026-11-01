@@ -13,6 +13,7 @@ pub const Error = error{
     CachedDmaBuffer,
     TransferTooLarge,
     OutOfRange,
+    CardStatusError,
 };
 
 const Response = enum(u3) {
@@ -30,6 +31,7 @@ const Command = struct {
     data: ?[]u8 = null,
     block_bytes: u16 = 0,
     blocks: u16 = 0,
+    write: bool = false,
 };
 
 /// Pure command-completion policy, shared by polling and IRQ-backed waits.
@@ -68,7 +70,7 @@ pub const Waiter = struct {
     wait: *const fn (*anyopaque, u32) void,
 };
 
-/// Native, read-only SD controller. Board supplies compile-time wiring and
+/// Native SD block controller. Board supplies compile-time wiring and
 /// clocks; the caller supplies uncached DMA storage so no cache maintenance is
 /// needed in the playback path.
 pub fn Controller(comptime Board: type) type {
@@ -82,6 +84,9 @@ pub fn Controller(comptime Board: type) type {
 
         resources: Resources,
         waiter: ?Waiter = null,
+        /// Optional watchdog maintenance during bounded synchronous waits.
+        /// Playback uses its preemptive UI task instead.
+        keep_alive: ?*const fn () void = null,
         attributes: u32 = x1000.Msc0.read_trigger_32 |
             x1000.Msc0.write_trigger_32 | x1000.Msc0.initialize,
         high_capacity: bool = false,
@@ -129,6 +134,34 @@ pub fn Controller(comptime Board: type) type {
         }
 
         pub fn readBlocks(self: *Self, first_lba: u32, output: []u8) Error!void {
+            return self.transferBlocks(first_lba, output, false);
+        }
+
+        /// Return only after the controller's programming completion and CMD13
+        /// confirm the card is ready. USB must never acknowledge DMA-only writes.
+        pub fn writeBlocks(self: *Self, first_lba: u32, input: []const u8) Error!void {
+            try self.transferBlocks(first_lba, @constCast(input), true);
+            try self.sync();
+        }
+
+        pub fn present(_: *const Self) bool {
+            return !Board.card_detect.get();
+        }
+
+        pub fn sync(self: *Self) Error!void {
+            const began = x1000.Timer.now();
+            while (x1000.Timer.elapsed(began) < x1000.Timer.milliseconds(5_000)) {
+                if (self.keep_alive) |keep_alive| keep_alive();
+                if (!self.present()) return error.CardAbsent;
+                var response: [4]u32 = @splat(0);
+                try self.noData(13, self.rca, .short, false, &response);
+                if (response[0] & card_status_errors != 0) return error.CardStatusError;
+                if (response[0] & card_ready_for_data != 0 and (response[0] >> 9) & 15 == card_transfer_state) return;
+            }
+            return error.CommandTimeout;
+        }
+
+        fn transferBlocks(self: *Self, first_lba: u32, output: []u8, write: bool) Error!void {
             if (Board.card_detect.get()) return error.CardAbsent;
             if (output.len == 0 or output.len % sector_bytes != 0 or
                 @intFromPtr(output.ptr) & 3 != 0)
@@ -147,7 +180,7 @@ pub fn Controller(comptime Board: type) type {
                 const remaining_blocks = (output.len - offset) / sector_bytes;
                 const block_count: u16 = @intCast(@min(remaining_blocks, maximum_blocks_per_command));
                 const byte_count = @as(usize, block_count) * sector_bytes;
-                const command: u8 = if (block_count == 1) 17 else 18;
+                const command = transferCommand(write, block_count);
                 var response: [4]u32 = @splat(0);
                 try self.issue(.{
                     .index = command,
@@ -156,7 +189,9 @@ pub fn Controller(comptime Board: type) type {
                     .data = output[offset..][0..byte_count],
                     .block_bytes = sector_bytes,
                     .blocks = block_count,
+                    .write = write,
                 }, &response);
+                if (write and response[0] & card_status_errors != 0) return error.CardStatusError;
                 offset += byte_count;
                 lba +%= block_count;
                 if (lba == 0 and offset < output.len) return error.TransferTooLarge;
@@ -271,7 +306,8 @@ pub fn Controller(comptime Board: type) type {
                 };
                 attributes |= x1000.Msc0.data_enabled;
                 if (command.blocks > 1) attributes |= x1000.Msc0.automatic_stop;
-                done = x1000.Msc0.dma_read_done;
+                if (command.write) attributes |= x1000.Msc0.data_write;
+                done = if (command.write) x1000.Msc0.dma_write_done else x1000.Msc0.dma_read_done;
                 x1000.Msc0.dma_control.write(0);
                 x1000.Msc0.dma_descriptor.write(x1000.physicalAddress(@intFromPtr(self.resources.descriptor)));
             }
@@ -289,6 +325,7 @@ pub fn Controller(comptime Board: type) type {
             var completion = Completion{ .done = done, .response_pending = command.response != .none };
             const start = x1000.Timer.now();
             while (x1000.Timer.elapsed(start) < x1000.Timer.milliseconds(5_000)) {
+                if (self.keep_alive) |keep_alive| keep_alive();
                 const flags = x1000.Msc0.interrupt_flags.read();
                 const decision = completion.observe(flags);
                 if (decision.failed) {
@@ -392,6 +429,25 @@ fn extractBits(words: [4]u32, initial_start: u32, size: u5) u32 {
 
 const maximum_blocks_per_command = 65_535;
 const maximum_transfer_bytes = @as(usize, maximum_blocks_per_command) * sector_bytes;
+const card_status_errors: u32 = 0xfdffe008;
+const card_ready_for_data: u32 = 1 << 8;
+const card_transfer_state: u32 = 4;
+fn transferCommand(write: bool, blocks: u16) u8 {
+    return if (write) (if (blocks == 1) @as(u8, 24) else 25) else (if (blocks == 1) @as(u8, 17) else 18);
+}
+
+test "SD write completion cannot succeed on response or DMA completion alone" {
+    const testing = @import("std").testing;
+    try testing.expectEqual(24, transferCommand(true, 1));
+    try testing.expectEqual(25, transferCommand(true, 2));
+    try testing.expectEqual(17, transferCommand(false, 1));
+    try testing.expectEqual(18, transferCommand(false, 2));
+    for ([_]u32{ x1000.Msc0.response_end, x1000.Msc0.dma_read_done, 1 << 16, 1 << 0, x1000.Msc0.program_done }) |flag| {
+        var completion = Completion{ .done = x1000.Msc0.dma_write_done, .response_pending = true };
+        try testing.expect(!completion.observe(flag).complete);
+        try testing.expect(completion.observe(x1000.Msc0.dma_write_done).complete);
+    }
+}
 
 test "CSD v2 capacity is measured in 512-byte sectors" {
     var csd: [4]u32 = @splat(0);

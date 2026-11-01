@@ -40,6 +40,7 @@ pub fn build(b: *std.Build) void {
     stage2_module.addAssemblyFile(b.path("src/start.S"));
     stage2_module.addAssemblyFile(b.path("src/x1000_context.S"));
     @import("build_codecs.zig").add(b, stage2_module, target, .ReleaseFast, true);
+    _ = @import("build_usb.zig").add(b, stage2_module, target, .ReleaseFast, true);
     const stage2 = b.addExecutable(.{ .name = "gain-stage2.elf", .root_module = stage2_module });
     stage2.entry = .disabled;
     stage2.setLinkerScript(b.path("stage2.ld"));
@@ -68,6 +69,22 @@ pub fn build(b: *std.Build) void {
     const player_reader = b.addExecutable(.{ .name = "read-player-check", .root_module = b.createModule(.{ .root_source_file = b.path("tools/read_player_check.zig"), .target = b.graph.host, .optimize = .ReleaseSafe }) });
     player_check_step.dependOn(&b.addInstallArtifact(player_reader, .{}).step);
     b.getInstallStep().dependOn(&player_check.step);
+    const usb_check_api = b.createModule(.{ .root_source_file = b.path("src/f20.zig"), .target = target, .optimize = .ReleaseSafe });
+    @import("build_codecs.zig").add(b, usb_check_api, target, .ReleaseSafe, true);
+    const usb_check_c = @import("build_usb.zig").add(b, usb_check_api, target, .ReleaseSafe, true);
+    const usb_check_module = b.createModule(.{ .root_source_file = b.path("tools/usb_check.zig"), .target = target, .optimize = .ReleaseSafe });
+    usb_check_module.addImport("gain", usb_check_api);
+    usb_check_module.addImport("c_usb", usb_check_c);
+    usb_check_module.addAssemblyFile(b.path("tools/player_check_start.S"));
+    usb_check_module.addAssemblyFile(b.path("src/x1000_context.S"));
+    const usb_check = b.addExecutable(.{ .name = "gain-usb-check.elf", .root_module = usb_check_module });
+    usb_check.entry = .disabled;
+    usb_check.setLinkerScript(b.path("stage2.ld"));
+    const usb_check_raw = usb_check.addObjCopy(.{ .format = .binary, .basename = "gain-usb-check.bin" });
+    const usb_check_step = b.step("usb-check-f20", "Build RAM-only production USB/SD qualification");
+    usb_check_step.dependOn(&b.addInstallArtifact(usb_check, .{}).step);
+    usb_check_step.dependOn(&b.addInstallFileWithDir(usb_check_raw.getOutput(), .bin, "gain-usb-check.bin").step);
+    usb_check_step.dependOn(&b.addInstallFileWithDir(spl_image, .bin, "gain-spl.bin").step);
     const reference_api = b.createModule(.{ .root_source_file = b.path("src/f20.zig"), .target = b.graph.host, .optimize = .ReleaseFast, .link_libc = true });
     @import("build_codecs.zig").add(b, reference_api, b.graph.host, .ReleaseFast, false);
     const reference_module = b.createModule(.{ .root_source_file = b.path("tools/player_reference.zig"), .target = b.graph.host, .optimize = .ReleaseFast, .link_libc = true });
@@ -403,7 +420,15 @@ pub fn build(b: *std.Build) void {
     codec_link_check.setLinkerScript(b.path("stage2.ld"));
     b.step("check-codecs-f20", "Compile and link the complete codec path for freestanding MIPS").dependOn(&codec_link_check.step);
     codec_tests_step.dependOn(&codec_link_check.step);
+    const usb_tests_step = b.step("test-usb", "Test SD ownership, production MSC wire protocol and descriptors");
+    for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |mode| {
+        const usb_module = b.createModule(.{ .root_source_file = b.path("src/usb_test.zig"), .target = b.graph.host, .optimize = mode, .link_libc = true });
+        _ = @import("build_usb.zig").add(b, usb_module, b.graph.host, mode, false);
+        const usb_tests = b.addTest(.{ .root_module = usb_module });
+        usb_tests_step.dependOn(&b.addRunArtifact(usb_tests).step);
+    }
     const test_step = b.step("test", "Run host-side tests");
+    test_step.dependOn(usb_tests_step);
     test_step.dependOn(sim_policy_step);
     test_step.dependOn(codec_tests_step);
     test_step.dependOn(pipeline_tests_step);

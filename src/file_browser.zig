@@ -22,6 +22,47 @@ pub fn Browser(comptime Volume: type) type {
             return self;
         }
 
+        /// Paths survive host edits; cluster numbers and cached iterators do not.
+        pub const Bookmark = struct {
+            titles: [maximum_depth][fat32.maximum_name_bytes]u8,
+            lengths: [maximum_depth]u8,
+            depth: usize,
+            selected: [fat32.maximum_name_bytes]u8 = @splat(0),
+            selected_length: usize = 0,
+        };
+        pub fn bookmark(self: *const Self, volume: *Volume) !Bookmark {
+            var result = Bookmark{ .titles = self.titles, .lengths = self.title_lengths, .depth = self.depth };
+            if (try self.selectedEntry(volume)) |entry| {
+                result.selected_length = entry.name().len;
+                @memcpy(result.selected[0..result.selected_length], entry.name());
+            }
+            return result;
+        }
+        /// Restore the deepest surviving folder and selected filename using a
+        /// fresh FAT mount. Deleted or renamed paths fall back to their parent.
+        pub fn restore(self: *Self, volume: *Volume, saved: Bookmark) !void {
+            self.* = try Self.init(volume);
+            for (1..saved.depth + 1) |depth| {
+                const entry = (try self.find(volume, saved.titles[depth][0..saved.lengths[depth]])) orelse return;
+                if (entry.kind != .directory) return;
+                try self.enter(volume, entry);
+            }
+            if (saved.selected_length != 0) _ = try self.find(volume, saved.selected[0..saved.selected_length]);
+        }
+        fn find(self: *Self, volume: *Volume, name: []const u8) !?fat32.DirectoryEntry {
+            var iterator = try volume.iterate(self.directory());
+            var index: usize = 0;
+            while (try iterator.next()) |entry| {
+                if (!isVisibleEntry(&entry)) continue;
+                if (@import("std").mem.eql(u8, entry.name(), name)) {
+                    self.selections[self.depth] = index;
+                    return entry;
+                }
+                index += 1;
+            }
+            return null;
+        }
+
         pub fn directory(self: *const Self) fat32.Directory {
             return self.directories[self.depth];
         }
@@ -149,6 +190,8 @@ fn countEntries(comptime Volume: type, volume: *Volume, directory: fat32.Directo
 
 const FakeVolume = struct {
     fail: bool = false,
+    relocated: bool = false,
+    deleted: bool = false,
     const Iterator = struct {
         entries: []const fat32.DirectoryEntry,
         position: usize = 0,
@@ -163,7 +206,8 @@ const FakeVolume = struct {
     }
     pub fn iterate(self: *FakeVolume, directory: fat32.Directory) !Iterator {
         if (self.fail) return error.CardRemoved;
-        return .{ .entries = if (directory.first_cluster == 2) &root else &folder };
+        if (self.relocated and directory.first_cluster == 3) return error.StaleCluster;
+        return .{ .entries = if (directory.first_cluster == 2) (if (self.deleted) root[1..] else if (self.relocated) &relocated_root else &root) else &folder };
     }
     fn entry(comptime name: []const u8, kind: fat32.EntryKind, cluster: u32) fat32.DirectoryEntry {
         var result = fat32.DirectoryEntry{ .kind = kind, .first_cluster = cluster, .size = 32, .attributes = 0 };
@@ -172,6 +216,7 @@ const FakeVolume = struct {
         return result;
     }
     const root = [_]fat32.DirectoryEntry{ entry("Albums", .directory, 3), entry("notes.txt", .file, 4), entry("track.FLAC", .file, 5), entry("other.opus", .file, 6) };
+    const relocated_root = [_]fat32.DirectoryEntry{ entry("Albums", .directory, 30), entry("track.FLAC", .file, 50), entry("other.opus", .file, 60) };
     const folder = [_]fat32.DirectoryEntry{entry("song.m4a", .file, 7)};
 };
 test "real browser restores parent selection and skips unsupported files during navigation" {
@@ -199,4 +244,20 @@ test "directory read failure leaves browser position and title intact" {
     try testing.expectEqual(@as(usize, 0), browser.depth);
     try testing.expectEqualStrings("SD CARD", browser.title());
     try testing.expectEqual(@as(usize, 0), browser.selection());
+}
+
+test "USB remount restores by names after clusters change and falls back after deletion" {
+    const testing = @import("std").testing;
+    var volume = FakeVolume{};
+    var browser = try Browser(FakeVolume).init(&volume);
+    try browser.enter(&volume, (try browser.selectedEntry(&volume)).?);
+    const saved = try browser.bookmark(&volume);
+    volume.relocated = true;
+    try browser.restore(&volume, saved);
+    try testing.expectEqual(30, browser.directory().first_cluster);
+    try testing.expectEqualStrings("song.m4a", (try browser.selectedEntry(&volume)).?.name());
+    volume.deleted = true;
+    try browser.restore(&volume, saved);
+    try testing.expectEqual(0, browser.depth);
+    try testing.expectEqualStrings("track.FLAC", (try browser.selectedEntry(&volume)).?.name());
 }

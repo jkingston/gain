@@ -37,3 +37,5 @@ pub const file_browser = @import("file_browser.zig");
 pub const player_screen = @import("player_screen.zig");
 pub const executive = @import("executive.zig");
 pub const playback_controls = @import("playback_controls.zig");
+
+pub const usb = @import("f20_usb.zig");

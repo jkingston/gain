@@ -1,6 +1,7 @@
 const x1000 = @import("x1000.zig");
 const board = @import("f20_v27.zig");
 const storage = @import("f20_storage.zig");
+const usb = @import("f20_usb.zig");
 const media = @import("f20_media.zig");
 const player = @import("f20_player.zig");
 const fat32 = @import("fat32.zig");
@@ -217,6 +218,8 @@ fn buttonState() u8 {
 
 fn playbackPoll(context: *anyopaque, status: media.PlaybackStatus) media.PlaybackCommand {
     Watchdog.kick();
+    usb.poll();
+    if (usb.needsHandoff()) return .stop;
     const state: *PlaybackUi = @ptrCast(@alignCast(context));
     return state.screen.poll(LcdDma, buttonState(), playbackTrack(state), state.battery_mv, view_theme, status);
 }
@@ -286,6 +289,8 @@ fn fatalError(title: []const u8, failure: anyerror) noreturn {
 fn waitForErrorDismiss(input: *Input) void {
     while (true) {
         Watchdog.kick();
+        usb.poll();
+        if (usb.needsHandoff()) return;
         if (input.poll()) |event| {
             if (event == .back or event == .select or event == .home) return;
         }
@@ -330,6 +335,7 @@ fn playSelection(
     while (true) {
         const result = try playEntry(volume, browser, entry, battery_mv, attenuation.*);
         attenuation.* = result.attenuation;
+        if (usb.needsHandoff()) return;
         const direction: i2 = switch (result.exit) {
             .next => 1,
             .previous => -1,
@@ -356,21 +362,79 @@ export fn gain_main() callconv(.c) noreturn {
     Display.text(112, 132, "LOADING", Display.cyan, 1);
     if (!Display.present()) rawPanicBlink();
 
-    var card = storage.Controller.initialize(.{
+    const resources = storage.Controller.Resources{
         .descriptor = sd_descriptor,
         .switch_status = sd_switch_status,
-    }) catch |failure| fatalError("SD CARD", failure);
-    Watchdog.kick();
-    var volume = Volume.mount(&card, sd_scratch) catch |failure| fatalError("FILESYSTEM", failure);
-    var browser = Browser.init(&volume) catch |failure| fatalError("DIRECTORY", failure);
+    };
+    var card = storage.Controller{ .resources = resources };
+    usb.initialize(&card) catch |failure| fatalError("USB", failure);
     var attenuation: u8 = 64;
-    var power_started: ?u32 = null;
+    var bookmark: ?Browser.Bookmark = null;
+    while (true) {
+        // Recreate the controller, FAT cache and browser after every ownership
+        // change. Host edits may have replaced directories and cluster chains.
+        card = storage.Controller.initialize(resources) catch |failure| {
+            card.capacity_sectors = 0;
+            if (usb.needsRemount()) usb.remounted();
+            _ = showError("SD CARD", failure);
+            waitForErrorDismiss(&input);
+            if (usb.needsHandoff()) runUsbMode();
+            continue;
+        };
+        if (usb.needsRemount()) usb.remounted();
+        var volume = Volume.mount(&card, sd_scratch) catch |failure| {
+            _ = showError("FILESYSTEM", failure);
+            waitForErrorDismiss(&input);
+            if (usb.needsHandoff()) runUsbMode();
+            continue;
+        };
+        var browser = Browser.init(&volume) catch |failure| {
+            _ = showError("DIRECTORY", failure);
+            waitForErrorDismiss(&input);
+            if (usb.needsHandoff()) runUsbMode();
+            continue;
+        };
+        if (bookmark) |saved| browser.restore(&volume, saved) catch {};
+        browse(&volume, &browser, battery_mv, &attenuation, &input, &pmic) catch |failure| {
+            _ = showError("DIRECTORY", failure);
+            waitForErrorDismiss(&input);
+        };
+        // playFile has joined every task before browse returns. No decoder,
+        // SD prefetch, FAT reader or audio callback can now touch the card.
+        bookmark = browser.bookmark(&volume) catch null;
+        if (usb.needsHandoff()) runUsbMode();
+        input.resync();
+    }
+}
 
-    if (!(drawBrowser(&volume, &browser, battery_mv, attenuation, null) catch |failure| fatalError("DIRECTORY", failure))) rawPanicBlink();
+fn runUsbMode() void {
+    Display.clear(Display.black);
+    Display.text(32, 68, "USB CONNECTED", Display.white, 3);
+    Display.text(32, 124, "EJECT ON COMPUTER TO RETURN", Display.cyan, 1);
+    _ = Display.present();
     while (true) {
         Watchdog.kick();
+        usb.poll();
+        switch (usb.session().state) {
+            .quiescing => usb.grantHost() catch {},
+            .host, .ejecting => {},
+            .remounting, .player, .ejected => return,
+        }
+        Timer.delayMicroseconds(100);
+    }
+}
+
+fn browse(volume: *Volume, browser: *Browser, battery_mv: u32, attenuation_ptr: *u8, input: *Input, pmic: *@import("f20_power.zig").Controller) !void {
+    var attenuation = attenuation_ptr.*;
+    defer attenuation_ptr.* = attenuation;
+    var power_started: ?u32 = null;
+    if (!(drawBrowser(volume, browser, battery_mv, attenuation, null) catch |failure| return failure)) return error.DisplayFailure;
+    while (true) {
+        Watchdog.kick();
+        usb.poll();
+        if (usb.needsHandoff()) return;
         if (input.poll()) |event| {
-            var previous: ?player_view.BrowserState = browserViewState(&browser, attenuation);
+            var previous: ?player_view.BrowserState = browserViewState(browser, attenuation);
             switch (event) {
                 .up => browser.move(-1),
                 .down => browser.move(1),
@@ -380,38 +444,40 @@ export fn gain_main() callconv(.c) noreturn {
                 .volume_down => attenuation = if (attenuation < 124) attenuation + 4 else 128,
                 .select => {
                     previous = null; // Playback/errors can replace the displayed screen.
-                    const selected = browser.selectedEntry(&volume) catch |failure| {
+                    const selected = browser.selectedEntry(volume) catch |failure| {
                         _ = showError("DIRECTORY", failure);
-                        waitForErrorDismiss(&input);
+                        waitForErrorDismiss(input);
+                        if (usb.needsHandoff()) return;
                         // The error overlay replaced the whole screen.
-                        if (!(drawBrowser(&volume, &browser, battery_mv, attenuation, null) catch |redraw_failure|
-                            fatalError("DIRECTORY", redraw_failure))) rawPanicBlink();
+                        if (!(drawBrowser(volume, browser, battery_mv, attenuation, null) catch |redraw_failure|
+                            return redraw_failure)) return error.DisplayFailure;
                         continue;
                     };
                     if (selected) |entry| {
                         if (entry.kind == .directory) {
-                            browser.enter(&volume, entry) catch |failure| {
+                            browser.enter(volume, entry) catch |failure| {
                                 _ = showError("DIRECTORY", failure);
-                                waitForErrorDismiss(&input);
+                                waitForErrorDismiss(input);
                             };
                         } else {
-                            playSelection(&volume, &browser, entry, battery_mv, &attenuation) catch |failure| {
+                            playSelection(volume, browser, entry, battery_mv, &attenuation) catch |failure| {
                                 _ = showError("PLAYBACK", failure);
-                                waitForErrorDismiss(&input);
+                                waitForErrorDismiss(input);
                             };
                             input.resync();
                         }
                     }
                 },
             }
-            if (!(drawBrowser(&volume, &browser, battery_mv, attenuation, previous) catch |failure|
-                fatalError("DIRECTORY", failure))) rawPanicBlink();
+            if (usb.needsHandoff()) return;
+            if (!(drawBrowser(volume, browser, battery_mv, attenuation, previous) catch |failure|
+                return failure)) return error.DisplayFailure;
         }
 
         const power_down = input.stable_buttons & board.ButtonId.power.mask() != 0;
         if (power_down) {
             if (power_started == null) power_started = Timer.now();
-            if (Timer.elapsed(power_started.?) > Timer.milliseconds(1_500)) powerOff(&pmic);
+            if (Timer.elapsed(power_started.?) > Timer.milliseconds(1_500)) powerOff(pmic);
         } else power_started = null;
         Timer.delayMicroseconds(1_000);
     }

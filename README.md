@@ -33,7 +33,7 @@ current RAM-only build provides:
 - all buttons and both wheel directions;
 - identified AXP192 power, battery/USB voltage, current telemetry and power-off;
 - configured headphone/line jack inputs with debouncing support;
-- native read-only SD initialization at up to 50 MHz;
+- native SD initialization, raw sector reads and host-exclusive writes at up to 50 MHz;
 - allocation-free FAT32 traversal, seeking, long names, WAV and AIFF parsing;
 - native FLAC decoding and bounded C backends for MP3, AAC, ALAC, Vorbis and Opus;
 - identified ES9018K2M, filters, de-emphasis, mute and output routing;
@@ -45,8 +45,8 @@ current RAM-only build provides:
 The player uses separate preemptive output, UI, control, codec and storage tasks.
 Compressed input arrives in SD bursts, decoding publishes canonical Q1.31 PCM,
 and output fills fixed-duration DMA periods. Only control performs DAC I2C.
-Only storage reads the card. The firmware has no NAND write path; SD access is
-read-only.
+Only storage reads the card. The firmware has no NAND write path. Player filesystem access is read-only;
+USB mode grants the computer exclusive raw SD access.
 
 The PCM clock and DMA path is verified at 8, 11.025, 12, 16, 22.05, 24,
 32, 44.1, 48, 64, 88.2, 96, 176.4 and 192 kHz. All fourteen rates hold DAC
@@ -359,6 +359,62 @@ The build places these images in `zig-out/bin`:
 | `gain-spl.raw` | Unwrapped TCSM code |
 | `gain-stage2.bin` | Flat DRAM image loaded at `0x80004000` |
 
+## Automatic USB transfer
+
+Connecting to a USB host automatically stops playback and exposes the microSD
+as a standard USB mass-storage disk, including in Finder. Player, decoder and
+storage workers finish before the host can read or write sectors. The device
+shows “USB CONNECTED”; eject the disk on the computer to return to the player.
+Playback stays stopped. Volume and the deepest surviving folder/selection are
+preserved. Paths are resolved by name against a fresh FAT32 mount, never by old
+cluster numbers or cached directory entries.
+
+The cable can remain connected after eject: the device returns to normal use
+and USB power remains available. Charging enable, target voltage and current
+settings are preserved; a full battery can report no active charging. Gain does
+not yet negotiate a different charging-current policy. Charger-only connections
+leave the player usable. A USB bus reset or suspend does not release ownership.
+After eject, host polling and bus resets cannot automatically re-export the
+card; unplug and reconnect the cable to transfer again. Eject before unplugging
+so the host can flush its own filesystem cache.
+
+The implementation uses a pinned TinyUSB device/MSC/DWC2 subset and Zig board
+hooks and callbacks. The F20 port uses high-speed USB with bounded 4 KiB sector
+buffers and CPU FIFO transfers; it does not depend on USB DMA cache coherence.
+SD writes wait for programming completion and CMD13 card-ready status before
+acknowledgement. Failed card I/O latches an unavailable medium until the next
+ownership transition. `0xa108:0x1002` is a development USB identity; a distributed
+hardware product needs an assigned identity.
+
+`mise run test-usb` exercises the production class, callbacks, storage policy,
+fragmented I/O, injected faults and eject status ordering in Debug and
+ReleaseFast. The default host suite includes these tests. On macOS, with an F20
+in mask-ROM mode, run:
+
+```sh
+GAIN_USBBOOT=/path/to/usbboot mise run check-usb-f20 -- --output /path/outside/gain/usb-check
+```
+
+This path has passed the complete qualification on an F20 V2.7: real SD-fed
+playback stopped, no host bytes transferred before worker shutdown, both eject
+cycles remounted cleanly, device and fresh-host readback agreed, test files were
+removed, and USB power/charging enable remained set.
+
+The RAM-only qualification executable first plays an existing supported track
+(at least 2 MiB, at very low volume) and verifies that USB configuration stops
+playback and joins its workers before any host sector access. It then exposes
+the real SD card. Its host runner
+checks USB identity, physical port, card capacity and filesystem before creating
+a new `.gain-usb-check` directory; an existing directory is refused. It copies a
+1 MiB pattern, tests Unicode create/rename/delete, ejects, verifies the file
+through the device’s freshly mounted FAT reader, reconnects and verifies SHA256
+on a fresh host mount, removes only its own test files and ejects again. It
+checks the ownership latch, live player loop, USB power and charging enable,
+then returns to ROM. On failure, it leaves evidence and any test files for
+inspection rather than deleting unknown data. No formatting or flash writes
+occur. Narrow diagnostic control requests are linked only into this separate
+qualification image, not the release player.
+
 ## Hardware boundary
 
 The source keeps SoC and board knowledge separate without a runtime HAL:
@@ -368,7 +424,7 @@ The source keeps SoC and board knowledge separate without a runtime HAL:
 | `src/x1000.zig` | Typed X1000 MMIO registers, fields and peripheral primitives |
 | `src/f20_v27.zig` | F20 V2.7 wiring, panel data and verified LPDDR profile |
 | `src/f20.zig` | Compile-time F20 device facade used by product code |
-| `src/sd.zig` | Native X1000 read-only SD controller |
+| `src/sd.zig` | Native X1000 SD controller |
 | `src/fat32.zig` | Portable allocation-free FAT32 reader |
 | `src/wav.zig` | Portable bounded RIFF/WAVE parser |
 | `src/pcm.zig` | Portable allocation-free WAV PCM to DMA frame conversion |

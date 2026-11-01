@@ -246,7 +246,7 @@ pub const Interrupts = struct {
     const base = 0xb0001000;
     // Linked-descriptor completion has its own PDMAD source. PDMA reports
     // channel termination/faults and does not wake a cyclic audio refill.
-    pub const Source = enum(u6) { aic = 1, pdma = 10, pdma_descriptor = 11, msc0 = 37 };
+    pub const Source = enum(u6) { aic = 1, pdma = 10, pdma_descriptor = 11, usb = 21, msc0 = 37 };
     pub fn bank(source: Source) u1 {
         return @intCast(@backingInt(source) / 32);
     }
@@ -319,6 +319,8 @@ pub const Msc0 = struct {
     pub const response_end = bit(2);
     pub const program_done = bit(1);
     pub const dma_read_done = bit(31);
+    /// DATA_TRAN_DONE, DMAEND and PRG_DONE must all be valid (MSC_IFLAG bit 23).
+    pub const dma_write_done = bit(23);
     pub const error_flags: u32 = 0x1f00;
     pub const bus_width_4: u32 = 2 << 9;
     pub const read_trigger_32: u32 = 1 << 14;
@@ -326,6 +328,7 @@ pub const Msc0 = struct {
     pub const initialize = bit(7);
     pub const response_busy = bit(6);
     pub const data_enabled = bit(3);
+    pub const data_write = bit(4);
     pub const automatic_stop = bit(16);
     pub const card_busy = bit(8);
     pub const dma_descriptor_end = bit(1);

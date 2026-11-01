@@ -4,11 +4,11 @@ zig = "0.17.0"
 [tasks.format]
 alias = "fmt"
 description = "Format Zig sources"
-run = "zig fmt --ast-check build.zig build_codecs.zig build_opus.zig src tests tools"
+run = "zig fmt --ast-check build.zig build_codecs.zig build_opus.zig build_usb.zig src tests tools"
 
 [tasks.lint]
 description = "Check formatting and Zig syntax"
-run = "zig fmt --check --ast-check build.zig build_codecs.zig build_opus.zig src tests tools"
+run = "zig fmt --check --ast-check build.zig build_codecs.zig build_opus.zig build_usb.zig src tests tools"
 
 [tasks.build]
 description = "Build the SPL and stage-two firmware"
@@ -86,3 +86,11 @@ run = "python3 tools/run_player_checks.py"
 [tasks.test-tools]
 description = "Test RAM-only qualification transport policy with mocked USB"
 run = "python3 -m unittest discover -s tools -p 'test_*.py'"
+
+[tasks.test-usb]
+description = "Test USB ownership, real MSC class and descriptors in Debug and ReleaseFast"
+run = "zig build test-usb --summary all"
+
+[tasks.check-usb-f20]
+description = "Qualify USB SD copy/eject on macOS (pass --output; set GAIN_USBBOOT)"
+run = "python3 tools/run_usb_checks.py"
