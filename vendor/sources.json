@@ -34,5 +34,13 @@
     "version": "1.6.1",
     "archive_sha256": "6ffcb593207be92584df15b32466ed64bbec99109f007c82205f0194572411a1",
     "selection": "portable float decoder; neural PLC/DRED models omitted"
+  },
+  "tinyusb": {
+    "url": "https://github.com/hathach/tinyusb",
+    "revision": "7bc8fb8fe7ac667b09e8840f28622c5172d531aa",
+    "selection": "device core, MSC class and Synopsys DWC2; no host, network, MTP or vendor class",
+    "local_changes": [
+      "dwc2_common.h: include gain_dwc2_port.h for the external Zig X1000 port; remaining C sources unchanged"
+    ]
   }
 }
