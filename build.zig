@@ -41,6 +41,7 @@ pub fn build(b: *std.Build) void {
     stage2_module.addAssemblyFile(b.path("src/x1000_context.S"));
     @import("build_codecs.zig").add(b, stage2_module, target, .ReleaseFast, true);
     _ = @import("build_usb.zig").add(b, stage2_module, target, .ReleaseFast, true);
+    @import("build_art.zig").add(b, stage2_module, target, .ReleaseFast, true);
     const stage2 = b.addExecutable(.{ .name = "gain-stage2.elf", .root_module = stage2_module });
     stage2.entry = .disabled;
     stage2.setLinkerScript(b.path("stage2.ld"));
@@ -427,7 +428,25 @@ pub fn build(b: *std.Build) void {
         const usb_tests = b.addTest(.{ .root_module = usb_module });
         usb_tests_step.dependOn(&b.addRunArtifact(usb_tests).step);
     }
+    const library_step = b.step("test-library", "Test portable catalogue reconciliation and persistence");
+    for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |mode| {
+        for ([_][]const u8{ "src/catalog_codec.zig", "src/catalog_store.zig", "src/library_metadata.zig" }) |path| {
+            const module = b.createModule(.{ .root_source_file = b.path(path), .target = b.graph.host, .optimize = mode });
+            library_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = module })).step);
+        }
+        const art_tests = b.createModule(.{ .root_source_file = b.path("src/artwork.zig"), .target = b.graph.host, .optimize = mode, .link_libc = true });
+        @import("build_art.zig").add(b, art_tests, b.graph.host, mode, false);
+        library_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = art_tests })).step);
+        const tags_tests = b.createModule(.{ .root_source_file = b.path("tests/mp4_tags_tests.zig"), .target = b.graph.host, .optimize = mode });
+        tags_tests.addImport("mp4_tags", b.createModule(.{ .root_source_file = b.path("src/mp4_tags.zig"), .target = b.graph.host, .optimize = mode }));
+        library_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = tags_tests })).step);
+        const library_module = b.createModule(.{ .root_source_file = b.path("src/library.zig"), .target = b.graph.host, .optimize = mode });
+        const library_test_module = b.createModule(.{ .root_source_file = b.path("tests/library_tests.zig"), .target = b.graph.host, .optimize = mode });
+        library_test_module.addImport("library", library_module);
+        library_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = library_test_module })).step);
+    }
     const test_step = b.step("test", "Run host-side tests");
+    test_step.dependOn(library_step);
     test_step.dependOn(usb_tests_step);
     test_step.dependOn(sim_policy_step);
     test_step.dependOn(codec_tests_step);

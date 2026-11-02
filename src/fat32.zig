@@ -34,6 +34,7 @@ pub const DirectoryEntry = struct {
     first_cluster: u32,
     size: u32,
     attributes: u8,
+    modified: u32 = 0,
 
     pub fn name(self: *const DirectoryEntry) []const u8 {
         return self.name_bytes[0..self.name_length];
@@ -51,8 +52,9 @@ pub const DirectoryEntry = struct {
     }
 };
 
-/// Allocation-free, read-only FAT32 access. `Device.readBlocks` is the only
-/// device-specific operation and must fill a whole number of 512-byte sectors.
+/// Allocation-free FAT32 traversal with optional fixed-allocation overwrites.
+/// Device reads/writes operate on whole 512-byte sectors. The FAT is immutable
+/// during this mount; USB ownership ends the mount before host FAT changes.
 pub fn Volume(comptime Device: type) type {
     return struct {
         const Self = @This();
@@ -67,6 +69,9 @@ pub fn Volume(comptime Device: type) type {
         data_lba: u32,
         root_cluster: u32,
         cluster_count: u32,
+        serial: u32 = 0,
+        fat_cache_lba: ?u32 = null,
+        fat_cache: [sector_bytes]u8 = undefined,
 
         pub fn mount(device: *Device, scratch: *[sector_bytes]u8) !Self {
             try device.readBlocks(0, scratch);
@@ -132,6 +137,7 @@ pub fn Volume(comptime Device: type) type {
                 .data_lba = @intCast(data_lba),
                 .root_cluster = root_cluster,
                 .cluster_count = cluster_count,
+                .serial = read32(scratch, 67),
             };
         }
 
@@ -153,6 +159,7 @@ pub fn Volume(comptime Device: type) type {
             long_units: [maximum_long_name_units]u16 = @splat(0xffff),
             long_unit_count: usize = 0,
             long_checksum: u8 = 0,
+            sector: [sector_bytes]u8 = @splat(0),
             expected_ordinal: u5 = 0,
             long_active: bool = false,
 
@@ -161,7 +168,7 @@ pub fn Volume(comptime Device: type) type {
                     if (self.entry_offset == sector_bytes) try self.loadSector();
                     if (self.finished) return null;
 
-                    const entry = self.volume.scratch[self.entry_offset..][0..directory_entry_bytes];
+                    const entry = self.sector[self.entry_offset..][0..directory_entry_bytes];
                     self.entry_offset += directory_entry_bytes;
                     const first = entry[0];
                     if (first == directory_end) {
@@ -200,6 +207,7 @@ pub fn Volume(comptime Device: type) type {
                     }
 
                     var result = DirectoryEntry{
+                        .modified = read32(entry, 22),
                         .kind = kind,
                         .first_cluster = first_cluster,
                         .size = size,
@@ -214,7 +222,7 @@ pub fn Volume(comptime Device: type) type {
                         ));
                     }
                     if (!has_long_name or result.name_length == 0) {
-                        result.name_length = @intCast(decodeShortName(entry[0..11], &result.name_bytes));
+                        result.name_length = @intCast(decodeShortName(entry[0..11], entry[12], &result.name_bytes));
                     }
                     self.resetLongName();
                     return result;
@@ -232,6 +240,7 @@ pub fn Volume(comptime Device: type) type {
                 }
                 const lba = try self.volume.clusterLba(self.cluster) + self.sector_index;
                 try self.volume.device.readBlocks(lba, self.volume.scratch);
+                @memcpy(&self.sector, self.volume.scratch);
                 self.sector_index += 1;
                 self.entry_offset = 0;
             }
@@ -311,6 +320,60 @@ pub fn Volume(comptime Device: type) type {
                 .cluster = file.first_cluster,
             };
         }
+
+        /// Resolve only names from the current mount. No persisted cluster IDs.
+        pub fn findPath(self: *Self, path: []const u8) !DirectoryEntry {
+            var parts = @import("std").mem.tokenizeScalar(u8, path, '/');
+            var directory = self.rootDirectory();
+            var result: ?DirectoryEntry = null;
+            while (parts.next()) |part| {
+                if (@import("std").mem.eql(u8, part, ".") or @import("std").mem.eql(u8, part, "..")) return error.InvalidName;
+                var iterator = try self.iterate(directory);
+                result = null;
+                while (try iterator.next()) |entry| {
+                    if (@import("std").ascii.eqlIgnoreCase(entry.name(), part)) {
+                        result = entry;
+                        break;
+                    }
+                }
+                const entry = result orelse return error.NotFound;
+                if (parts.peek() != null) directory = try entry.directory();
+            }
+            return result orelse error.NotFound;
+        }
+        /// Sector-aligned overwrite of an existing allocation. Never extends
+        /// files, changes directory entries or allocates/frees FAT clusters.
+        pub fn overwrite(self: *Self, file: File) !Overwrite {
+            if (file.size == 0 or file.size % sector_bytes != 0) return error.InvalidWrite;
+            return .{ .cursor = try self.reader(file) };
+        }
+        pub const Overwrite = struct {
+            cursor: Reader,
+            pub fn seekTo(self: *Overwrite, position: u32) !void {
+                if (position % sector_bytes != 0) return error.InvalidWrite;
+                try self.cursor.seekTo(position);
+            }
+            pub fn write(self: *Overwrite, input: []const u8) !void {
+                if (input.len == 0 or input.len % sector_bytes != 0 or input.len > self.cursor.remaining or @intFromPtr(input.ptr) & 3 != 0) return error.InvalidWrite;
+                var consumed: usize = 0;
+                const volume = self.cursor.volume;
+                const cluster_bytes = @as(u32, volume.sectors_per_cluster) * sector_bytes;
+                while (consumed < input.len) {
+                    if (self.cursor.cluster_offset == cluster_bytes) {
+                        self.cursor.cluster = try volume.nextCluster(self.cursor.cluster);
+                        self.cursor.cluster_offset = 0;
+                    }
+                    const count = @min(input.len - consumed, cluster_bytes - self.cursor.cluster_offset);
+                    const lba = try volume.clusterLba(self.cursor.cluster) + self.cursor.cluster_offset / sector_bytes;
+                    try volume.device.writeBlocks(lba, input[consumed..][0..count]);
+                    self.cursor.consume(count);
+                    consumed += count;
+                }
+            }
+            pub fn sync(self: *Overwrite) !void {
+                try self.cursor.volume.device.sync();
+            }
+        };
 
         pub const Reader = struct {
             volume: *Self,
@@ -401,8 +464,13 @@ pub fn Volume(comptime Device: type) type {
             const fat_sector_offset = fat_offset / sector_bytes;
             if (fat_sector_offset >= self.fat_sectors) return error.CorruptFilesystem;
             const entry_offset: usize = @intCast(fat_offset % sector_bytes);
-            try self.device.readBlocks(self.fat_lba + @as(u32, @intCast(fat_sector_offset)), self.scratch);
-            const next = read32(self.scratch, entry_offset) & cluster_mask;
+            const lba = self.fat_lba + @as(u32, @intCast(fat_sector_offset));
+            if (self.fat_cache_lba != lba) {
+                try self.device.readBlocks(lba, self.scratch);
+                @memcpy(&self.fat_cache, self.scratch);
+                self.fat_cache_lba = lba;
+            }
+            const next = read32(&self.fat_cache, entry_offset) & cluster_mask;
             if (next >= end_of_chain) return null;
             if (next == bad_cluster or !self.validCluster(next)) return error.BadCluster;
             return next;
@@ -475,12 +543,15 @@ fn shortNameChecksum(name: []const u8) u8 {
     return checksum;
 }
 
-fn decodeShortName(name: []const u8, output: *[maximum_name_bytes]u8) usize {
+fn decodeShortName(name: []const u8, case_flags: u8, output: *[maximum_name_bytes]u8) usize {
+    const lower_base = case_flags & 0x08 != 0; // FAT NTRes lowercase basename.
+    const lower_extension = case_flags & 0x10 != 0;
     var written: usize = 0;
     var base_end: usize = 8;
     while (base_end != 0 and name[base_end - 1] == ' ') base_end -= 1;
     for (name[0..base_end], 0..) |raw, index| {
-        output[written] = if (index == 0 and raw == 0x05) 0xe5 else raw;
+        const byte = if (index == 0 and raw == 0x05) 0xe5 else raw;
+        output[written] = if (lower_base) @import("std").ascii.toLower(byte) else byte;
         written += 1;
     }
     var extension_end: usize = 11;
@@ -490,7 +561,7 @@ fn decodeShortName(name: []const u8, output: *[maximum_name_bytes]u8) usize {
         written += 1;
         for (name[8..extension_end]) |byte| {
             if (written == output.len) break;
-            output[written] = byte;
+            output[written] = if (lower_extension) @import("std").ascii.toLower(byte) else byte;
             written += 1;
         }
     }
@@ -514,28 +585,25 @@ fn encodeLongName(units: []const u16, output: *[maximum_name_bytes]u8) usize {
 
         const needed: usize = if (codepoint < 0x80) 1 else if (codepoint < 0x800) 2 else if (codepoint < 0x10000) 3 else 4;
         if (written + needed > output.len) break;
-        switch (needed) {
-            1 => output[written] = @intCast(codepoint),
-            2 => {
-                output[written] = @intCast(0xc0 | codepoint >> 6);
-                output[written + 1] = @intCast(0x80 | codepoint & 0x3f);
-            },
-            3 => {
-                output[written] = @intCast(0xe0 | codepoint >> 12);
-                output[written + 1] = @intCast(0x80 | codepoint >> 6 & 0x3f);
-                output[written + 2] = @intCast(0x80 | codepoint & 0x3f);
-            },
-            4 => {
-                output[written] = @intCast(0xf0 | codepoint >> 18);
-                output[written + 1] = @intCast(0x80 | codepoint >> 12 & 0x3f);
-                output[written + 2] = @intCast(0x80 | codepoint >> 6 & 0x3f);
-                output[written + 3] = @intCast(0x80 | codepoint & 0x3f);
-            },
-            else => unreachable,
-        }
-        written += needed;
+        written += @import("std").unicode.utf8Encode(codepoint, output[written..]) catch break;
     }
     return written;
+}
+
+test "FAT long names encode continuation bytes, surrogate pairs and bounded truncation" {
+    const std = @import("std");
+    inline for (.{ "A Doc’s Example.m4a", "Müsic — 楽団 🦊.flac" }) |name| {
+        const units = std.unicode.utf8ToUtf16LeStringLiteral(name);
+        var output: [maximum_name_bytes]u8 = undefined;
+        const count = encodeLongName(units, &output);
+        try std.testing.expectEqualStrings(name, output[0..count]);
+    }
+    var units: [maximum_name_bytes + 2]u16 = @splat('a');
+    units[maximum_name_bytes - 1] = 0x2019;
+    var output: [maximum_name_bytes]u8 = undefined;
+    const count = encodeLongName(&units, &output);
+    try std.testing.expectEqual(maximum_name_bytes - 1, count);
+    try std.testing.expect(std.unicode.utf8ValidateSlice(output[0..count]));
 }
 
 fn isPowerOfTwo(value: u8) bool {

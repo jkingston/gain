@@ -4,11 +4,11 @@ zig = "0.17.0"
 [tasks.format]
 alias = "fmt"
 description = "Format Zig sources"
-run = "zig fmt --ast-check build.zig build_codecs.zig build_opus.zig build_usb.zig src tests tools"
+run = "zig fmt --ast-check build.zig build_codecs.zig build_opus.zig build_usb.zig build_art.zig src tests tools"
 
 [tasks.lint]
 description = "Check formatting and Zig syntax"
-run = "zig fmt --check --ast-check build.zig build_codecs.zig build_opus.zig build_usb.zig src tests tools"
+run = "zig fmt --check --ast-check build.zig build_codecs.zig build_opus.zig build_usb.zig build_art.zig src tests tools"
 
 [tasks.build]
 description = "Build the SPL and stage-two firmware"

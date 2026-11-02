@@ -10,6 +10,7 @@ const file_bytes = 600;
 
 const MemoryCard = struct {
     image: [file_bytes]u8,
+    name_case: u8 = 0,
 
     fn init() MemoryCard {
         var self = MemoryCard{ .image = @splat(0) };
@@ -31,7 +32,10 @@ const MemoryCard = struct {
             0 => makeMbr(output),
             partition_lba => makeBootSector(output),
             partition_lba + reserved_sectors => makeFat(output),
-            data_lba => makeRootDirectory(output),
+            data_lba => {
+                makeRootDirectory(output);
+                output[12] = self.name_case;
+            },
             data_lba + 1 => @memcpy(output, self.image[0..fat32.sector_bytes]),
             data_lba + 3 => @memcpy(output[0 .. file_bytes - fat32.sector_bytes], self.image[fat32.sector_bytes..]),
             data_lba + 4 => makeAlbumDirectory(output),
@@ -107,6 +111,19 @@ test "FAT32 directory iterator decodes nested long filenames" {
     try std.testing.expectEqualStrings("01 - Tone.flac", aria.name());
     try std.testing.expectEqual(@as(u32, 123), (try aria.file()).size);
     try std.testing.expect((try contents.next()) == null);
+}
+
+test "FAT short-name case flags preserve display names and ASCII path lookup ignores case" {
+    for ([_][]const u8{ "GAIN.WAV", "gain.WAV", "GAIN.wav", "gain.wav" }, 0..) |expected, flags| {
+        var card = MemoryCard.init();
+        card.name_case = @as(u8, @intCast(flags)) << 3;
+        var scratch: [512]u8 = undefined;
+        var volume = try fat32.Volume(MemoryCard).mount(&card, &scratch);
+        var iterator = try volume.iterate(volume.rootDirectory());
+        try std.testing.expectEqualStrings(expected, (try iterator.next()).?.name());
+        try std.testing.expectEqual(file_bytes, (try volume.findPath("gAiN.WaV")).size);
+        try std.testing.expectEqual(123, (try volume.findPath("synthetic album editions/01 - tone.FLAC")).size);
+    }
 }
 
 test "WAV parser rejects inconsistent format arithmetic" {
@@ -309,4 +326,66 @@ fn write32(bytes: []u8, offset: usize, value: u32) void {
     bytes[offset + 1] = @truncate(value >> 8);
     bytes[offset + 2] = @truncate(value >> 16);
     bytes[offset + 3] = @truncate(value >> 24);
+}
+
+test "directory iteration survives unrelated file reads and recursive traversal" {
+    var card = MemoryCard.init();
+    var scratch: [512]u8 = undefined;
+    var volume = try fat32.Volume(MemoryCard).mount(&card, &scratch);
+    var root = try volume.iterate(volume.rootDirectory());
+    const first = (try root.next()).?;
+    var reader = try volume.reader(try first.file());
+    var bytes: [13]u8 = undefined;
+    _ = try reader.read(&bytes); // Replaces volume.scratch while parent is live.
+    const album = (try root.next()).?;
+    try std.testing.expectEqualStrings("Synthetic Album Editions", album.name());
+    var child = try volume.iterate(try album.directory());
+    _ = try child.next();
+    _ = try child.next();
+    try std.testing.expectEqualStrings("01 - Tone.flac", (try child.next()).?.name());
+    try std.testing.expect((try root.next()) == null);
+    const resolved = try volume.findPath("Synthetic Album Editions/01 - Tone.flac");
+    try std.testing.expectEqual(123, resolved.size);
+    try std.testing.expectError(error.InvalidName, volume.findPath("../GAIN.WAV"));
+}
+
+const WritableCard = struct {
+    base: MemoryCard = MemoryCard.init(),
+    writes: usize = 0,
+    fail_at: ?usize = null,
+    first: [512]u8 = @splat(0),
+    second: [512]u8 = @splat(0),
+    pub fn readBlocks(self: *@This(), lba: u32, out: []u8) !void {
+        try self.base.readBlocks(lba, out);
+    }
+    pub fn writeBlocks(self: *@This(), lba: u32, bytes: []const u8) !void {
+        // Only the declared fragmented file's two data sectors may change.
+        if ((lba != data_lba + 1 and lba != data_lba + 3) or bytes.len != 512) return error.UnrelatedWrite;
+        if (self.fail_at == self.writes) return error.CardRemoved;
+        self.writes += 1;
+        @memcpy(if (lba == data_lba + 1) &self.first else &self.second, bytes);
+    }
+    pub fn sync(_: *@This()) !void {}
+};
+test "fixed allocation writer follows fragments without touching FAT or extending files" {
+    var card: WritableCard = .{};
+    var scratch: [512]u8 = undefined;
+    var volume = try fat32.Volume(WritableCard).mount(&card, &scratch);
+    var writer = try volume.overwrite(.{ .first_cluster = 3, .size = 1024 });
+    var payload: [1024]u8 align(4) = undefined;
+    @memset(payload[0..512], 0xa1);
+    @memset(payload[512..], 0xb2);
+    try writer.write(&payload);
+    try writer.sync();
+    try std.testing.expectEqual(2, card.writes);
+    try std.testing.expectEqualSlices(u8, payload[0..512], &card.first);
+    try std.testing.expectEqualSlices(u8, payload[512..], &card.second);
+    try std.testing.expectError(error.InvalidWrite, writer.write(payload[0..512]));
+    try std.testing.expectError(error.InvalidWrite, writer.seekTo(1));
+    try writer.seekTo(0);
+    try std.testing.expectError(error.InvalidWrite, writer.write(payload[0..513]));
+    try std.testing.expectError(error.InvalidWrite, volume.overwrite(.{ .first_cluster = 3, .size = 600 }));
+    card.fail_at = card.writes;
+    try std.testing.expectError(error.CardRemoved, writer.write(payload[0..512]));
+    try std.testing.expectEqual(2, card.writes);
 }

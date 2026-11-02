@@ -42,5 +42,10 @@
     "local_changes": [
       "dwc2_common.h: include gain_dwc2_port.h for the external Zig X1000 port; remaining C sources unchanged"
     ]
+  },
+  "picojpeg": {
+    "url": "https://github.com/richgel999/picojpeg",
+    "revision": "8ab33a909b4115ace4a952b7ffcb64c350f9298d",
+    "selection": "unmodified baseline streaming decoder; bounded Zig bridge and resampler"
   }
 }
