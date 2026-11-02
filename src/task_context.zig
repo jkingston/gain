@@ -1,5 +1,6 @@
 //! X1000 O32 interrupt context, shared by the assembly port and qualification.
 const std = @import("std");
+
 pub const Context = extern struct {
     pub const interrupt_enable: u32 = 1;
     registers_1_to_25: [25]u32 = @splat(0),
@@ -14,11 +15,13 @@ pub const Context = extern struct {
     floating_registers: [32]u32 = @splat(0),
     floating_control: u32 = 0,
     padding: [2]u32 = @splat(0),
+
     pub fn argument(self: *const Context, index: u2) u32 {
         // O32 arguments a0..a3 are architectural registers 4..7.
         return self.registers_1_to_25[@as(usize, index) + 3];
     }
 };
+
 comptime {
     if (@offsetOf(Context, "registers_1_to_25") != 0 or @offsetOf(Context, "gp") != 0x64 or
         @offsetOf(Context, "sp") != 0x68 or @offsetOf(Context, "fp") != 0x6c or
@@ -29,6 +32,7 @@ comptime {
         @sizeOf(Context) != 0x110)
         @compileError("X1000 interrupt assembly context layout changed");
 }
+
 test "trap arguments read architectural O32 a0 through a3" {
     var context = Context{};
     for (&context.registers_1_to_25, 1..) |*register, number| register.* = @intCast(number);

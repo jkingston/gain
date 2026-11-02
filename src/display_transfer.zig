@@ -99,6 +99,7 @@ pub const Scheduler = struct {
 
 test "transfer work is strictly bounded per audio poll" {
     const testing = @import("std").testing;
+
     var scheduler = Scheduler{};
     scheduler.request(.{ .x = 275, .y = 7, .width = 18, .height = 7 }, .urgent);
 
@@ -116,6 +117,7 @@ test "transfer work is strictly bounded per audio poll" {
 
 test "urgent work precedes normal work and repeated changes are coalesced" {
     const testing = @import("std").testing;
+
     const progress = Region{ .x = 0, .y = 180, .width = 320, .height = 42 };
     const volume = Region{ .x = 275, .y = 7, .width = 18, .height = 7 };
     var scheduler = Scheduler{};
@@ -133,6 +135,7 @@ test "urgent work precedes normal work and repeated changes are coalesced" {
 
 test "urgent work preempts and restarts an active normal transfer" {
     const testing = @import("std").testing;
+
     const progress = Region{ .x = 0, .y = 180, .width = 320, .height = 42 };
     const volume = Region{ .x = 275, .y = 7, .width = 18, .height = 7 };
     var scheduler = Scheduler{};
@@ -152,6 +155,7 @@ test "urgent work preempts and restarts an active normal transfer" {
 
 test "change during an active transfer schedules one complete refresh" {
     const testing = @import("std").testing;
+
     const volume = Region{ .x = 275, .y = 7, .width = 18, .height = 7 };
     var scheduler = Scheduler{};
     scheduler.request(volume, .urgent);
@@ -168,6 +172,7 @@ test "change during an active transfer schedules one complete refresh" {
 
 test "asynchronous backend takes urgent regions as complete jobs" {
     const testing = @import("std").testing;
+
     const progress = Region{ .x = 0, .y = 180, .width = 320, .height = 42 };
     const volume = Region{ .x = 275, .y = 7, .width = 18, .height = 7 };
     var scheduler = Scheduler{};

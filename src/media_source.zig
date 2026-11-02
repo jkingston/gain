@@ -1,6 +1,7 @@
 //! Cached random access over a bounded sequential reader. Small container table
 //! lookups share a caller-owned cache instead of becoming individual SD reads.
 const std = @import("std");
+
 pub fn Source(comptime Reader: type) type {
     return struct {
         const Self = @This();
@@ -10,12 +11,14 @@ pub fn Source(comptime Reader: type) type {
         cache_start: u64 = 0,
         cache_bytes: usize = 0,
         position: u64 = 0,
+
         pub fn init(reader: *Reader, length: u64, cache: []u8) !Self {
             if (cache.len < 512) return error.InvalidCache;
             if (length > std.math.maxInt(u32)) return error.FileTooLarge;
             try reader.seekTo(0);
             return .{ .reader = reader, .length = length, .cache = cache };
         }
+
         pub fn read(self: *Self, offset: u64, output: []u8) !void {
             if (offset > self.length or output.len > self.length - offset) return error.Truncated;
             var done: usize = 0;
@@ -38,6 +41,7 @@ pub fn Source(comptime Reader: type) type {
                 }
             }
         }
+
         fn exact(self: *Self, offset: u64, output: []u8) !void {
             if (offset != self.position) try self.reader.seekTo(@intCast(offset));
             self.position = offset;
@@ -50,6 +54,7 @@ pub fn Source(comptime Reader: type) type {
                 self.position += count;
             }
         }
+
         pub fn int(self: *Self, comptime T: type, offset: u64, comptime endian: std.builtin.Endian) !T {
             var bytes: [@sizeOf(T)]u8 = undefined;
             try self.read(offset, &bytes);
@@ -57,15 +62,18 @@ pub fn Source(comptime Reader: type) type {
         }
     };
 }
+
 const MemoryReader = struct {
     bytes: []const u8,
     position: usize = 0,
     fragment: usize = 7,
     calls: usize = 0,
+
     fn seekTo(self: *MemoryReader, offset: u32) !void {
         if (offset > self.bytes.len) return error.SeekBounds;
         self.position = offset;
     }
+
     fn read(self: *MemoryReader, output: []u8) !usize {
         self.calls += 1;
         const count = @min(output.len, self.fragment, self.bytes.len - self.position);
@@ -74,6 +82,7 @@ const MemoryReader = struct {
         return count;
     }
 };
+
 test "random cached reads preserve bytes under one-byte source fragments" {
     var bytes: [4096]u8 = undefined;
     for (&bytes, 0..) |*byte, i| byte.* = @truncate(i * 73 + i / 11);
@@ -91,6 +100,7 @@ test "random cached reads preserve bytes under one-byte source fragments" {
     try std.testing.expectError(error.Truncated, source.read(bytes.len - 1, out[0..2]));
     try source.read(bytes.len, out[0..0]);
 }
+
 test "small table reads reuse the cache and truncated readers fail explicitly" {
     const bytes: [1024]u8 = @splat(0x12);
     var reader = MemoryReader{ .bytes = &bytes, .fragment = 1024 };
@@ -109,9 +119,11 @@ test "a failed cache refill cannot publish partially initialized cache bytes" {
         bytes: [1024]u8 = @splat(0x73),
         position: usize = 0,
         failed: bool = false,
+
         fn seekTo(self: *@This(), target: u32) !void {
             self.position = target;
         }
+
         fn read(self: *@This(), output: []u8) !usize {
             if (self.position >= 7 and !self.failed) {
                 self.failed = true;
@@ -123,6 +135,7 @@ test "a failed cache refill cannot publish partially initialized cache bytes" {
             return count;
         }
     };
+
     var reader = FlakyReader{};
     var cache: [512]u8 = @splat(0xa5);
     var source = try Source(FlakyReader).init(&reader, reader.bytes.len, &cache);

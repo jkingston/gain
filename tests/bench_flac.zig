@@ -1,5 +1,6 @@
 const std = @import("std");
 const f20 = @import("f20");
+
 const flac = f20.flac;
 const flac_lpc = f20.flac_lpc;
 const flac_pcm = f20.flac_pcm;
@@ -101,6 +102,7 @@ fn benchmarkStereoModes(io: std.Io, repetitions: usize) !Result {
         @embedFile("fixtures/flac-mode-right-side.flac"),
         @embedFile("fixtures/flac-mode-mid-side.flac"),
     };
+
     var result: Result = .{ .samples = undefined, .checksum = 0 };
     for (0..trial_count) |trial| {
         const start = now(io);

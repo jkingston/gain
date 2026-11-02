@@ -244,36 +244,46 @@ pub const Pdma = struct {
 /// and acknowledge in the owning task, then unmask after the work is complete.
 pub const Interrupts = struct {
     const base = 0xb0001000;
+
     // Linked-descriptor completion has its own PDMAD source. PDMA reports
     // channel termination/faults and does not wake a cyclic audio refill.
     pub const Source = enum(u6) { aic = 1, pdma = 10, pdma_descriptor = 11, usb = 21, msc0 = 37 };
+
     pub fn bank(source: Source) u1 {
         return @intCast(@backingInt(source) / 32);
     }
+
     pub fn maskFor(source: Source) u32 {
         return @as(u32, 1) << @as(u5, @truncate(@backingInt(source)));
     }
+
     pub fn mask(source: Source) void {
         write32(base + @as(u32, bank(source)) * 0x20 + 8, maskFor(source));
     }
+
     pub fn unmask(source: Source) void {
         write32(base + @as(u32, bank(source)) * 0x20 + 12, maskFor(source));
     }
+
     pub fn pending(source: Source) bool {
         return read32(base + @as(u32, bank(source)) * 0x20 + 16) & maskFor(source) != 0;
     }
+
     pub fn maskAll() void {
         write32(base + 8, 0xffffffff);
         write32(base + 0x28, 0xffffffff);
     }
+
     pub fn masks() [2]u32 {
         return .{ read32(base + 4), read32(base + 0x24) };
     }
+
     pub fn restore(values: [2]u32) void {
         write32(base + 4, values[0]);
         write32(base + 0x24, values[1]);
     }
 };
+
 test "INTC sources select the documented CPU banks and bits" {
     const testing = @import("std").testing;
     try testing.expectEqual(@as(u1, 0), Interrupts.bank(.pdma));

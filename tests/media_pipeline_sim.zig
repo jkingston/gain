@@ -1,5 +1,6 @@
 const std = @import("std");
 const f20 = @import("f20");
+
 const fat32 = f20.storage.fat32;
 const wav = f20.storage.wav;
 const pcm = f20.pcm;
@@ -109,6 +110,7 @@ test "PCM filling reports truncation and rejects partial DMA frames" {
             return count;
         }
     };
+
     var source = ShortReader{ .bytes = &[_]u8{ 1, 2, 3 } };
     var stream = try pcm.Stream(ShortReader).init(&source, testWaveInfo());
     var output: [4]u8 = undefined;
@@ -209,6 +211,7 @@ fn makeWave(output: *[maximum_file_bytes]u8, rate: u32, source: Source) usize {
         .signed_24_packed => 6,
         .signed_24_in_32 => 8,
     };
+
     const frames = frameCount(source);
     const data_bytes = frames * source_frame_bytes;
     const file_bytes = header_bytes + data_bytes;
@@ -370,6 +373,7 @@ test "all integer PCM layouts stream exact samples over arbitrary short reads an
     const Reader = struct {
         bytes: []const u8,
         position: usize = 0,
+
         pub fn read(self: *@This(), output: []u8) !usize {
             const count = @min(@as(usize, 7), @min(output.len, self.bytes.len - self.position));
             @memcpy(output[0..count], self.bytes[self.position..][0..count]);
@@ -390,6 +394,7 @@ test "all integer PCM layouts stream exact samples over arbitrary short reads an
             const start = (frame * channels + channel) * bytes;
             for (0..bytes) |byte| source[start + (if (endian == .little) byte else bytes - 1 - byte)] = @truncate(container >> @as(u5, @intCast(byte * 8)));
         };
+
         var reader = Reader{ .bytes = source[0 .. 257 * channels * bytes] };
         var stream = pcm.Stream(Reader).fromPlan(&reader, plan);
         var output: [56]u8 = undefined;

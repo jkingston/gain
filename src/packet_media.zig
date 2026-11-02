@@ -10,21 +10,26 @@ const Pool = @import("codec_pool.zig").Pool;
 const Frame = @import("pcm_reservoir.zig").StereoFrame;
 const sample = @import("pcm_sample.zig");
 const Information = @import("media_info.zig").Information;
+
 pub const maximum_packet_bytes = 65536;
 pub const padding_bytes = 64;
+
 pub const Workspace = struct {
     packet: []u8,
     page: []u8,
     pcm: []f32,
     frames: []Frame,
     pool: *Pool,
+
     pub fn valid(self: Workspace) bool {
         return self.packet.len >= maximum_packet_bytes + padding_bytes and self.page.len >= 65025 and self.pcm.len >= 16384 and self.frames.len >= 8192 and @import("buffer_regions.zig").disjoint(&.{
             self.packet, self.page, std.mem.sliceAsBytes(self.pcm), std.mem.sliceAsBytes(self.frames), self.pool.storage,
         });
     }
 };
+
 const Decoded = struct { information: Information, frames: u64 = 0 };
+
 pub fn run(source: anytype, comptime Sink: type, sink: *Sink, workspace: Workspace, seek: u64) !Information {
     if (!workspace.valid()) return error.InvalidWorkspace;
     var magic: [4]u8 = undefined;
@@ -33,11 +38,13 @@ pub fn run(source: anytype, comptime Sink: type, sink: *Sink, workspace: Workspa
     if (std.mem.eql(u8, &magic, "OggS")) result = try runOgg(source, Sink, sink, workspace, seek) else if (std.mem.eql(u8, magic[0..3], "ID3") or magic[0] == 0xff) result = try runMp3(source, Sink, sink, workspace, seek) else result = try runMp4(source, Sink, sink, workspace, seek);
     return result.information;
 }
+
 fn decode(decoder: *backend.Decoder, workspace: Workspace, bytes: usize, granule: ?u64, eos: bool) !usize {
     if (bytes > maximum_packet_bytes) return error.PacketTooLarge;
     @memset(workspace.packet[bytes..][0..padding_bytes], 0);
     return decoder.decode(workspace.packet[0..bytes], workspace.pcm, granule, eos);
 }
+
 fn publish(comptime Sink: type, sink: *Sink, result: *Decoded, workspace: Workspace, position: u64, count: usize, begin: u64, end: u64) !void {
     const first = @max(position, begin);
     const last = @min(position + count, end);
@@ -53,9 +60,18 @@ fn publish(comptime Sink: type, sink: *Sink, result: *Decoded, workspace: Worksp
     try sink.push(workspace.frames[0..frames]);
     result.frames += frames;
 }
+
 fn runMp4(source: anytype, comptime Sink: type, sink: *Sink, workspace: Workspace, seek: u64) !Decoded {
     const track = try mp4.parse(source);
-    var result = Decoded{ .information = .{ .kind = if (track.kind == .aac) .aac else .alac, .sample_rate = track.rate, .channels = @intCast(track.channels), .output_format = if (track.kind == .alac and track.bits <= 16) .signed_16_packed else .signed_24_in_u32, .source_bits = if (track.kind == .alac) @intCast(track.bits) else 32, .total_frames = track.frames, .start_frame = @min(seek, track.frames) } };
+    var result = Decoded{ .information = .{
+        .kind = if (track.kind == .aac) .aac else .alac,
+        .sample_rate = track.rate,
+        .channels = @intCast(track.channels),
+        .output_format = if (track.kind == .alac and track.bits <= 16) .signed_16_packed else .signed_24_in_u32,
+        .source_bits = if (track.kind == .alac) @intCast(track.bits) else 32,
+        .total_frames = track.frames,
+        .start_frame = @min(seek, track.frames),
+    } };
     result.information.title.set(track.title[0..track.title_len]);
     var decoder = try backend.Decoder.init(workspace.pool, if (track.kind == .aac) .aac else .alac, track.config[0..track.config_len], track.rate, track.channels);
     defer decoder.deinit();
@@ -72,12 +88,20 @@ fn runMp4(source: anytype, comptime Sink: type, sink: *Sink, workspace: Workspac
     if (result.frames != track.frames - result.information.start_frame) return error.PresentationLength;
     return result;
 }
+
 fn runOgg(source: anytype, comptime Sink: type, sink: *Sink, workspace: Workspace, seek: u64) !Decoded {
     const Source = @TypeOf(source.*);
     var reader = ogg.Reader(Source){ .source = source, .body = workspace.page };
     var decoder: ?backend.Decoder = null;
     defer if (decoder) |*value| value.deinit();
-    var result = Decoded{ .information = .{ .kind = .vorbis, .sample_rate = 0, .channels = 1, .output_format = .signed_24_in_u32, .source_bits = 32, .start_frame = seek } };
+    var result = Decoded{ .information = .{
+        .kind = .vorbis,
+        .sample_rate = 0,
+        .channels = 1,
+        .output_format = .signed_24_in_u32,
+        .source_bits = 32,
+        .start_frame = seek,
+    } };
     var headers: u32 = 0;
     var raw: u64 = 0;
     var lead: u64 = 0;
@@ -163,6 +187,7 @@ fn synchsafe(bytes: *const [4]u8) !u32 {
     }
     return result;
 }
+
 fn mp3Start(source: anytype) !u64 {
     if (source.length < 10) return 0;
     var header: [10]u8 = undefined;
@@ -173,6 +198,7 @@ fn mp3Start(source: anytype) !u64 {
     if (length > source.length) return error.Truncated;
     return length;
 }
+
 fn runMp3(source: anytype, comptime Sink: type, sink: *Sink, workspace: Workspace, seek: u64) !Decoded {
     var decoder = mp3.Decoder.init();
     var offset = try mp3Start(source);
@@ -186,7 +212,14 @@ fn runMp3(source: anytype, comptime Sink: type, sink: *Sink, workspace: Workspac
     var raw: u64 = 0;
     var lead: u64 = 0;
     var initialized = false;
-    var result = Decoded{ .information = .{ .kind = .mp3, .sample_rate = 0, .channels = 1, .output_format = .signed_24_in_u32, .source_bits = 32, .start_frame = seek } };
+    var result = Decoded{ .information = .{
+        .kind = .mp3,
+        .sample_rate = 0,
+        .channels = 1,
+        .output_format = .signed_24_in_u32,
+        .source_bits = 32,
+        .start_frame = seek,
+    } };
     var head: usize = 0;
     var tail: usize = 0;
     const window_bytes = 16 * 1024;

@@ -1,15 +1,20 @@
 //! Native desktop app boundary, not a firmware plugin interface.
 //! Pixels use the same geometry and RGB565 values as the production renderer.
 const ui = @import("ui.zig");
+
 pub const width = ui.screen_width;
 pub const height = ui.screen_height;
 pub const Pixels = [ui.pixel_count]u16;
 pub const abi_version = 2;
 pub const pixel_format: u32 = 565;
 pub const snapshot_capacity = 64 * 1024;
+
 pub const Input = enum(u32) { up, down, select, back, menu, previous, next, volume_up, volume_down, power };
+
 pub const Phase = enum(u32) { press, release, repeat };
+
 pub const Event = extern struct { input: Input, phase: Phase = .press };
+
 pub const Api = extern struct {
     version: u32 = abi_version,
     size: u32 = @sizeOf(Api),

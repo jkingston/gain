@@ -175,6 +175,7 @@ const maximum_u32: u64 = 0xffff_ffff;
 
 test "fixed-point gain scales both PCM layouts symmetrically" {
     const std = @import("std");
+
     const left = [_]i32{ 32_000, -32_000 };
     const right = [_]i32{ -16_000, 16_000 };
     var packed_16: [2]u32 = undefined;

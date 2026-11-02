@@ -1,5 +1,6 @@
 //! Stable byte-order-independent FNV-1a digest for qualification PCM captures.
 pub const initial: u32 = 2166136261;
+
 pub fn update(previous: u32, frames: anytype) u32 {
     var hash = previous;
     for (frames) |frame| for ([_]i32{ frame.left, frame.right }) |sample| {
@@ -8,8 +9,10 @@ pub fn update(previous: u32, frames: anytype) u32 {
     };
     return hash;
 }
+
 test "PCM digest preserves chunk boundaries, sign and channel order" {
     const std = @import("std");
+
     const Frame = struct { left: i32, right: i32 };
     const frames = [_]Frame{ .{ .left = -1, .right = 0 }, .{ .left = 7, .right = -9 } };
     try std.testing.expectEqual(update(initial, &frames), update(update(initial, frames[0..1]), frames[1..]));

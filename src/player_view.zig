@@ -1,19 +1,41 @@
 //! Product view declarations. No MMIO, storage I/O, clocks or allocation.
 const std = @import("std");
 const ui = @import("ui.zig");
+
 pub const visible_rows = 6;
-pub const audio_extensions = [_][]const u8{ ".flac", ".fla", ".wav", ".aif", ".aiff", ".aifc", ".mp3", ".mp2", ".mp1", ".m4a", ".mp4", ".ogg", ".oga", ".opus" };
+pub const audio_extensions = [_][]const u8{
+    ".flac",
+    ".fla",
+    ".wav",
+    ".aif",
+    ".aiff",
+    ".aifc",
+    ".mp3",
+    ".mp2",
+    ".mp1",
+    ".m4a",
+    ".mp4",
+    ".ogg",
+    ".oga",
+    ".opus",
+};
+
 pub const volume_region = @import("display_transfer.zig").Region{ .x = 275, .y = 7, .width = 18, .height = 7 };
 pub const progress_region = @import("display_transfer.zig").Region{ .x = 0, .y = 180, .width = 320, .height = 42 };
+
 pub const Status = struct { sample_rate: u32, total_frames: u64, played_frames: u64, bits: u8 };
+
 pub const Track = struct { name: []const u8, artist: []const u8 = "", album: []const u8 = "" };
+
 pub const BrowserState = struct {
     directory: u32,
     first: usize,
     selected: usize,
     attenuation: u8,
 };
+
 pub const BrowserDamage = struct { full: bool = false, regions: [3]@import("display_transfer.zig").Region = undefined, count: usize = 0 };
+
 pub fn browserDamage(previous: ?BrowserState, next: BrowserState) BrowserDamage {
     const old = previous orelse return .{ .full = true };
     if (old.directory != next.directory or old.first != next.first) return .{ .full = true };
@@ -37,6 +59,7 @@ const whole = ui.Rect{ .x = 0, .y = 0, .width = ui.screen_width, .height = ui.sc
 fn label(scene: *ui.Ui, x: i32, y: i32, width: u16, height: u16, value: []const u8, color: ui.Color, scale: u2) ui.Error!void {
     try scene.text(.{ .x = x, .y = y, .width = width, .height = height }, value, .{ .color = color, .scale = scale });
 }
+
 fn decimal3(initial: u8) [3]u8 {
     var value = initial;
     var output: [3]u8 = undefined;
@@ -47,12 +70,14 @@ fn decimal3(initial: u8) [3]u8 {
     output[0] = if (value != 0) '0' + value else ' ';
     return output;
 }
+
 pub fn volume(scene: *ui.Ui, attenuation: u8, theme: ui.Theme) ui.Error!void {
     try scene.fill(.{ .x = volume_region.x, .y = volume_region.y, .width = volume_region.width, .height = volume_region.height }, theme.surface);
     const bounded = std.math.clamp(attenuation, 16, 128);
     const percent: u8 = @intCast(@as(u16, 128 - bounded) * 100 / 112);
     try label(scene, 275, 7, 18, 7, &decimal3(percent), theme.accent, 1);
 }
+
 fn header(scene: *ui.Ui, battery_mv: u32, attenuation: u8, theme: ui.Theme) ui.Error!void {
     try scene.fill(.{ .x = 0, .y = 0, .width = 320, .height = 30 }, theme.surface);
     try label(scene, 10, 7, 100, 16, "GAIN", theme.text, 2);
@@ -61,6 +86,7 @@ fn header(scene: *ui.Ui, battery_mv: u32, attenuation: u8, theme: ui.Theme) ui.E
     try label(scene, 261, 7, 6, 7, "%", theme.text, 1);
     try volume(scene, attenuation, theme);
 }
+
 pub fn browser(scene: *ui.Ui, title: []const u8, empty: bool, battery_mv: u32, attenuation: u8, theme: ui.Theme) ui.Error!void {
     try scene.fill(whole, theme.background);
     try header(scene, battery_mv, attenuation, theme);
@@ -69,6 +95,7 @@ pub fn browser(scene: *ui.Ui, title: []const u8, empty: bool, battery_mv: u32, a
     try label(scene, 10, 225, 180, 7, "PLAY SELECT", theme.muted, 1);
     try label(scene, 226, 225, 84, 7, "BACK", theme.muted, 1);
 }
+
 pub fn browserRow(scene: *ui.Ui, row: usize, name: []const u8, directory: bool, active: bool, theme: ui.Theme) ui.Error!void {
     if (row >= visible_rows) return;
     const y: i32 = @intCast(59 + row * 27);
@@ -76,6 +103,7 @@ pub fn browserRow(scene: *ui.Ui, row: usize, name: []const u8, directory: bool, 
     try label(scene, 14, y + 8, 278, 7, name[0..@min(name.len, 45)], if (active) theme.accent_text else theme.text, 1);
     if (directory) try label(scene, 298, y + 8, 8, 7, ">", if (active) theme.accent_text else theme.accent, 1);
 }
+
 pub fn cleanTrackName(raw: []const u8) []const u8 {
     var end = raw.len;
     for (audio_extensions) |extension| {
@@ -146,6 +174,7 @@ pub fn progress(scene: *ui.Ui, status: Status, theme: ui.Theme) ui.Error!void {
     try label(scene, 10, 201, 30, 7, &elapsed, theme.text, 1);
     try label(scene, 280, 201, 30, 7, &total, theme.text, 1);
 }
+
 pub fn player(scene: *ui.Ui, track: Track, status: Status, battery_mv: u32, attenuation: u8, theme: ui.Theme) ui.Error!void {
     try scene.fill(whole, theme.background);
     try header(scene, battery_mv, attenuation, theme);
@@ -196,7 +225,11 @@ test "actual browser to player transition matches independent pixel translation 
     for (0..visible_rows) |row| try browserRow(&before, row, "01 - Sample.FLAC", row == 0, row == 2, ui.dark_theme);
     before.render(.{ .pixels = &browser_pixels });
     var after = ui.Ui.init(.{ .pixels = &player_pixels });
-    try player(&after, .{ .name = "01 - Sample.FLAC", .artist = "Artist", .album = "Album" }, .{ .sample_rate = 44100, .total_frames = 44100 * 60, .played_frames = 44100 * 30, .bits = 16 }, 4100, 64, ui.light_theme);
+    try player(&after, .{
+        .name = "01 - Sample.FLAC",
+        .artist = "Artist",
+        .album = "Album",
+    }, .{ .sample_rate = 44100, .total_frames = 44100 * 60, .played_frames = 44100 * 30, .bits = 16 }, 4100, 64, ui.light_theme);
     after.render(.{ .pixels = &player_pixels });
     for (0..321) |offset| {
         ui.slide(&before, &after, &actual, @intCast(offset));
@@ -218,7 +251,11 @@ test "maximum names rows formats and invalid durations fit fixed declaration bud
         for (0..visible_rows + 1) |row| try browserRow(&scene, row, &name, true, true, theme);
         scene.finish();
         for ([_]u32{ 0, 44100, 48000, 88200, 96000, 176400, 192000 }) |rate| {
-            try player(&scene, .{ .name = &name, .artist = &name, .album = &name }, .{ .sample_rate = rate, .played_frames = std.math.maxInt(u64), .total_frames = 0, .bits = 24 }, 0, 0, theme);
+            try player(&scene, .{
+                .name = &name,
+                .artist = &name,
+                .album = &name,
+            }, .{ .sample_rate = rate, .played_frames = std.math.maxInt(u64), .total_frames = 0, .bits = 24 }, 0, 0, theme);
             scene.finish();
             try progress(&scene, .{ .sample_rate = rate, .played_frames = std.math.maxInt(u64), .total_frames = 1, .bits = 16 }, theme);
             scene.finish();
@@ -259,7 +296,12 @@ test "hybrid selection regions reconstruct the entire next browser exactly" {
         }
         a.finish();
         b.finish();
-        const damage = browserDamage(.{ .directory = 2, .first = 0, .selected = old, .attenuation = 64 }, .{ .directory = 2, .first = 0, .selected = selected, .attenuation = 60 });
+        const damage = browserDamage(.{
+            .directory = 2,
+            .first = 0,
+            .selected = old,
+            .attenuation = 64,
+        }, .{ .directory = 2, .first = 0, .selected = selected, .attenuation = 60 });
         try std.testing.expect(!damage.full);
         for (damage.regions[0..damage.count]) |region| for (region.y..region.y + region.height) |y| {
             const offset = y * 320 + region.x;

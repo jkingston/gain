@@ -150,6 +150,7 @@ pub fn ReadAheadReader(comptime Inner: type) type {
 
 test "read-ahead separates source reads from consumer reads" {
     const std = @import("std");
+
     const Source = struct {
         bytes: []const u8,
         position: usize = 0,
@@ -163,6 +164,7 @@ test "read-ahead separates source reads from consumer reads" {
             return count;
         }
     };
+
     var expected: [2_048]u8 = undefined;
     for (&expected, 0..) |*byte, index| byte.* = @truncate(index);
     var source = Source{ .bytes = &expected };
@@ -190,6 +192,7 @@ test "read-ahead separates source reads from consumer reads" {
 
 test "read-ahead rejects overlapping buffers" {
     const std = @import("std");
+
     const Source = struct {
         position: usize = 0,
 
@@ -197,6 +200,7 @@ test "read-ahead rejects overlapping buffers" {
             return 0;
         }
     };
+
     var source = Source{};
     var storage: [1_028]u8 align(4) = undefined;
     try std.testing.expectError(
@@ -207,19 +211,23 @@ test "read-ahead rejects overlapping buffers" {
 
 test "read-ahead seeking flushes stale prefetched bytes and reopens EOF" {
     const std = @import("std");
+
     const Source = struct {
         position: usize = 0,
+
         pub fn read(self: *@This(), output: []u8) !usize {
             const count = @min(output.len, 2000 - self.position);
             for (output[0..count], self.position..) |*byte, index| byte.* = @truncate(index);
             self.position += count;
             return count;
         }
+
         pub fn seekTo(self: *@This(), target: u32) !void {
             if (target > 2000) return error.InvalidSeek;
             self.position = target;
         }
     };
+
     var source = Source{};
     var first: [516]u8 align(4) = undefined;
     var second: [516]u8 align(4) = undefined;

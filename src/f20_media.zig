@@ -1,5 +1,6 @@
 //! Shared player status and control contract; execution lives in f20_player.
 const pcm = @import("pcm.zig");
+
 pub const Result = struct {
     sample_rate: u32,
     output_format: pcm.OutputFormat,

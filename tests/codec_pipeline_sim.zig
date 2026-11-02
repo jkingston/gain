@@ -3,6 +3,7 @@
 const std = @import("std");
 const gain = @import("gain");
 const fixtures = @import("codec_fixtures.zig");
+
 const Frame = gain.pcm_reservoir.StereoFrame;
 const Pool = gain.codec_pool.Pool;
 
@@ -26,14 +27,17 @@ fn workspace(pool: *Pool) gain.media_decoder.Workspace {
         .right = &right,
     };
 }
+
 const Reader = struct {
     bytes: []const u8,
     position: usize = 0,
     random: std.Random.DefaultPrng,
+
     pub fn seekTo(self: *Reader, target: u32) !void {
         if (target > self.bytes.len) return error.SeekBounds;
         self.position = target;
     }
+
     pub fn read(self: *Reader, output: []u8) !usize {
         const count = @min(output.len, 1 + self.random.random().uintLessThan(usize, 997), self.bytes.len - self.position);
         @memcpy(output[0..count], self.bytes[self.position..][0..count]);
@@ -41,15 +45,19 @@ const Reader = struct {
         return count;
     }
 };
+
 const Capture = struct {
     count: usize = 0,
+
     pub fn configure(_: *Capture, _: gain.media_info.Information) !void {}
+
     pub fn push(self: *Capture, input: []const Frame) !void {
         if (input.len > expected.len - self.count) return error.OutputCapacity;
         @memcpy(expected[self.count..][0..input.len], input);
         self.count += input.len;
     }
 };
+
 const Simulation = struct {
     const Input = gain.input_stream.Stream(Reader, @This());
     reader: Reader = undefined,
@@ -68,6 +76,7 @@ const Simulation = struct {
     periods: usize = 0,
     storage_completions: usize = 0,
     random: std.Random.DefaultPrng = undefined,
+
     pub fn init(self: *Simulation, case: fixtures.Case, seed: u64) !void {
         self.* = .{};
         self.reader = .{ .bytes = case.bytes, .random = .init(seed) };
@@ -75,29 +84,36 @@ const Simulation = struct {
         self.input = try Input.init(&self.reader, @intCast(case.bytes.len), &self.bytes, self);
         self.reservoir = try gain.pcm_reservoir.Ring.init(&self.pcm);
     }
+
     pub fn cancelled(_: *Simulation) bool {
         return false;
     }
+
     pub fn wakeStorage(_: *Simulation) void {}
+
     pub fn wakeInput(self: *Simulation) void {
         self.storage_completions += 1;
     }
+
     pub fn prepareInputWait(self: *Simulation) void {
         // Complete some reads in the exact notification-clear/wait window.
         if (self.random.random().boolean()) _ = self.input.produce(&self.burst) catch unreachable;
     }
+
     pub fn waitInput(self: *Simulation) void {
         self.waits += 1;
         // A spurious wake must preserve the predicate. All other wakes run
         // one bounded storage burst, as the board's storage task will do.
         if (self.waits % 7 != 0) _ = self.input.produce(&self.burst) catch unreachable;
     }
+
     pub fn configure(self: *Simulation, information: gain.media_info.Information) !void {
         const plan = try gain.audio_output.Plan.init(information.sample_rate, information.output_format);
         if (self.plan) |previous| try std.testing.expectEqualDeep(previous, plan);
         self.plan = plan;
         self.dither = information.source_bits > 24;
     }
+
     pub fn push(self: *Simulation, input: []const Frame) !void {
         var offset: usize = 0;
         while (offset < input.len) {
@@ -109,6 +125,7 @@ const Simulation = struct {
             }
         }
     }
+
     fn consume(self: *Simulation, final: bool) !void {
         const plan = self.plan.?;
         const dma = self.dma[0..plan.bytes];

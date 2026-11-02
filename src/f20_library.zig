@@ -8,10 +8,27 @@ const storage = @import("f20_storage.zig");
 const memory = @import("f20_memory.zig");
 const x = @import("x1000.zig");
 const art = @import("artwork.zig");
+
 const A = std.mem.Allocator;
 pub const Volume = fat.Volume(storage.Controller);
-pub const Hooks = struct { context: *anyopaque, poll: *const fn (*anyopaque) bool, progress: *const fn (*anyopaque, []const u8, core.Stats, u32) void };
-pub const Metrics = struct { source_bytes: u64 = 0, metadata_ticks: u64 = 0, artwork_ticks: u64 = 0, enumeration_ticks: u64 = 0, metadata_max: u32 = 0, artwork_max: u32 = 0, art_prepared: u32 = 0, art_reused: u32 = 0 };
+
+pub const Hooks = struct {
+    context: *anyopaque,
+    poll: *const fn (*anyopaque) bool,
+    progress: *const fn (*anyopaque, []const u8, core.Stats, u32) void,
+};
+
+pub const Metrics = struct {
+    source_bytes: u64 = 0,
+    metadata_ticks: u64 = 0,
+    artwork_ticks: u64 = 0,
+    enumeration_ticks: u64 = 0,
+    metadata_max: u32 = 0,
+    artwork_max: u32 = 0,
+    art_prepared: u32 = 0,
+    art_reused: u32 = 0,
+};
+
 pub const Backend = struct {
     volume: *Volume,
     hooks: Hooks,
@@ -19,19 +36,24 @@ pub const Backend = struct {
     files: std.StringHashMap(fat.File),
     metrics: Metrics = .{},
     artpack: ?ArtPack = null,
+
     pub fn init(volume: *Volume, hooks: Hooks, allocator: A) Backend {
         return .{ .volume = volume, .hooks = hooks, .allocator = allocator, .files = std.StringHashMap(fat.File).init(allocator) };
     }
+
     pub fn deinit(self: *Backend) void {
         if (self.artpack) |*pack| pack.entries.deinit();
         self.files.deinit();
     }
+
     pub fn cancelled(self: *Backend) bool {
         return self.hooks.poll(self.hooks.context);
     }
+
     pub fn progress(self: *Backend, phase: []const u8, stats: core.Stats, covers: u32) void {
         self.hooks.progress(self.hooks.context, phase, stats, covers);
     }
+
     pub fn enumerate(self: *Backend, a: A) !core.Enumeration {
         const began = x.Timer.now();
         defer self.metrics.enumeration_ticks += x.Timer.elapsed(began);
@@ -45,6 +67,7 @@ pub const Backend = struct {
         }.less);
         return .{ .source = self.volume.serial, .entries = try a.dupe(core.Entry, entries.items) };
     }
+
     fn walk(self: *Backend, a: A, directory: fat.Directory, parent: []const u8, depth: usize, entries: *std.ArrayList(core.Entry)) anyerror!void {
         if (depth >= 16 or entries.items.len > 100_000) return error.LibraryLimit;
         var iterator = try self.volume.iterate(directory);
@@ -69,17 +92,24 @@ pub const Backend = struct {
             };
             if (std.ascii.eqlIgnoreCase(extension, ".m3u") or std.ascii.eqlIgnoreCase(extension, ".m3u8")) kind = .playlist;
             if (kind) |value| {
-                try entries.append(self.allocator, .{ .path = path, .kind = value, .stamp = .{ .size = entry.size, .modified = entry.modified, .device = self.volume.serial } });
+                try entries.append(self.allocator, .{
+                    .path = path,
+                    .kind = value,
+                    .stamp = .{ .size = entry.size, .modified = entry.modified, .device = self.volume.serial },
+                });
                 try self.files.put(path, try entry.file());
             }
         }
     }
+
     const Reader = struct {
         raw: Volume.Reader,
         backend: *Backend,
+
         pub fn seekTo(self: *Reader, at: u32) !void {
             try self.raw.seekTo(at);
         }
+
         pub fn read(self: *Reader, out: []u8) !usize {
             if (self.backend.cancelled()) return error.Cancelled;
             var buffered = try storage.BufferedReader(Volume.Reader).init(&self.raw, memory.storage_burst.uncachedSlice(u8));
@@ -88,6 +118,7 @@ pub const Backend = struct {
             return n;
         }
     };
+
     pub fn metadata(self: *Backend, a: A, entry: core.Entry) !core.Metadata {
         const began = x.Timer.now();
         defer {
@@ -100,6 +131,7 @@ pub const Backend = struct {
         var source = try @import("media_source.zig").Source(Reader).init(&reader, file.size, memory.decoder_cache.cachedSlice(u8));
         return media.extract(a, &source, std.fs.path.extension(entry.path));
     }
+
     pub fn playlist(self: *Backend, a: A, path: []const u8, tracks: []const core.Track) !core.Playlist {
         const file = self.files.get(path) orelse return error.NotFound;
         if (file.size > 1024 * 1024) return error.PlaylistLimit;
@@ -127,6 +159,7 @@ pub const Backend = struct {
         }
         return .{ .path = path, .name = std.fs.path.stem(path), .items = try items.toOwnedSlice(a) };
     }
+
     pub fn artwork(self: *Backend, a: A, album: core.Album, tracks: []const core.Track, entries: []const core.Entry, previous: ?core.Artwork, mode: core.Mode) !core.Artwork {
         const began = x.Timer.now();
         defer {
@@ -149,6 +182,7 @@ pub const Backend = struct {
                 break;
             }
         };
+
         const chosen = selected orelse return .{};
         if (self.artpack == null) self.artpack = try ArtPack.init(self.volume, self.allocator, self);
         if (previous) |old| if (mode == .quick and old.error_name.len == 0 and std.mem.eql(u8, old.recipe, recipe) and std.mem.eql(u8, old.source, chosen.path) and old.stamp.same(chosen.stamp) and old.key.len == 64) {
@@ -159,10 +193,12 @@ pub const Backend = struct {
                 return core.clone(a, old);
             }
         };
+
         const pack = &self.artpack.?;
         const file = self.files.get(chosen.path) orelse return error.NotFound;
         var reader = Reader{ .raw = try self.volume.reader(file), .backend = self };
         var source = try @import("media_source.zig").Source(Reader).init(&reader, file.size, memory.decoder_cache.cachedSlice(u8));
+
         const Range = struct { offset: u64, length: u32 };
         const range: Range = if (chosen.kind == .artwork) .{ .offset = 0, .length = file.size } else embedded: {
             const found = try media.embeddedPicture(&source) orelse return error.MissingArtwork;
@@ -190,16 +226,27 @@ pub const Backend = struct {
             self.metrics.art_prepared += 1;
             break :prepare slot;
         };
-        return .{ .recipe = recipe, .source = chosen.path, .stamp = chosen.stamp, .key = try core.text(a, &std.fmt.bytesToHex(&key, .lower)), .cache_path = try std.fmt.allocPrint(a, "atlas:{d}", .{slot}), .width = art.edge, .height = art.edge };
+        return .{
+            .recipe = recipe,
+            .source = chosen.path,
+            .stamp = chosen.stamp,
+            .key = try core.text(a, &std.fmt.bytesToHex(&key, .lower)),
+            .cache_path = try std.fmt.allocPrint(a, "atlas:{d}", .{slot}),
+            .width = art.edge,
+            .height = art.edge,
+        };
     }
 };
+
 const recipe = "gain-rgb565-stream-area112-v1";
 const art_slot_bytes = 512 + art.pixel_count * 2;
+
 const ArtPack = struct {
     volume: *Volume,
     file: fat.File,
     entries: std.AutoHashMap([32]u8, u32),
     next: u32 = 0,
+
     fn init(volume: *Volume, allocator: A, backend: *Backend) !ArtPack {
         const prefix: *[512]u8 = @ptrCast(memory.storage_burst.uncachedSlice(u8).ptr);
         const file = try @import("managed_file.zig").open(volume, ".gain/artwork.bin", .artwork, prefix);
@@ -220,6 +267,7 @@ const ArtPack = struct {
         }
         return result;
     }
+
     fn append(self: *ArtPack, key: [32]u8, tile: *const art.Tile) !u32 {
         const slot = self.next;
         const at = 4096 + slot * art_slot_bytes;

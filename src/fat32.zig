@@ -213,6 +213,7 @@ pub fn Volume(comptime Device: type) type {
                         .size = size,
                         .attributes = attributes,
                     };
+
                     const has_long_name = self.long_active and self.expected_ordinal == 0 and
                         self.long_checksum == shortNameChecksum(entry[0..11]);
                     if (has_long_name) {
@@ -341,18 +342,22 @@ pub fn Volume(comptime Device: type) type {
             }
             return result orelse error.NotFound;
         }
+
         /// Sector-aligned overwrite of an existing allocation. Never extends
         /// files, changes directory entries or allocates/frees FAT clusters.
         pub fn overwrite(self: *Self, file: File) !Overwrite {
             if (file.size == 0 or file.size % sector_bytes != 0) return error.InvalidWrite;
             return .{ .cursor = try self.reader(file) };
         }
+
         pub const Overwrite = struct {
             cursor: Reader,
+
             pub fn seekTo(self: *Overwrite, position: u32) !void {
                 if (position % sector_bytes != 0) return error.InvalidWrite;
                 try self.cursor.seekTo(position);
             }
+
             pub fn write(self: *Overwrite, input: []const u8) !void {
                 if (input.len == 0 or input.len % sector_bytes != 0 or input.len > self.cursor.remaining or @intFromPtr(input.ptr) & 3 != 0) return error.InvalidWrite;
                 var consumed: usize = 0;
@@ -370,6 +375,7 @@ pub fn Volume(comptime Device: type) type {
                     consumed += count;
                 }
             }
+
             pub fn sync(self: *Overwrite) !void {
                 try self.cursor.volume.device.sync();
             }

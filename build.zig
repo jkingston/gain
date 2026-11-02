@@ -67,12 +67,20 @@ pub fn build(b: *std.Build) void {
     player_check_step.dependOn(&b.addInstallFileWithDir(spl_image, .bin, "gain-spl.bin").step);
     const player_check_raw = player_check.addObjCopy(.{ .format = .binary, .basename = "gain-player-check.bin" });
     player_check_step.dependOn(&b.addInstallFileWithDir(player_check_raw.getOutput(), .bin, "gain-player-check.bin").step);
-    const player_reader = b.addExecutable(.{ .name = "read-player-check", .root_module = b.createModule(.{ .root_source_file = b.path("tools/read_player_check.zig"), .target = b.graph.host, .optimize = .ReleaseSafe }) });
+    const player_reader = b.addExecutable(.{
+        .name = "read-player-check",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/read_player_check.zig"),
+            .target = b.graph.host,
+            .optimize = .ReleaseSafe,
+        }),
+    });
     player_check_step.dependOn(&b.addInstallArtifact(player_reader, .{}).step);
     b.getInstallStep().dependOn(&player_check.step);
     const usb_check_api = b.createModule(.{ .root_source_file = b.path("src/f20.zig"), .target = target, .optimize = .ReleaseSafe });
     @import("build_codecs.zig").add(b, usb_check_api, target, .ReleaseSafe, true);
     const usb_check_c = @import("build_usb.zig").add(b, usb_check_api, target, .ReleaseSafe, true);
+
     const usb_check_module = b.createModule(.{ .root_source_file = b.path("tools/usb_check.zig"), .target = target, .optimize = .ReleaseSafe });
     usb_check_module.addImport("gain", usb_check_api);
     usb_check_module.addImport("c_usb", usb_check_c);
@@ -86,20 +94,43 @@ pub fn build(b: *std.Build) void {
     usb_check_step.dependOn(&b.addInstallArtifact(usb_check, .{}).step);
     usb_check_step.dependOn(&b.addInstallFileWithDir(usb_check_raw.getOutput(), .bin, "gain-usb-check.bin").step);
     usb_check_step.dependOn(&b.addInstallFileWithDir(spl_image, .bin, "gain-spl.bin").step);
-    const reference_api = b.createModule(.{ .root_source_file = b.path("src/f20.zig"), .target = b.graph.host, .optimize = .ReleaseFast, .link_libc = true });
+    const reference_api = b.createModule(.{
+        .root_source_file = b.path("src/f20.zig"),
+        .target = b.graph.host,
+        .optimize = .ReleaseFast,
+        .link_libc = true,
+    });
     @import("build_codecs.zig").add(b, reference_api, b.graph.host, .ReleaseFast, false);
-    const reference_module = b.createModule(.{ .root_source_file = b.path("tools/player_reference.zig"), .target = b.graph.host, .optimize = .ReleaseFast, .link_libc = true });
+    const reference_module = b.createModule(.{
+        .root_source_file = b.path("tools/player_reference.zig"),
+        .target = b.graph.host,
+        .optimize = .ReleaseFast,
+        .link_libc = true,
+    });
     reference_module.addImport("gain", reference_api);
-    reference_module.addImport("fixtures", b.createModule(.{ .root_source_file = b.path("tests/codec_fixtures.zig"), .target = b.graph.host, .optimize = .ReleaseFast }));
+    reference_module.addImport("fixtures", b.createModule(.{
+        .root_source_file = b.path("tests/codec_fixtures.zig"),
+        .target = b.graph.host,
+        .optimize = .ReleaseFast,
+    }));
     const reference = b.addExecutable(.{ .name = "player-reference", .root_module = reference_module, .use_llvm = true });
     player_check_step.dependOn(&b.addInstallArtifact(reference, .{}).step);
 
     // SDL is optional: firmware and ordinary host tests do not build it.
     const simulator_api = b.createModule(.{ .root_source_file = b.path("src/simulator.zig"), .target = b.graph.host, .optimize = .ReleaseSafe });
-    const simulator_module = b.createModule(.{ .root_source_file = b.path("tools/sim.zig"), .target = b.graph.host, .optimize = .ReleaseSafe, .link_libc = true });
+    const simulator_module = b.createModule(.{
+        .root_source_file = b.path("tools/sim.zig"),
+        .target = b.graph.host,
+        .optimize = .ReleaseSafe,
+        .link_libc = true,
+    });
     simulator_module.addImport("gain_simulator", simulator_api);
     const sdl_prefix = b.option([]const u8, "sdl-prefix", "SDL3 installation prefix") orelse if (b.graph.host.result.os.tag == .macos) "/opt/homebrew" else "/usr";
-    const sdl_headers = b.addTranslateC(.{ .root_source_file = .{ .cwd_relative = b.pathJoin(&.{ sdl_prefix, "include/SDL3/SDL.h" }) }, .target = b.graph.host, .optimize = .ReleaseSafe });
+    const sdl_headers = b.addTranslateC(.{
+        .root_source_file = .{ .cwd_relative = b.pathJoin(&.{ sdl_prefix, "include/SDL3/SDL.h" }) },
+        .target = b.graph.host,
+        .optimize = .ReleaseSafe,
+    });
     sdl_headers.addSystemIncludePath(.{ .cwd_relative = b.pathJoin(&.{ sdl_prefix, "include" }) });
     simulator_module.addImport("sdl", sdl_headers.createModule());
     simulator_module.addLibraryPath(.{ .cwd_relative = b.pathJoin(&.{ sdl_prefix, "lib" }) });
@@ -119,10 +150,16 @@ pub fn build(b: *std.Build) void {
     const sim_check = b.addSystemCommand(&.{ "python3", "tools/check_sim.py", "--sim" });
     sim_check.addArtifactArg(simulator);
     if (b.option(bool, "sim-visible", "Run simulator qualification in a visible native window") orelse false) sim_check.addArg("--visible");
+
     const SimFixture = enum { good, bad_version, reject, oversized, missing, changed };
     for (std.enums.values(SimFixture)) |variant| {
         const name = if (variant == .bad_version) "bad-version" else @tagName(variant);
-        const fixture_module = b.createModule(.{ .root_source_file = b.path("tests/sim_app.zig"), .target = b.graph.host, .optimize = .ReleaseSafe, .link_libc = true });
+        const fixture_module = b.createModule(.{
+            .root_source_file = b.path("tests/sim_app.zig"),
+            .target = b.graph.host,
+            .optimize = .ReleaseSafe,
+            .link_libc = true,
+        });
         fixture_module.addImport("gain_simulator", simulator_api);
         const fixture_options = b.addOptions();
         fixture_options.addOption(SimFixture, "variant", variant);
@@ -147,7 +184,10 @@ pub fn build(b: *std.Build) void {
     ui_benchmark_step.dependOn(&b.addInstallArtifact(ui_benchmark, .{}).step);
     ui_benchmark_step.dependOn(&b.addInstallFileWithDir(ui_benchmark_raw.getOutput(), .bin, "gain-ui-bench.bin").step);
     ui_benchmark_step.dependOn(&b.addInstallFileWithDir(spl_image, .bin, "gain-spl.bin").step);
-    const ui_reader = b.addExecutable(.{ .name = "read-ui-bench", .root_module = b.createModule(.{ .root_source_file = b.path("tools/read_ui_bench.zig"), .target = b.graph.host, .optimize = .ReleaseSafe }) });
+    const ui_reader = b.addExecutable(.{
+        .name = "read-ui-bench",
+        .root_module = b.createModule(.{ .root_source_file = b.path("tools/read_ui_bench.zig"), .target = b.graph.host, .optimize = .ReleaseSafe }),
+    });
     const ui_reader_run = b.addRunArtifact(ui_reader);
     if (b.option([]const u8, "ui-report", "UI benchmark report path")) |path| ui_reader_run.addArg(path);
     b.step("read-ui-bench", "Validate one F20 UI benchmark report").dependOn(&ui_reader_run.step);
@@ -359,12 +399,18 @@ pub fn build(b: *std.Build) void {
     const display_tests_step = b.step("test-ui", "Run UI and presentation regressions in Debug and ReleaseFast");
     for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |mode| {
         for ([_][]const u8{ "src/ui.zig", "src/presentation.zig", "src/display_phase.zig", "src/player_view.zig", "src/player_presenter.zig", "tools/ui_bench_report.zig" }) |source| {
-            const tests = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path(source), .target = b.graph.host, .optimize = mode }) });
+            const tests = b.addTest(.{
+                .root_module = b.createModule(.{ .root_source_file = b.path(source), .target = b.graph.host, .optimize = mode }),
+            });
             display_tests_step.dependOn(&b.addRunArtifact(tests).step);
         }
     }
     const ui_fuzz_module = b.createModule(.{ .root_source_file = b.path("tests/ui_fuzz.zig"), .target = b.graph.host, .optimize = .ReleaseSafe });
-    ui_fuzz_module.addImport("gain_ui", b.createModule(.{ .root_source_file = b.path("src/ui_api.zig"), .target = b.graph.host, .optimize = .ReleaseSafe }));
+    ui_fuzz_module.addImport("gain_ui", b.createModule(.{
+        .root_source_file = b.path("src/ui_api.zig"),
+        .target = b.graph.host,
+        .optimize = .ReleaseSafe,
+    }));
     const ui_fuzz_tests = b.addTest(.{ .root_module = ui_fuzz_module });
     const ui_fuzz_run = b.addRunArtifact(ui_fuzz_tests);
     display_tests_step.dependOn(&ui_fuzz_run.step);
@@ -372,19 +418,37 @@ pub fn build(b: *std.Build) void {
     const hardware_support_step = b.step("test-hardware", "Run codec and board protocol tests in Debug and ReleaseFast");
     for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |mode| {
         for ([_][]const u8{ "src/aiff.zig", "src/flac_pcm.zig", "src/pcm_sample.zig", "src/es9018k2m.zig", "src/axp192.zig", "src/pdma_frontier.zig", "src/dac_lock.zig", "src/output_route.zig", "src/audio.zig" }) |source| {
-            const tests = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path(source), .target = b.graph.host, .optimize = mode }) });
+            const tests = b.addTest(.{
+                .root_module = b.createModule(.{ .root_source_file = b.path(source), .target = b.graph.host, .optimize = mode }),
+            });
             hardware_support_step.dependOn(&b.addRunArtifact(tests).step);
         }
     }
-    const codec_fuzz_module = b.createModule(.{ .root_source_file = b.path("tests/codec_fuzz.zig"), .target = b.graph.host, .optimize = .ReleaseSafe });
-    codec_fuzz_module.addImport("codecs", b.createModule(.{ .root_source_file = b.path("src/codec_api.zig"), .target = b.graph.host, .optimize = .ReleaseSafe }));
+    const codec_fuzz_module = b.createModule(.{
+        .root_source_file = b.path("tests/codec_fuzz.zig"),
+        .target = b.graph.host,
+        .optimize = .ReleaseSafe,
+    });
+    codec_fuzz_module.addImport("codecs", b.createModule(.{
+        .root_source_file = b.path("src/codec_api.zig"),
+        .target = b.graph.host,
+        .optimize = .ReleaseSafe,
+    }));
     const codec_fuzz_tests = b.addTest(.{ .root_module = codec_fuzz_module });
     const codec_fuzz_run = b.addRunArtifact(codec_fuzz_tests);
     hardware_support_step.dependOn(&codec_fuzz_run.step);
     const codec_fuzz_step = b.step("fuzz-codecs", "Fuzz container parsing and PCM conversion");
     codec_fuzz_step.dependOn(&codec_fuzz_run.step);
-    const container_fuzz_module = b.createModule(.{ .root_source_file = b.path("tests/container_fuzz.zig"), .target = b.graph.host, .optimize = .ReleaseSafe });
-    container_fuzz_module.addImport("gain", b.createModule(.{ .root_source_file = b.path("src/f20.zig"), .target = b.graph.host, .optimize = .ReleaseSafe }));
+    const container_fuzz_module = b.createModule(.{
+        .root_source_file = b.path("tests/container_fuzz.zig"),
+        .target = b.graph.host,
+        .optimize = .ReleaseSafe,
+    });
+    container_fuzz_module.addImport("gain", b.createModule(.{
+        .root_source_file = b.path("src/f20.zig"),
+        .target = b.graph.host,
+        .optimize = .ReleaseSafe,
+    }));
     for ([_][]const u8{ "fuzz MP4", "fuzz Ogg" }) |filter| {
         const container_fuzz_run = b.addRunArtifact(b.addTest(.{ .root_module = container_fuzz_module, .filters = &.{filter} }));
         codec_fuzz_step.dependOn(&container_fuzz_run.step);
@@ -393,19 +457,36 @@ pub fn build(b: *std.Build) void {
     const pipeline_tests_step = b.step("test-pipeline", "Run shared executive, session and PCM pipeline regressions");
     for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |mode| {
         for ([_][]const u8{ "tools/player_check_report.zig", "tools/player_pcm_checksum.zig", "src/file_browser.zig", "src/player_screen.zig", "src/f20_player.zig", "src/buffer_regions.zig", "src/executive.zig", "src/task_context.zig", "src/task_stack.zig", "src/task_dispatch.zig", "src/byte_ring.zig", "src/input_stream.zig", "src/codec_pool.zig", "src/codec_runtime.zig", "src/media_source.zig", "src/f20_memory.zig", "src/pcm_reservoir.zig", "src/audio_output.zig" }) |source| {
-            const tests = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path(source), .target = b.graph.host, .optimize = mode }) });
+            const tests = b.addTest(.{
+                .root_module = b.createModule(.{ .root_source_file = b.path(source), .target = b.graph.host, .optimize = mode }),
+            });
             pipeline_tests_step.dependOn(&b.addRunArtifact(tests).step);
         }
     }
     const codec_tests_step = b.step("test-codecs", "Run production decoder and container integration tests");
     for ([_]std.builtin.OptimizeMode{ .ReleaseSafe, .ReleaseFast }) |mode| {
-        const codec_module = b.createModule(.{ .root_source_file = b.path("src/f20.zig"), .target = b.graph.host, .optimize = mode, .link_libc = true });
+        const codec_module = b.createModule(.{
+            .root_source_file = b.path("src/f20.zig"),
+            .target = b.graph.host,
+            .optimize = mode,
+            .link_libc = true,
+        });
         @import("build_codecs.zig").add(b, codec_module, b.graph.host, mode, false);
-        const codec_tests_module = b.createModule(.{ .root_source_file = b.path("tests/codec_stream_tests.zig"), .target = b.graph.host, .optimize = mode, .link_libc = true });
+        const codec_tests_module = b.createModule(.{
+            .root_source_file = b.path("tests/codec_stream_tests.zig"),
+            .target = b.graph.host,
+            .optimize = mode,
+            .link_libc = true,
+        });
         codec_tests_module.addImport("gain", codec_module);
         const codec_tests = b.addTest(.{ .root_module = codec_tests_module, .use_llvm = true });
         codec_tests_step.dependOn(&b.addRunArtifact(codec_tests).step);
-        const bridge_module = b.createModule(.{ .root_source_file = b.path("src/codec_backend.zig"), .target = b.graph.host, .optimize = mode, .link_libc = true });
+        const bridge_module = b.createModule(.{
+            .root_source_file = b.path("src/codec_backend.zig"),
+            .target = b.graph.host,
+            .optimize = mode,
+            .link_libc = true,
+        });
         @import("build_codecs.zig").add(b, bridge_module, b.graph.host, mode, false);
         codec_tests_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = bridge_module, .use_llvm = true })).step);
     }
@@ -413,7 +494,11 @@ pub fn build(b: *std.Build) void {
     // The check has no hardware startup and is not installed.
     const native_codecs = b.createModule(.{ .root_source_file = b.path("src/f20.zig"), .target = target, .optimize = .ReleaseFast });
     @import("build_codecs.zig").add(b, native_codecs, target, .ReleaseFast, true);
-    const codec_link_module = b.createModule(.{ .root_source_file = b.path("tests/codec_compile_check.zig"), .target = target, .optimize = .ReleaseFast });
+    const codec_link_module = b.createModule(.{
+        .root_source_file = b.path("tests/codec_compile_check.zig"),
+        .target = target,
+        .optimize = .ReleaseFast,
+    });
     codec_link_module.addImport("gain", native_codecs);
     const codec_link_check = b.addExecutable(.{ .name = "gain-codec-link-check", .root_module = codec_link_module });
     codec_link_check.entry = .disabled;
@@ -423,10 +508,17 @@ pub fn build(b: *std.Build) void {
     codec_tests_step.dependOn(&codec_link_check.step);
     const usb_tests_step = b.step("test-usb", "Test SD ownership, production MSC wire protocol and descriptors");
     for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |mode| {
-        const usb_module = b.createModule(.{ .root_source_file = b.path("src/usb_test.zig"), .target = b.graph.host, .optimize = mode, .link_libc = true });
+        const usb_module = b.createModule(.{
+            .root_source_file = b.path("src/usb_test.zig"),
+            .target = b.graph.host,
+            .optimize = mode,
+            .link_libc = true,
+        });
         _ = @import("build_usb.zig").add(b, usb_module, b.graph.host, mode, false);
         const usb_tests = b.addTest(.{ .root_module = usb_module });
         usb_tests_step.dependOn(&b.addRunArtifact(usb_tests).step);
+        const verify_module = b.createModule(.{ .root_source_file = b.path("tools/usb_verify.zig"), .target = b.graph.host, .optimize = mode });
+        usb_tests_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = verify_module })).step);
     }
     const library_step = b.step("test-library", "Test portable catalogue reconciliation and persistence");
     for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |mode| {
@@ -434,14 +526,27 @@ pub fn build(b: *std.Build) void {
             const module = b.createModule(.{ .root_source_file = b.path(path), .target = b.graph.host, .optimize = mode });
             library_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = module })).step);
         }
-        const art_tests = b.createModule(.{ .root_source_file = b.path("src/artwork.zig"), .target = b.graph.host, .optimize = mode, .link_libc = true });
+        const art_tests = b.createModule(.{
+            .root_source_file = b.path("src/artwork.zig"),
+            .target = b.graph.host,
+            .optimize = mode,
+            .link_libc = true,
+        });
         @import("build_art.zig").add(b, art_tests, b.graph.host, mode, false);
         library_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = art_tests })).step);
         const tags_tests = b.createModule(.{ .root_source_file = b.path("tests/mp4_tags_tests.zig"), .target = b.graph.host, .optimize = mode });
-        tags_tests.addImport("mp4_tags", b.createModule(.{ .root_source_file = b.path("src/mp4_tags.zig"), .target = b.graph.host, .optimize = mode }));
+        tags_tests.addImport("mp4_tags", b.createModule(.{
+            .root_source_file = b.path("src/mp4_tags.zig"),
+            .target = b.graph.host,
+            .optimize = mode,
+        }));
         library_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = tags_tests })).step);
         const library_module = b.createModule(.{ .root_source_file = b.path("src/library.zig"), .target = b.graph.host, .optimize = mode });
-        const library_test_module = b.createModule(.{ .root_source_file = b.path("tests/library_tests.zig"), .target = b.graph.host, .optimize = mode });
+        const library_test_module = b.createModule(.{
+            .root_source_file = b.path("tests/library_tests.zig"),
+            .target = b.graph.host,
+            .optimize = mode,
+        });
         library_test_module.addImport("library", library_module);
         library_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = library_test_module })).step);
     }

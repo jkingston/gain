@@ -1,5 +1,6 @@
 pub const memory = @import("f20_memory.zig");
 const x1000 = @import("x1000.zig");
+
 pub const usb_detect = x1000.Gpio.Pin{ .port = .d, .index = 3 };
 
 pub const clock = struct {
@@ -22,6 +23,7 @@ pub const display = struct {
     pub const dma_command_address = memory.lcd_descriptors.uncached() + 0x100;
     pub const dma_staging_address = memory.display_staging.uncached();
     pub const dma_staging_pixel_capacity = width * 42;
+
     /// This DMA path accepts only word-aligned, tightly packed RGB565 in
     /// uncached KSEG1 RAM. Cached aliases require an explicit cache protocol.
     pub fn validDmaSource(address: usize, w: u16, h: u16) bool {
@@ -123,6 +125,7 @@ pub const audio = struct {
     pub const output_select = x1000.Gpio.Pin{ .port = .b, .index = 5 };
 
     pub const dac_address: u7 = 0x48;
+
     pub const DacRegister = enum(u8) {
         input_configuration = 1,
         master_mode_control = 10,
@@ -137,6 +140,7 @@ pub const audio = struct {
     pub const dpll_bandwidth: u8 = 0xda;
 
     pub const source_clock_hz: u32 = 600_000_000;
+
     /// Keep low-rate clocks in the proven 11.2896/12.288 MHz families.
     /// BCLK is always 64fs; deriving it with a larger integer divider avoids
     /// the much larger error of synthesizing a new 256fs low-rate clock.
@@ -150,6 +154,7 @@ pub const audio = struct {
             else => 256,
         };
     }
+
     pub fn bitClockDivider(rate: SampleRate) u32 {
         return masterClockMultiplier(rate) / 64 - 1;
     }
@@ -244,6 +249,7 @@ pub const pmic = struct {
         .scl = .{ .port = .d, .index = 0 },
         .sda = .{ .port = .d, .index = 1 },
     };
+
     pub const alternate = I2cPins{
         .scl = .{ .port = .d, .index = 1 },
         .sda = .{ .port = .d, .index = 0 },
@@ -327,6 +333,7 @@ pub const ddr = struct {
 
 test "audio clock profiles stay within two ppm" {
     const testing = @import("std").testing;
+
     const expected = [_]struct { rate: audio.SampleRate, word: u32, error_ppb: u32 }{
         .{ .rate = .hz_44_100, .word = 0xe0052883, .error_ppb = 1_560 },
         .{ .rate = .hz_48_000, .word = 0xe0080c35, .error_ppb = 0 },
@@ -344,6 +351,7 @@ test "audio clock profiles stay within two ppm" {
 
 test "audio DMA descriptor matches the X1000 playback contract" {
     const testing = @import("std").testing;
+
     const descriptor = x1000.Pdma.Descriptor.audioPlayback(0x00080000, 960_000);
     try testing.expectEqual(@as(usize, 32), @sizeOf(x1000.Pdma.Descriptor));
     try testing.expectEqual(@as(u32, 0x00890702), descriptor.command);
@@ -354,6 +362,7 @@ test "audio DMA descriptor matches the X1000 playback contract" {
 
 test "audio DMA descriptor links within its four KiB page" {
     const testing = @import("std").testing;
+
     const descriptor = x1000.Pdma.Descriptor.audioPlayback(0x00080000, 9_600).linkedTo(119);
     try testing.expectEqual(@as(u32, 0x00890703), descriptor.command);
     try testing.expectEqual(@as(u32, 0xee002580), descriptor.count);

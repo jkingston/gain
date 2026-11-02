@@ -1,7 +1,26 @@
 //! Bounded M4A tag extraction, independent of playback sample-table validation.
 //! Repeated values are counted; display slots retain the first value for now.
 const std = @import("std");
-pub const keys = [_][]const u8{ "title", "artist", "album", "album_artist", "date", "genre", "track", "disc", "musicbrainz_albumid", "replaygain_track_gain", "replaygain_album_gain", "replaygain_track_peak", "replaygain_album_peak", "sort_artist", "sort_albumartist", "compilation" };
+
+pub const keys = [_][]const u8{
+    "title",
+    "artist",
+    "album",
+    "album_artist",
+    "date",
+    "genre",
+    "track",
+    "disc",
+    "musicbrainz_albumid",
+    "replaygain_track_gain",
+    "replaygain_album_gain",
+    "replaygain_track_peak",
+    "replaygain_album_peak",
+    "sort_artist",
+    "sort_albumartist",
+    "compilation",
+};
+
 pub const Summary = extern struct {
     lengths: [keys.len]u32 = @splat(0),
     repeats: [keys.len]u32 = @splat(0),
@@ -13,6 +32,7 @@ pub const Summary = extern struct {
     tag_digest: [32]u8 = @splat(0),
     art_digest: [32]u8 = @splat(0),
 };
+
 pub fn artwork(source: anytype) !?struct { offset: u64, length: u32 } {
     const moov = try find(source, 0, source.length, "moov") orelse return null;
     const udta = try find(source, moov.body, moov.end, "udta") orelse return null;
@@ -24,7 +44,9 @@ pub fn artwork(source: anytype) !?struct { offset: u64, length: u32 } {
     if (data.end - data.body < 8 or data.end - data.body - 8 > 16 * 1024 * 1024) return error.BadData;
     return .{ .offset = data.body + 8, .length = @intCast(data.end - data.body - 8) };
 }
+
 const Atom = struct { start: u64, body: u64, end: u64, kind: [4]u8 };
+
 fn atom(source: anytype, start: u64, end: u64) !Atom {
     if (start > end or end - start < 8) return error.TruncatedAtom;
     var bytes: [8]u8 = undefined;
@@ -39,9 +61,11 @@ fn atom(source: anytype, start: u64, end: u64) !Atom {
     if (size < header or size > end - start) return error.BadAtomSize;
     return .{ .start = start, .body = start + header, .end = start + size, .kind = bytes[4..8].* };
 }
+
 fn is(value: Atom, key: []const u8) bool {
     return std.mem.eql(u8, &value.kind, key);
 }
+
 fn find(source: anytype, start: u64, end: u64, key: []const u8) !?Atom {
     var offset = start;
     for (0..8192) |_| {
@@ -52,6 +76,7 @@ fn find(source: anytype, start: u64, end: u64, key: []const u8) !?Atom {
     }
     return error.AtomBudget;
 }
+
 fn payloadHash(source: anytype, state: *std.crypto.hash.Blake3, start: u64, end: u64) !void {
     var offset = start;
     var buffer: [4096]u8 = undefined;
@@ -62,6 +87,7 @@ fn payloadHash(source: anytype, state: *std.crypto.hash.Blake3, start: u64, end:
         offset += count;
     }
 }
+
 fn store(source: anytype, result: *Summary, index: usize, start: u64, end: u64) !void {
     result.repeats[index] += 1;
     if (result.repeats[index] != 1) return;
@@ -75,6 +101,7 @@ fn store(source: anytype, result: *Summary, index: usize, start: u64, end: u64) 
     if (!std.unicode.utf8ValidateSlice(result.values[index][0..count])) return error.BadUtf8;
     result.lengths[index] = @intCast(count);
 }
+
 pub fn scan(source: anytype, hash_art: bool) !Summary {
     var result = Summary{};
     var tags = std.crypto.hash.Blake3.init(.{});
@@ -94,7 +121,24 @@ pub fn scan(source: anytype, hash_art: bool) !Summary {
         const item = try atom(source, offset, ilst.end);
         result.item_count += 1;
         var slot: ?usize = null;
-        const native_keys = [_][]const u8{ "\xa9nam", "\xa9ART", "\xa9alb", "aART", "\xa9day", "\xa9gen", "trkn", "disk", "", "", "", "", "", "soar", "soaa", "cpil" };
+        const native_keys = [_][]const u8{
+            "\xa9nam",
+            "\xa9ART",
+            "\xa9alb",
+            "aART",
+            "\xa9day",
+            "\xa9gen",
+            "trkn",
+            "disk",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "soar",
+            "soaa",
+            "cpil",
+        };
         for (native_keys, 0..) |key, index| if (key.len == 4 and is(item, key)) {
             slot = index;
             break;
@@ -111,7 +155,13 @@ pub fn scan(source: anytype, hash_art: bool) !Summary {
                     var key: [128]u8 = undefined;
                     const length: usize = @intCast(name.end - name.body - 4);
                     try source.read(name.body + 4, key[0..length]);
-                    const custom = [_][]const u8{ "MusicBrainz Album Id", "replaygain_track_gain", "replaygain_album_gain", "replaygain_track_peak", "replaygain_album_peak" };
+                    const custom = [_][]const u8{
+                        "MusicBrainz Album Id",
+                        "replaygain_track_gain",
+                        "replaygain_album_gain",
+                        "replaygain_track_peak",
+                        "replaygain_album_peak",
+                    };
                     for (custom, 8..) |candidate, index| if (std.ascii.eqlIgnoreCase(key[0..length], candidate)) {
                         slot = index;
                         break;

@@ -1,8 +1,11 @@
 //! Portable ownership contract. EOF alone never releases a transfer surface.
 const std = @import("std");
 pub const Region = @import("display_transfer.zig").Region;
+
 pub const Phase = enum { idle, prepared, transferring, fetched, draining, failed };
+
 pub const Action = enum { none, disable, release };
+
 pub const Observation = struct { eof: bool = false, bus_busy: bool = false, disable_done: bool = false, fault: bool = false };
 pub const Error = error{ Owned, NotPrepared, InvalidRegion, InvalidSource, TimedOut, DeviceFault };
 
@@ -16,16 +19,19 @@ pub const State = struct {
         self.phase = .prepared;
         self.generation +%= 1;
     }
+
     pub fn commit(self: *State, now: u32) Error!void {
         if (self.phase != .prepared) return error.NotPrepared;
         self.started = now;
         self.phase = .transferring;
     }
+
     /// Only an uncommitted transfer may be cancelled without a hardware ACK.
     pub fn cancel(self: *State) Error!void {
         if (self.phase != .prepared) return error.NotPrepared;
         self.phase = .idle;
     }
+
     pub fn observe(self: *State, now: u32, timeout: u32, event: Observation) Error!Action {
         if (self.phase == .idle or self.phase == .prepared) return .none;
         if (self.phase == .failed) return error.DeviceFault;
@@ -51,9 +57,11 @@ pub const State = struct {
         }
         return .none;
     }
+
     pub fn owned(self: State) bool {
         return self.phase != .idle;
     }
+
     /// Caller must have reset/quiesced the device before reclaiming its source.
     pub fn afterDeviceReset(self: *State) void {
         self.phase = .idle;
@@ -117,6 +125,7 @@ test "all EOF FIFO drain and ACK schedules preserve ownership" {
         try std.testing.expect(released and !state.owned());
     };
 }
+
 test "prepared stale flags fault timeout and cancellation never expose a live source" {
     var state = State{};
     try state.prepare();
@@ -135,6 +144,7 @@ test "prepared stale flags fault timeout and cancellation never expose a live so
     try std.testing.expectError(error.DeviceFault, state.observe(1, 100, .{ .fault = true }));
     try std.testing.expect(state.owned());
 }
+
 test "alignment expansion and immutable packed snapshots include edge damage" {
     var canvas: [320 * 4]u16 = undefined;
     for (&canvas, 0..) |*p, i| p.* = @intCast(i);
@@ -193,6 +203,7 @@ fn base(column: usize, row: usize) u16 {
     if (column == 0 or column == 319 or row == 0 or row == 239) return 0xffff;
     return if (column % 32 == 0 or row % 24 == 0) 0x001f else 0;
 }
+
 fn patch(column: usize, row: usize, left: usize, width: usize) u16 {
     if (row == 108) return 0xf800;
     if (row == 131) return 0x001f;
@@ -200,6 +211,7 @@ fn patch(column: usize, row: usize, left: usize, width: usize) u16 {
     if (column == left + width - 1) return 0xffe0;
     return 0x07e0;
 }
+
 fn put(panel: *[320 * 240]u16, left: usize, width: usize, offset: usize) void {
     const column = left + offset % width;
     const row = 108 + offset / width;
@@ -210,9 +222,13 @@ test "deterministic delayed FIFO reads keep the frozen generation through repeat
     const ui = @import("ui.zig");
     const view = @import("player_view.zig");
     const Scheduler = @import("display_transfer.zig").Scheduler;
+
     var canvas: [ui.pixel_count]u16 = undefined;
     var initial = ui.Ui.init(.{ .pixels = &canvas });
-    try view.player(&initial, .{ .name = "Track", .artist = "Artist" }, .{ .sample_rate = 192000, .total_frames = 192000 * 60, .played_frames = 0, .bits = 24 }, 4100, 64, ui.dark_theme);
+    try view.player(&initial, .{
+        .name = "Track",
+        .artist = "Artist",
+    }, .{ .sample_rate = 192000, .total_frames = 192000 * 60, .played_frames = 0, .bits = 24 }, 4100, 64, ui.dark_theme);
     initial.finish();
     var fifo_source: [320 * 42]u16 = undefined;
     var expected: [320 * 42]u16 = undefined;
@@ -236,7 +252,12 @@ test "deterministic delayed FIFO reads keep the frozen generation through repeat
         }
         if (step < 10000 and step % 83 == 0) {
             var scene = ui.Ui.init(.{ .pixels = &canvas });
-            try view.progress(&scene, .{ .sample_rate = 192000, .total_frames = 192000 * 60, .played_frames = step * 1920, .bits = 24 }, ui.dark_theme);
+            try view.progress(&scene, .{
+                .sample_rate = 192000,
+                .total_frames = 192000 * 60,
+                .played_frames = step * 1920,
+                .bits = 24,
+            }, ui.dark_theme);
             scene.finish();
             pending.request(view.progress_region, .normal);
         }
@@ -261,7 +282,11 @@ test "deterministic delayed FIFO reads keep the frozen generation through repeat
                 consumed = end;
             }
             try std.testing.expectEqualSlices(u16, expected[0..r.pixels()], fifo_source[0..r.pixels()]);
-            const action = try state.observe(now, 10000, .{ .eof = fetched == r.pixels(), .bus_busy = consumed < r.pixels(), .disable_done = if (disabled) |at| now -% at >= 5 else false });
+            const action = try state.observe(now, 10000, .{
+                .eof = fetched == r.pixels(),
+                .bus_busy = consumed < r.pixels(),
+                .disable_done = if (disabled) |at| now -% at >= 5 else false,
+            });
             switch (action) {
                 .none => {},
                 .disable => {

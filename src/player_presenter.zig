@@ -3,6 +3,7 @@
 const ui = @import("ui.zig");
 const view = @import("player_view.zig");
 const transfer = @import("display_transfer.zig");
+
 pub const State = struct {
     begun: bool = false,
     commit_pending: bool = false,
@@ -52,6 +53,7 @@ pub const State = struct {
             if (!Backend.start(region.x, region.y, region.width, region.height)) return error.DisplayFailure;
         }
     }
+
     fn second(status: view.Status) u64 {
         return status.played_frames / @max(status.sample_rate, 1);
     }
@@ -59,6 +61,7 @@ pub const State = struct {
 
 const Fake = struct {
     const presentation = @import("presentation.zig");
+
     var canvas: [ui.pixel_count]u16 = undefined;
     pub const framebuffer = &canvas;
     var source: [ui.pixel_count]u16 = undefined;
@@ -74,6 +77,7 @@ const Fake = struct {
     var start_count: usize = 0;
     var injected_fault = false;
     var integrity_failure = false;
+
     fn reset() void {
         ownership = .{};
         now = 0xffff0000;
@@ -85,6 +89,7 @@ const Fake = struct {
         @memset(&canvas, 0);
         @memset(&panel, 0);
     }
+
     pub fn prepare(request: transfer.Region) !void {
         if (ownership.owned()) return error.Owned;
         region = try presentation.alignedRegion(request, 320, 240);
@@ -98,14 +103,17 @@ const Fake = struct {
             start_count += 1;
         }
     }
+
     pub fn commit() !void {
         try ownership.commit(now);
     }
+
     pub fn start(x: usize, y: usize, width: usize, height: usize) bool {
         prepare(.{ .x = @intCast(x), .y = @intCast(y), .width = @intCast(width), .height = @intCast(height) }) catch return false;
         commit() catch return false;
         return true;
     }
+
     pub fn poll() enum { idle, busy, failed } {
         now +%= 1;
         if (!ownership.owned()) return .idle;
@@ -115,7 +123,12 @@ const Fake = struct {
         for (pixels_sent..end) |index| panel[(@as(usize, region.y) + index / region.width) * 320 + region.x + index % region.width] = source[index];
         pixels_sent = end;
         // EOF precedes the final bus writes. QD is observed only on a later poll.
-        const action = ownership.observe(now, 10000, .{ .eof = pixels_sent >= region.pixels() / 2, .bus_busy = pixels_sent < region.pixels(), .disable_done = disabled, .fault = injected_fault }) catch return .failed;
+        const action = ownership.observe(now, 10000, .{
+            .eof = pixels_sent >= region.pixels() / 2,
+            .bus_busy = pixels_sent < region.pixels(),
+            .disable_done = disabled,
+            .fault = injected_fault,
+        }) catch return .failed;
         switch (action) {
             .none => {},
             .disable => disabled = true,

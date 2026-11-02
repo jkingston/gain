@@ -4,8 +4,10 @@
 const std = @import("std");
 const types = @import("c_alac_types");
 const bits_abi = @import("c_alac_bits");
+
 const Error = error{ DecoderInit, DecodeFailed };
 const maximum_frames = 4096;
+
 const Core = extern struct {
     config: types.ALACSpecificConfig,
     active_elements: u16,
@@ -14,10 +16,14 @@ const Core = extern struct {
     predictor: ?[*]i32,
     shifted: ?[*]u16,
 };
+
 const construct = @extern(*const fn (*Core) callconv(.c) void, .{ .name = "_ZN11ALACDecoderC1Ev" });
 const destroy = @extern(*const fn (*Core) callconv(.c) void, .{ .name = "_ZN11ALACDecoderD1Ev" });
 const initialize = @extern(*const fn (*Core, *anyopaque, u32) callconv(.c) i32, .{ .name = "_ZN11ALACDecoder4InitEPvj" });
-const decodeElement = @extern(*const fn (*Core, *bits_abi.BitBuffer, [*]u8, u32, u32, *u32) callconv(.c) i32, .{ .name = "_ZN11ALACDecoder6DecodeEP9BitBufferPhjjPj" });
+const decodeElement = @extern(*const fn (*Core, *bits_abi.BitBuffer, [*]u8, u32, u32, *u32) callconv(.c) i32, .{
+    .name = "_ZN11ALACDecoder6DecodeEP9BitBufferPhjjPj",
+});
+
 comptime {
     // ALACDecoder has no bases or virtual functions. These layouts are also
     // checked against Clang's record layout for the pinned upstream header.
@@ -68,6 +74,7 @@ pub const Decoder = struct {
                         .bitIndex = @intCast(start % 8),
                         .byteSize = @intCast(input.len),
                     };
+
                     var decoded: u32 = 0;
                     if (decodeElement(&self.core, &bits, &self.bytes, self.core.config.frameLength, element_channels, &decoded) != 0 or decoded != count) return error.DecodeFailed;
                     const address = @intFromPtr(bits.cur);
@@ -106,10 +113,12 @@ pub const Decoder = struct {
 const Cursor = struct {
     bytes: []const u8,
     position: usize = 0,
+
     fn skip(self: *Cursor, count: usize) Error!void {
         if (self.position > self.bytes.len * 8 or count > self.bytes.len * 8 - self.position) return error.DecodeFailed;
         self.position += count;
     }
+
     fn read(self: *Cursor, count: u6) Error!u32 {
         if (count > 32) return error.DecodeFailed;
         const start = self.position;
@@ -151,6 +160,7 @@ fn validateElement(cursor: *Cursor, config: types.ALACSpecificConfig, channels: 
 // Dispatch those cases here before entering upstream C; all ordinary nonzero
 // denominators keep the library's optimized 4/8-coefficient paths.
 extern fn gain_upstream_unpc_block([*]i32, [*]i32, i32, ?[*]i16, i32, u32, u32) callconv(.c) void;
+
 export fn unpc_block(input: [*]i32, output: [*]i32, count: i32, coefficients: ?[*]i16, order: i32, bits: u32, denominator: u32) void {
     if (count <= 0) return;
     const length: usize = @intCast(count);
@@ -194,6 +204,7 @@ export fn unpc_block(input: [*]i32, output: [*]i32, count: i32, coefficients: ?[
 const PacketBuilder = struct {
     bytes: [256]u8 = @splat(0),
     position: usize = 0,
+
     fn write(self: *PacketBuilder, value: u32, width: u6) void {
         for (0..width) |bit| {
             const shift: u5 = @intCast(width - bit - 1);
@@ -201,6 +212,7 @@ const PacketBuilder = struct {
             self.position += 1;
         }
     }
+
     fn element(self: *PacketBuilder, tag: u3, frames: u32, samples: []const i16) void {
         self.write(tag, 3);
         self.write(0, 4);
@@ -211,6 +223,7 @@ const PacketBuilder = struct {
         self.write(frames, 32);
         for (samples) |sample| self.write(@as(u16, @bitCast(sample)), 16);
     }
+
     fn packet(self: *PacketBuilder) []const u8 {
         return self.bytes[0 .. (self.position + 7) / 8];
     }

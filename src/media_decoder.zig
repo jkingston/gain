@@ -9,6 +9,7 @@ const aiff = @import("aiff.zig");
 const pcm = @import("pcm.zig");
 const Frame = @import("pcm_reservoir.zig").StereoFrame;
 pub const Information = @import("media_info.zig").Information;
+
 pub const Workspace = struct {
     packet: packet_media.Workspace,
     cache: []u8,
@@ -16,6 +17,7 @@ pub const Workspace = struct {
     left: []i32,
     right: []i32,
 };
+
 pub fn run(reader: anytype, length: u64, comptime Sink: type, sink: *Sink, workspace: Workspace, seek: u64) !Information {
     if (!workspace.packet.valid() or !@import("buffer_regions.zig").disjoint(&.{
         workspace.packet.packet,                       workspace.packet.page,                std.mem.sliceAsBytes(workspace.packet.pcm),
@@ -40,6 +42,7 @@ pub fn run(reader: anytype, length: u64, comptime Sink: type, sink: *Sink, works
     source = try source_module.Source(@TypeOf(reader.*)).init(reader, length, workspace.cache);
     return packet_media.run(&source, Sink, sink, workspace.packet, seek);
 }
+
 fn exact(reader: anytype, output: []u8) !void {
     var done: usize = 0;
     while (done < output.len) {
@@ -49,6 +52,7 @@ fn exact(reader: anytype, output: []u8) !void {
         done += count;
     }
 }
+
 fn runPcm(reader: anytype, comptime Sink: type, sink: *Sink, workspace: Workspace, plan: pcm.Plan, data_offset: u32, kind: @import("media_info.zig").Kind, seek: u64) !Information {
     const start = @min(seek, plan.frames);
     const offset = @as(u64, data_offset) + start * plan.sourceBytesPerFrame();
@@ -67,13 +71,17 @@ fn runPcm(reader: anytype, comptime Sink: type, sink: *Sink, workspace: Workspac
         const frames = workspace.packet.frames[0..count];
         for (frames, 0..) |*frame, index| {
             const left = plan.sample_format.decode(bytes[index * frame_bytes ..]);
-            frame.* = .{ .left = left, .right = if (plan.channels == 1) left else plan.sample_format.decode(bytes[index * frame_bytes + plan.sample_format.bytes ..]) };
+            frame.* = .{
+                .left = left,
+                .right = if (plan.channels == 1) left else plan.sample_format.decode(bytes[index * frame_bytes + plan.sample_format.bytes ..]),
+            };
         }
         try sink.push(frames);
         remaining -= count;
     }
     return info;
 }
+
 fn runFlac(reader: anytype, comptime Sink: type, sink: *Sink, workspace: Workspace, seek: u64) !Information {
     var decoder = try flac.Decoder(@TypeOf(reader.*)).init(reader, workspace.compressed, workspace.left, workspace.right);
     if (decoder.info.bits_per_sample < 4 or decoder.info.bits_per_sample > 24) return error.UnsupportedPrecision;

@@ -2,16 +2,20 @@
 //! Input is either a caller-uploaded RAM fixture or a read-only real SD file.
 const std = @import("std");
 const gain = @import("gain");
+
 const x = gain.soc;
 const protocol = @import("player_check_report.zig");
+
 const report: *volatile protocol.Report = @ptrFromInt(protocol.address);
 const error_text: [*]u8 = @ptrFromInt(protocol.address + 0x100);
 const fixture_address = 0x81800000;
 const parameters: *volatile [8]u32 = @ptrFromInt(protocol.address);
+
 extern fn rom_return() callconv(.c) noreturn;
 var deadline: u64 = 0;
 var clock: @import("gain").executive.Clock = .{ .previous = 0 };
 var inject_read_failure = false;
+
 export fn gain_x1000_dispatch(frame: *gain.runtime.Context, entry: u32, cause: u32) callconv(.c) *gain.runtime.Context {
     if (clock.sample(entry) > deadline) {
         report.elapsed_ticks = @truncate(clock.ticks);
@@ -19,9 +23,11 @@ export fn gain_x1000_dispatch(frame: *gain.runtime.Context, entry: u32, cause: u
     }
     return gain.runtime.dispatch(frame, entry, cause);
 }
+
 export fn player_check_fault(cause: u32, epc: u32) callconv(.c) noreturn {
     exception_panic(cause, epc, 0);
 }
+
 export fn exception_panic(cause: u32, epc: u32, _: u32) callconv(.c) noreturn {
     asm volatile ("di;ehb");
     x.write32(0xb2000038, 1);
@@ -34,6 +40,7 @@ export fn exception_panic(cause: u32, epc: u32, _: u32) callconv(.c) noreturn {
     report.complete = 1;
     rom_return();
 }
+
 fn failed(failure: anyerror) void {
     const name = @errorName(failure);
     @memcpy(error_text[0..name.len], name);
@@ -41,13 +48,16 @@ fn failed(failure: anyerror) void {
     report.error_code = @intFromError(failure);
     report.complete = 1;
 }
+
 const RamReader = struct {
     bytes: []const u8,
     position: usize = 0,
+
     pub fn seekTo(self: *RamReader, offset: u32) !void {
         if (offset > self.bytes.len) return error.SeekBounds;
         self.position = offset;
     }
+
     pub fn read(self: *RamReader, output: []u8) !usize {
         const count = @min(output.len, self.bytes.len - self.position);
         @memcpy(output[0..count], self.bytes[self.position..][0..count]);
@@ -55,11 +65,13 @@ const RamReader = struct {
         return count;
     }
 };
+
 const Ui = struct {
     screen: gain.player_screen.State = .init(80),
     polls: u32 = 0,
     mode: u32,
     duration: u32,
+
     fn poll(context: *anyopaque, status: gain.media.PlaybackStatus) gain.media.PlaybackCommand {
         const self: *Ui = @ptrCast(@alignCast(context));
         self.polls += 1;
@@ -81,17 +93,22 @@ const Ui = struct {
         return self.screen.poll(gain.display, buttons, .{ .name = "PLAYER QUALIFICATION" }, 0, gain.ui.dark_theme, status);
     }
 };
+
 const Volume = gain.storage.fat32.Volume(gain.storage.Controller);
+
 const CardReader = struct {
     reader: Volume.Reader,
+
     pub fn seekTo(self: *CardReader, offset: u32) !void {
         try self.reader.seekTo(offset);
     }
+
     pub fn read(self: *CardReader, output: []u8) !usize {
         if (inject_read_failure) return error.CardRemoved;
         return self.reader.read(output);
     }
 };
+
 fn firstTrack(volume: *Volume, browser: *gain.file_browser.Browser(Volume), depth: usize) anyerror!?gain.storage.fat32.DirectoryEntry {
     if (depth == 7) return null;
     var scene = gain.ui.Ui.init(.{ .pixels = gain.display.framebuffer });
@@ -113,10 +130,14 @@ fn firstTrack(volume: *Volume, browser: *gain.file_browser.Browser(Volume), dept
     }
     return null;
 }
+
 fn play(reader: anytype, length: u32, card: ?*gain.storage.Controller, mode: u32, duration: u32) !void {
     var ui = Ui{ .mode = mode, .duration = duration };
     defer _ = gain.display.resetForDirect();
-    const result = try gain.player.playFile(reader, length, card, .{ .attenuation = 80, .measure_stacks = true }, .{ .context = &ui, .poll = Ui.poll });
+    const result = try gain.player.playFile(reader, length, card, .{
+        .attenuation = 80,
+        .measure_stacks = true,
+    }, .{ .context = &ui, .poll = Ui.poll });
     if (ui.screen.failed) return error.DisplayFailure;
     if (mode == 0 and result.playback.exit == .completed) {
         const capture = gain.memory.pcm_reservoir.cachedSlice(gain.pcm_reservoir.StereoFrame);
@@ -141,10 +162,12 @@ fn play(reader: anytype, length: u32, card: ?*gain.storage.Controller, mode: u32
     report.minimum_fifo = if (report.iterations == 0) result.playback.minimum_fifo_level else @min(report.minimum_fifo, result.playback.minimum_fifo_level);
     report.iterations += 1;
 }
+
 export fn player_check_main() callconv(.c) void {
     run() catch |failure| failed(failure);
     report.complete = 1;
 }
+
 fn run() !void {
     const length = parameters[0];
     const mode = parameters[1];
@@ -176,7 +199,10 @@ fn run() !void {
             if (report.sample_rate != rate or report.frames_low != frames or report.frames_high != 0) return error.PresentationLength;
         };
     } else if (mode == 6 or mode == 7) {
-        var card = try gain.storage.Controller.initialize(.{ .descriptor = @ptrFromInt(gain.memory.sd_control.uncached()), .switch_status = @ptrFromInt(gain.memory.sd_control.uncached() + 0x100) });
+        var card = try gain.storage.Controller.initialize(.{
+            .descriptor = @ptrFromInt(gain.memory.sd_control.uncached()),
+            .switch_status = @ptrFromInt(gain.memory.sd_control.uncached() + 0x100),
+        });
         var volume = try Volume.mount(&card, @ptrFromInt(gain.memory.filesystem_sector.uncached()));
         var browser = try gain.file_browser.Browser(Volume).init(&volume);
         const entry = try firstTrack(&volume, &browser, 0) orelse return error.NoAudioFiles;

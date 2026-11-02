@@ -4,7 +4,9 @@ const dac_lock = @import("dac_lock.zig");
 const es9018 = @import("es9018k2m.zig");
 const frontier = @import("pdma_frontier.zig");
 const output_route = @import("output_route.zig");
+
 pub const Output = output_route.Output;
+
 pub const Processing = struct { filter: es9018.Filter = .fast, iir_bypass: bool = false, deemphasis: es9018.Deemphasis = .off };
 
 pub const maximum_descriptors = 128;
@@ -200,6 +202,7 @@ pub fn Engine(comptime Board: type) type {
             try self.pollControl();
             return event;
         }
+
         /// No I2C operations: safe in the highest-priority output task while
         /// the control task owns DAC/routing transactions.
         pub fn pollDma(self: *Self) Error!Event {
@@ -251,12 +254,14 @@ pub fn Engine(comptime Board: type) type {
             var backend = RouteBackend{ .engine = self };
             try self.route.poll(&backend, x1000.Timer.milliseconds(10));
         }
+
         /// Stop supplying new frames while allowing queued I2S samples to drain.
         pub fn haltDma(_: *Self) void {
             x1000.Cpm.ungate(.pdma);
             channel.status.write(0);
             x1000.Aic.common_control.clear(x1000.Aic.transmit_dma | x1000.Aic.transmit_underrun_interrupt);
         }
+
         pub fn finish(self: *Self) Error!void {
             self.haltDma();
             defer self.stop();
@@ -345,10 +350,12 @@ pub fn Engine(comptime Board: type) type {
             const dac = if (self.dac) |*value| value else return error.DacCommunication;
             dac.setVolume(attenuation, attenuation) catch |failure| return dacError(failure);
         }
+
         pub fn dacStatus(self: *Self) Error!es9018.Status {
             const dac = if (self.dac) |*value| value else return error.DacCommunication;
             return dac.status() catch |failure| return dacError(failure);
         }
+
         /// Configure while idle, after initialize and before start. Filter
         /// settling must never block the real-time playback service loop.
         pub fn setProcessing(self: *Self, processing: Processing) Error!void {
@@ -365,33 +372,42 @@ pub fn Engine(comptime Board: type) type {
             dac.setMute(was_muted) catch |failure| return dacError(failure);
             if (self.running and !self.lock.pending and self.route.current != .muted and !was_muted) Board.output_mute.set(false);
         }
+
         /// Request routing immediately mutes the analogue path. Hardware
         /// settling is serviced incrementally by poll(), alongside DMA events.
         pub fn setOutput(self: *Self, output: Output) void {
             if (self.route.current != output or self.route.stage != .idle) Board.output_mute.set(true);
             self.route.request(output);
         }
+
         const RouteBackend = struct {
             engine: *Self,
+
             pub fn now(_: *@This()) u32 {
                 return x1000.Timer.now();
             }
+
             pub fn hardMute(_: *@This(), value: bool) void {
                 Board.output_mute.set(value);
             }
+
             pub fn softMute(backend: *@This(), value: bool) Error!void {
                 const dac = if (backend.engine.dac) |*device| device else return error.DacCommunication;
                 dac.setMute(value) catch |failure| return dacError(failure);
             }
+
             pub fn amplifierShutdown(_: *@This(), value: bool) void {
                 Board.amplifier_shutdown.set(value);
             }
+
             pub fn amplifierPower(_: *@This(), value: bool) void {
                 Board.amplifier_power.set(value);
             }
+
             pub fn selectLine(_: *@This(), value: bool) void {
                 Board.output_select.set(value);
             }
+
             pub fn playing(backend: *@This()) bool {
                 return backend.engine.running and !backend.engine.lock.pending;
             }
@@ -442,6 +458,7 @@ const fifo_prefill_timeout_ms = 10;
 
 test "cyclic descriptors select a buffer and encode the next descriptor" {
     const testing = @import("std").testing;
+
     const descriptor = cyclicDescriptor(0xa020_0000, 9_600, 119);
     try testing.expectEqual(@as(u32, 0x0020_0000), descriptor.source);
     try testing.expectEqual(@as(u32, 0x0089_0703), descriptor.command);
@@ -471,6 +488,7 @@ test "sample formats encode the verified stereo DMA layouts" {
 
 test "audio chunks contain complete sample frames" {
     const testing = @import("std").testing;
+
     const base = Config{ .descriptor_count = 4, .buffer_count = 2, .chunk_bytes = 100 };
     try testing.expect(base.valid());
     try testing.expect(!(Config{

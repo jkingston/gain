@@ -1,5 +1,6 @@
 //! Ogg framing and bounded packet assembly, independent of the underlying storage.
 const std = @import("std");
+
 const crc_table = blk: {
     @setEvalBranchQuota(10000);
     var table: [256]u32 = undefined;
@@ -10,12 +11,15 @@ const crc_table = blk: {
     }
     break :blk table;
 };
+
 fn crc(r0: u32, bytes: []const u8) u32 {
     var r = r0;
     for (bytes) |b| r = (r << 8) ^ crc_table[@as(u8, @truncate(r >> 24)) ^ b];
     return r;
 }
+
 pub const Packet = struct { bytes: []const u8, serial: u32, bos: bool, eos: bool, granule: ?u64, number: u64, page_offset: u64 };
+
 pub fn Reader(comptime Source: type) type {
     return struct {
         const Self = @This();
@@ -36,6 +40,7 @@ pub fn Reader(comptime Source: type) type {
         ended: bool = false,
         number: u64 = 0,
         pages: u32 = 0,
+
         fn load(self: *Self, continuation: bool) !bool {
             if (self.offset == self.source.length) {
                 if (!self.ended) return error.MissingEos;
@@ -88,6 +93,7 @@ pub fn Reader(comptime Source: type) type {
             if (flags & 4 != 0 and (last == null or last.? != segments - 1)) return error.BadEos;
             return true;
         }
+
         pub fn next(self: *Self, output: []u8) !?Packet {
             var count: usize = 0;
             var continuation = false;

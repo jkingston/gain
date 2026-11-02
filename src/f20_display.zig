@@ -4,7 +4,9 @@ const board = @import("f20_v27.zig").display;
 const lcd_dma = @import("lcd_dma.zig");
 const phase = @import("display_phase.zig");
 const presentation = @import("presentation.zig");
+
 pub const Region = presentation.Region;
+
 pub const Poll = enum { idle, busy, failed };
 const descriptors: *align(32) volatile lcd_dma.Chain = @ptrFromInt(board.dma_descriptor_address);
 const write_command: *align(64) volatile [4]u8 = @ptrFromInt(board.dma_command_address);
@@ -26,13 +28,16 @@ pub fn waitReady() !void {
         if (x.Timer.elapsed(began) >= x.Timer.milliseconds(20)) return error.DisplayBusy;
     }
 }
+
 fn send(value: u32) !void {
     try waitReady();
     x.Lcd.mcu_data.write(value);
 }
+
 fn command(value: board.Command) !void {
     try send(x.Lcd.command_flag | @as(u32, @backingInt(value)));
 }
+
 fn data(value: u8) !void {
     try send(value);
 }
@@ -208,6 +213,7 @@ pub fn poll() Poll {
     }
     return .busy;
 }
+
 fn restoreDirect() void {
     x.Lcd.control.write(x.Lcd.burst_64_words);
     x.Lcd.mcu_control.write(board.mcu_control);
@@ -219,12 +225,18 @@ fn restoreDirect() void {
 
 pub fn start(left: usize, top: usize, width: usize, height: usize) bool {
     if (left > board.width or top > board.height or width > board.width or height > board.height) return false;
-    const region = presentation.alignedRegion(.{ .x = @intCast(left), .y = @intCast(top), .width = @intCast(width), .height = @intCast(height) }, board.width, board.height) catch return false;
+    const region = presentation.alignedRegion(.{
+        .x = @intCast(left),
+        .y = @intCast(top),
+        .width = @intCast(width),
+        .height = @intCast(height),
+    }, board.width, board.height) catch return false;
     const deadline = targetFor(region) catch return false;
     prepare(region) catch return false;
     launch_deadline = deadline;
     return true;
 }
+
 pub fn wait() bool {
     while (true) {
         switch (poll()) {
@@ -234,6 +246,7 @@ pub fn wait() bool {
         }
     }
 }
+
 pub fn transfer(left: usize, top: usize, width: usize, height: usize) bool {
     if (!resetForDirect()) return false;
     if (left > board.width or top > board.height or width > board.width or height > board.height) return false;
@@ -254,7 +267,12 @@ pub fn resetForDirect() bool {
 pub fn presentRegionCpu(left: usize, top: usize, width: usize, height: usize) bool {
     if (!resetForDirect()) return false;
     if (left > board.width or top > board.height or width > board.width or height > board.height) return false;
-    const region = presentation.alignedRegion(.{ .x = @intCast(left), .y = @intCast(top), .width = @intCast(width), .height = @intCast(height) }, board.width, board.height) catch return false;
+    const region = presentation.alignedRegion(.{
+        .x = @intCast(left),
+        .y = @intCast(top),
+        .width = @intCast(width),
+        .height = @intCast(height),
+    }, board.width, board.height) catch return false;
     const right = region.x + region.width - 1;
     const bottom = region.y + region.height - 1;
     command(.column_address) catch return false;
@@ -274,6 +292,7 @@ pub fn presentRegionCpu(left: usize, top: usize, width: usize, height: usize) bo
 
 const wr = x.Gpio.Pin{ .port = .b, .index = 17 };
 const dc = x.Gpio.Pin{ .port = .b, .index = 20 };
+
 fn readRegister(value: u8, output: []u16) !void {
     if (state.owned()) return error.DisplayOwned;
     try send(x.Lcd.command_flag | @as(u32, value));
@@ -295,21 +314,28 @@ fn readRegister(value: u8, output: []u16) !void {
         x.Timer.delayMicroseconds(1);
     }
 }
+
 fn sampleScan() !phase.Sample {
     for (0..3) |_| {
         var bytes: [3]u16 = undefined;
         const began = x.Timer.now();
         try readRegister(0x45, &bytes);
         const ended = x.Timer.now();
-        if (ended -% began <= phase.maximum_read_ticks) return .{ .began = began, .ended = ended, .line = ((@as(u32, bytes[1]) & 0xff) << 8) | (bytes[2] & 0xff) };
+        if (ended -% began <= phase.maximum_read_ticks) return .{
+            .began = began,
+            .ended = ended,
+            .line = ((@as(u32, bytes[1]) & 0xff) << 8) | (bytes[2] & 0xff),
+        };
     }
     return error.PanelReadPreempted;
 }
+
 fn targetFor(region: Region) !u32 {
     const target = try phase.regionTarget(region, panel_config.period, phase.target_line);
     const scan = try sampleScan();
     return panel_config.nextTargetLine(scan, x.Timer.now(), x.Timer.microseconds(500), target);
 }
+
 fn calibrate() !phase.Config {
     var previous: ?u32 = null;
     var first: u32 = 0;

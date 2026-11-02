@@ -2,6 +2,7 @@
 //! are acknowledged only after the producer has stopped using the old window.
 const std = @import("std");
 const ByteRing = @import("byte_ring.zig").Ring;
+
 pub fn Stream(comptime Reader: type, comptime Services: type) type {
     return struct {
         const Self = @This();
@@ -20,6 +21,7 @@ pub fn Stream(comptime Reader: type, comptime Services: type) type {
         pub fn init(reader: *Reader, size: u32, storage: []u8, services: *Services) !Self {
             return .{ .reader = reader, .services = services, .ring = try ByteRing.init(storage), .size = size, .producer_end = size == 0 };
         }
+
         pub fn read(self: *Self, output: []u8) !usize {
             if (output.len == 0 or self.position == self.size) return 0;
             while (true) {
@@ -40,6 +42,7 @@ pub fn Stream(comptime Reader: type, comptime Services: type) type {
                 self.services.waitInput();
             }
         }
+
         pub fn seekTo(self: *Self, target: u32) !void {
             if (target > self.size) return error.SeekBounds;
             if (target == self.position) return;
@@ -55,6 +58,7 @@ pub fn Stream(comptime Reader: type, comptime Services: type) type {
             }
             self.position = target;
         }
+
         fn requestSeek(self: *Self, target: u32) u32 {
             self.target = target;
             const token = self.requested.load(.monotonic) +% 1;
@@ -62,10 +66,12 @@ pub fn Stream(comptime Reader: type, comptime Services: type) type {
             self.services.wakeStorage();
             return token;
         }
+
         pub fn producerReady(self: *Self, burst_bytes: usize) bool {
             return self.requested.load(.acquire) != self.acknowledged.load(.monotonic) or
                 (!self.producer_end and self.failure == null and self.ring.free() >= @min(burst_bytes, self.size - self.producer_position));
         }
+
         /// Runs in storage context. A single bounded read lets the executive
         /// schedule output/UI work between bursts and sleep at high water.
         pub fn produce(self: *Self, buffer: []u8) !bool {
@@ -113,6 +119,7 @@ pub fn Stream(comptime Reader: type, comptime Services: type) type {
 
 const Test = struct {
     const Input = Stream(Reader, @This());
+
     const Reader = struct {
         owner: *Test,
         position: usize = 0,
@@ -122,6 +129,7 @@ const Test = struct {
         seek_on_read: ?u32 = null,
         zero_read: bool = false,
         oversize_read: bool = false,
+
         fn read(self: *Reader, output: []u8) !usize {
             self.reads += 1;
             if (self.seek_on_read) |target| {
@@ -136,6 +144,7 @@ const Test = struct {
             self.position += count;
             return count;
         }
+
         fn seekTo(self: *Reader, target: u32) !void {
             if (self.fail_seek) return error.CardRemoved;
             self.position = target;
@@ -151,18 +160,23 @@ const Test = struct {
     waits: usize = 0,
     complete_on_prepare: bool = false,
     cancel_on_prepare: bool = false,
+
     fn init(self: *Test) !void {
         for (&self.bytes, 0..) |*byte, i| byte.* = @truncate(i * 31 + i / 17);
         self.reader = .{ .owner = self };
         self.input = try Input.init(&self.reader, self.bytes.len, &self.storage, self);
     }
+
     fn cancelled(self: *Test) bool {
         return self.cancelled_flag;
     }
+
     fn wakeStorage(_: *Test) void {}
+
     fn wakeInput(self: *Test) void {
         self.notifications += 1;
     }
+
     fn prepareInputWait(self: *Test) void {
         if (self.cancel_on_prepare) self.cancelled_flag = true;
         if (self.complete_on_prepare) {
@@ -170,11 +184,13 @@ const Test = struct {
             _ = self.input.produce(&self.burst) catch unreachable;
         }
     }
+
     fn waitInput(self: *Test) void {
         self.waits += 1;
         _ = self.input.produce(&self.burst) catch unreachable;
     }
 };
+
 test "buffered input preserves fragmented reads seeks and producer backpressure" {
     var harness = Test{};
     try harness.init();
@@ -193,6 +209,7 @@ test "buffered input preserves fragmented reads seeks and producer backpressure"
     try std.testing.expect(!try harness.input.produce(&harness.burst));
     try std.testing.expectEqual(reads, harness.reader.reads);
 }
+
 test "completion between empty observation and wait is consumed without sleeping" {
     var harness = Test{ .complete_on_prepare = true };
     try harness.init();
@@ -201,6 +218,7 @@ test "completion between empty observation and wait is consumed without sleeping
     try std.testing.expectEqual(@as(usize, 0), harness.waits);
     try std.testing.expectEqualSlices(u8, harness.bytes[0..4], &output);
 }
+
 test "cancellation and storage failure wake the consumer with explicit errors" {
     var harness = Test{};
     try harness.init();
@@ -212,6 +230,7 @@ test "cancellation and storage failure wake the consumer with explicit errors" {
     try std.testing.expectError(error.CardRemoved, harness.input.read(&output));
     try std.testing.expect(harness.notifications > 0);
 }
+
 test "EOF and invalid seeks are bounded and do not publish old bytes" {
     var harness = Test{};
     try harness.init();
@@ -237,6 +256,7 @@ test "empty input and invalid storage bursts never access the reader" {
     try std.testing.expectError(error.InvalidBurst, harness.input.produce(&oversized));
     try std.testing.expectEqual(@as(usize, 0), harness.reader.reads);
 }
+
 test "seek failure and invalid read results notify blocked consumers" {
     var harness = Test{};
     try harness.init();
@@ -253,6 +273,7 @@ test "seek failure and invalid read results notify blocked consumers" {
         try std.testing.expectEqual(@as(usize, 0), harness.input.ring.available());
     }
 }
+
 test "seek during in-flight read discards the old completion including errors" {
     for ([_]bool{ false, true }) |failure| {
         var harness = Test{};
@@ -271,6 +292,7 @@ test "seek during in-flight read discards the old completion including errors" {
         try std.testing.expectEqualSlices(u8, harness.bytes[777..][0..count], output[0..count]);
     }
 }
+
 test "cancellation in the prepare-wait window never blocks read or seek" {
     var harness = Test{ .cancel_on_prepare = true };
     try harness.init();

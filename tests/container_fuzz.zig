@@ -1,12 +1,15 @@
 const std = @import("std");
 const gain = @import("gain");
+
 const Reader = struct {
     bytes: []const u8,
     position: usize = 0,
+
     pub fn seekTo(self: *Reader, target: u32) !void {
         if (target > self.bytes.len) return error.Truncated;
         self.position = target;
     }
+
     pub fn read(self: *Reader, output: []u8) !usize {
         const count = @min(output.len, 31, self.bytes.len - self.position);
         @memcpy(output[0..count], self.bytes[self.position..][0..count]);
@@ -14,10 +17,13 @@ const Reader = struct {
         return count;
     }
 };
+
 const Source = gain.media_source.Source(Reader);
+
 fn seed(comptime bytes: []const u8) []const u8 {
     return "\xff\xff\xff\xff" ++ bytes;
 }
+
 test "fuzz MP4 atom sizes timing edits and sample cursors" {
     try std.testing.fuzz({}, runMp4, .{ .corpus = &.{
         seed("ftyp"),
@@ -27,6 +33,7 @@ test "fuzz MP4 atom sizes timing edits and sample cursors" {
         seed(@embedFile("fixtures/codecs/aac-multichunk.m4a")),
     } });
 }
+
 fn runMp4(_: void, smith: *std.testing.Smith) !void {
     var storage: [65536]u8 = undefined;
     const input = storage[0..smith.slice(&storage)];
@@ -46,6 +53,7 @@ fn runMp4(_: void, smith: *std.testing.Smith) !void {
         }
     }
 }
+
 test "fuzz Ogg page framing and packet output bounds" {
     try std.testing.fuzz({}, runOgg, .{ .corpus = &.{
         seed("OggS"),
@@ -54,6 +62,7 @@ test "fuzz Ogg page framing and packet output bounds" {
         seed(@embedFile("fixtures/codecs/opus-chain.ogg")),
     } });
 }
+
 fn runOgg(_: void, smith: *std.testing.Smith) !void {
     var storage: [65536]u8 = undefined;
     const input = storage[0..smith.slice(&storage)];

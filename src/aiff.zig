@@ -2,8 +2,10 @@
 //! Input is left at the first sample. SSND before COMM requires seekTo(u32).
 const std = @import("std");
 const pcm = @import("pcm.zig");
+
 pub const Info = struct { plan: pcm.Plan, data_offset: u32, data_bytes: u32 };
 pub const Error = error{ NotAiff, Truncated, InvalidChunk, InvalidFormat, MissingFormat, MissingData, MissingVersion, UnsupportedCompression, UnsupportedRate, SeekRequired };
+
 pub fn parse(reader: anytype) !Info {
     var header: [12]u8 = undefined;
     try exact(reader, &header);
@@ -82,10 +84,12 @@ pub fn parse(reader: anytype) !Info {
     if (comptime @hasDecl(@TypeOf(reader.*), "seekTo")) try reader.seekTo(data.offset) else return error.SeekRequired;
     return info;
 }
+
 fn validate(plan: pcm.Plan, offset: u32, bytes: u32) !Info {
     if (@as(u64, plan.frames) * plan.sourceBytesPerFrame() > bytes) return error.Truncated;
     return .{ .plan = plan, .data_offset = offset, .data_bytes = bytes };
 }
+
 fn sampleRate(bytes: []const u8) Error!u32 {
     const sign_exponent = be(u16, bytes[0..2]);
     const exponent: i32 = @as(i32, sign_exponent) - 16383;
@@ -99,11 +103,13 @@ fn sampleRate(bytes: []const u8) Error!u32 {
     if (hz == 0 or hz > 384000) return error.UnsupportedRate;
     return @intCast(hz);
 }
+
 fn be(comptime T: type, bytes: []const u8) T {
     var value: T = 0;
     for (bytes) |byte| value = (value << 8) | byte;
     return value;
 }
+
 fn exact(reader: anytype, bytes: []u8) !void {
     var offset: usize = 0;
     while (offset < bytes.len) {
@@ -112,6 +118,7 @@ fn exact(reader: anytype, bytes: []u8) !void {
         offset += count;
     }
 }
+
 fn discard(reader: anytype, count: u32) !void {
     var scratch: [512]u8 = undefined;
     var remaining = count;
@@ -121,21 +128,26 @@ fn discard(reader: anytype, count: u32) !void {
         remaining -= @intCast(size);
     }
 }
+
 const Reader = struct {
     bytes: []const u8,
     position: usize = 0,
+
     pub fn read(self: *@This(), bytes: []u8) !usize {
         const count = @min(@as(usize, 3), @min(bytes.len, self.bytes.len - self.position));
         @memcpy(bytes[0..count], self.bytes[self.position..][0..count]);
         self.position += count;
         return count;
     }
+
     pub fn seekTo(self: *@This(), target: u32) !void {
         if (target > self.bytes.len) return error.Truncated;
         self.position = target;
     }
 };
+
 const fixture = "FORM" ++ "\x00\x00\x00\x32" ++ "AIFF" ++ "COMM" ++ "\x00\x00\x00\x12" ++ "\x00\x01\x00\x00\x00\x02\x00\x10" ++ "\x40\x0e\xac\x44\x00\x00\x00\x00\x00\x00" ++ "SSND" ++ "\x00\x00\x00\x0c" ++ "\x00\x00\x00\x00\x00\x00\x00\x00" ++ "\x7f\xff\x80\x00";
+
 test "AIFF choppy reads convert mono big endian to exact stereo DMA samples" {
     var reader = Reader{ .bytes = fixture };
     const info = try parse(&reader);
@@ -146,6 +158,7 @@ test "AIFF choppy reads convert mono big endian to exact stereo DMA samples" {
     try std.testing.expect(fill.end and fill.frames == 2);
     try std.testing.expectEqualSlices(u8, &.{ 0xff, 0x7f, 0xff, 0x7f, 0, 0x80, 0, 0x80, 0, 0, 0, 0 }, &output);
 }
+
 test "AIFF accepts SSND before COMM and seeks back to its first sample" {
     var file: [fixture.len]u8 = undefined;
     @memcpy(file[0..12], fixture[0..12]);
@@ -156,6 +169,7 @@ test "AIFF accepts SSND before COMM and seeks back to its first sample" {
     try std.testing.expectEqual(@as(u32, 32 - 4), info.data_offset);
     try std.testing.expectEqual(@as(usize, info.data_offset), reader.position);
 }
+
 test "every AIFF truncation is rejected and malformed rates never round" {
     for (0..fixture.len) |length| {
         var reader = Reader{ .bytes = fixture[0..length] };

@@ -1,6 +1,7 @@
 const std = @import("std");
 const gain = @import("gain");
 const fixtures = @import("codec_fixtures.zig");
+
 const Frame = gain.pcm_reservoir.StereoFrame;
 const Source = gain.media_source.Source(Reader);
 var arena: [512 * 1024]u8 align(16) = undefined;
@@ -14,16 +15,19 @@ var cache: [65536]u8 = undefined;
 var compressed: [256 * 1024]u8 = undefined;
 var left: [65535]i32 = undefined;
 var right: [65535]i32 = undefined;
+
 const Reader = struct {
     bytes: []const u8,
     position: usize = 0,
     fragment: usize = std.math.maxInt(usize),
     reads: usize = 0,
     fail_on_read: ?usize = null,
+
     pub fn seekTo(self: *Reader, target: u32) !void {
         if (target > self.bytes.len) return error.SeekBounds;
         self.position = target;
     }
+
     pub fn read(self: *Reader, target: []u8) !usize {
         self.reads += 1;
         if (self.fail_on_read == self.reads) return error.CardRemoved;
@@ -33,6 +37,7 @@ const Reader = struct {
         return n;
     }
 };
+
 const Sink = struct {
     count: usize = 0,
     information: ?gain.media_info.Information = null,
@@ -42,12 +47,14 @@ const Sink = struct {
     fail_reader_on_configure: ?*Reader = null,
     observe_pool: ?*gain.codec_pool.Pool = null,
     live_at_configuration: u32 = 0,
+
     pub fn configure(self: *Sink, information: gain.media_info.Information) !void {
         if (self.reject_configuration) return error.Cancelled;
         self.information = information;
         if (self.observe_pool) |pool| self.live_at_configuration = pool.statistics.live;
         if (self.fail_reader_on_configure) |reader| reader.fail_on_read = reader.reads + 1;
     }
+
     pub fn push(self: *Sink, frames: []const Frame) !void {
         self.pushes += 1;
         if (self.cancel_on_push == self.pushes) return error.Cancelled;
@@ -56,6 +63,7 @@ const Sink = struct {
         self.count += frames.len;
     }
 };
+
 fn workspace(pool: *gain.codec_pool.Pool) gain.media_decoder.Workspace {
     return .{
         .packet = .{ .packet = &packet, .page = &page, .pcm = &floats, .frames = &converted, .pool = pool },
@@ -65,6 +73,7 @@ fn workspace(pool: *gain.codec_pool.Pool) gain.media_decoder.Workspace {
         .right = &right,
     };
 }
+
 fn decode(case: fixtures.Case, fragment: usize, seek: u64) !Sink {
     var reader = Reader{ .bytes = case.bytes, .fragment = fragment };
     var pool = try gain.codec_pool.Pool.init(&arena);
@@ -87,6 +96,7 @@ fn decode(case: fixtures.Case, fragment: usize, seek: u64) !Sink {
     try std.testing.expectEqual(case.frames - @min(case.frames, seek), sink.count);
     return sink;
 }
+
 test "all supported file families decode through the shared canonical PCM producer" {
     for (fixtures.cases) |case| {
         const sink = try decode(case, std.math.maxInt(usize), 0);
@@ -101,6 +111,7 @@ test "all supported file families decode through the shared canonical PCM produc
         if (case.kind == .aac or case.kind == .alac or case.kind == .vorbis or case.kind == .opus) try std.testing.expectEqualStrings("Gain spike", sink.information.?.title.slice());
     }
 }
+
 test "fragmented storage and reset seek retain presentation length and sample order" {
     for (fixtures.cases) |case| {
         const initial = try decode(case, 512, 0);
@@ -116,8 +127,12 @@ test "fragmented storage and reset seek retain presentation length and sample or
         }
     }
 }
+
 test "MP4 wide offsets v1 timing chapters and separated chunks retain independent packet oracle" {
-    for ([_]struct { bytes: []const u8, multi: bool }{ .{ .bytes = fixtures.extended, .multi = false }, .{ .bytes = fixtures.multichunk, .multi = true } }) |case| {
+    for ([_]struct { bytes: []const u8, multi: bool }{ .{
+        .bytes = fixtures.extended,
+        .multi = false,
+    }, .{ .bytes = fixtures.multichunk, .multi = true } }) |case| {
         var reader = Reader{ .bytes = case.bytes, .fragment = 3 };
         var source = try Source.init(&reader, case.bytes.len, &cache);
         const track = try gain.mp4.parse(&source);
@@ -173,6 +188,7 @@ test "lossy decoders retain independent reference accuracy and noise substitutio
         }
     }
 }
+
 test "cancel and output rejection unwind every live decoder allocation" {
     for (fixtures.cases) |case| {
         for ([_]usize{ 0, 1, 2 }) |stage| {
@@ -187,6 +203,7 @@ test "cancel and output rejection unwind every live decoder allocation" {
         _ = try decode(case, 127, 0);
     }
 }
+
 test "storage errors during headers and packets propagate and release C state" {
     for (fixtures.cases) |case| {
         for ([_]usize{ 1, 10, 100 }) |read| {
@@ -198,6 +215,7 @@ test "storage errors during headers and packets propagate and release C state" {
         }
     }
 }
+
 test "truncated media fails without retaining decoder state" {
     for (fixtures.cases) |case| {
         for ([_]usize{ 0, 3, 16, case.bytes.len / 2 }) |length| {
@@ -211,6 +229,7 @@ test "truncated media fails without retaining decoder state" {
         }
     }
 }
+
 test "overlapping ID3 header and trailer are rejected before offset subtraction" {
     var bytes: [200]u8 = @splat(0);
     @memcpy(bytes[0..10], &[_]u8{ 'I', 'D', '3', 4, 0, 0, 0, 0, 1, 32 }); // 160-byte body.
@@ -247,6 +266,7 @@ test "scratch capacity and aliases are rejected before any codec or storage work
         try std.testing.expectEqual(@as(u32, 0), pool.statistics.allocations);
     }
 }
+
 test "an exhausted decoder pool fails admission without leaked allocations" {
     for (fixtures.cases) |case| {
         if (case.kind != .aac and case.kind != .alac and case.kind != .vorbis and case.kind != .opus) continue;

@@ -4,6 +4,7 @@ const presentation = @import("gain_ui").presentation;
 test "fuzz expanded regions packed pixels and destination canaries" {
     try std.testing.fuzz({}, fuzzRegion, .{ .corpus = &.{ &.{ 0, 0, 1, 1 }, &.{ 17, 11, 1, 1 }, &.{ 1, 1, 17, 11 }, &.{ 255, 255, 255, 255 } } });
 }
+
 fn fuzzRegion(_: void, smith: *std.testing.Smith) !void {
     var bytes: [4]u8 = @splat(0);
     _ = smith.slice(&bytes);

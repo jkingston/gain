@@ -1,5 +1,6 @@
 //! Bounded SPSC input storage. Storage publishes bytes; the codec consumes them.
 const std = @import("std");
+
 pub const Ring = struct {
     storage: []u8,
     read_index: usize = 0,
@@ -11,13 +12,16 @@ pub const Ring = struct {
         if (storage.len == 0 or storage.len > std.math.maxInt(u31)) return error.InvalidCapacity;
         return .{ .storage = storage };
     }
+
     pub fn capacity(self: *const Ring) usize {
         return self.storage.len;
     }
+
     pub fn available(self: *const Ring) usize {
         const consumed = self.read_sequence.load(.acquire);
         return self.write_sequence.load(.acquire) -% consumed;
     }
+
     pub fn free(self: *const Ring) usize {
         return self.storage.len - self.available();
     }
@@ -29,6 +33,7 @@ pub const Ring = struct {
         self.read_sequence.store(0, .release);
         self.write_sequence.store(0, .release);
     }
+
     pub fn write(self: *Ring, source: []const u8) usize {
         const sequence = self.write_sequence.load(.monotonic);
         const used: usize = sequence -% self.read_sequence.load(.acquire);
@@ -41,6 +46,7 @@ pub const Ring = struct {
         self.write_sequence.store(sequence +% @as(u32, @intCast(count)), .release);
         return count;
     }
+
     pub fn read(self: *Ring, output: []u8) usize {
         const sequence = self.read_sequence.load(.monotonic);
         const count = @min(output.len, self.write_sequence.load(.acquire) -% sequence);

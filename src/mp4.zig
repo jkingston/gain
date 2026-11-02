@@ -1,6 +1,8 @@
 //! Bounded MP4 audio sample tables, edits and metadata. Source storage is supplied by the caller.
 const std = @import("std");
+
 const Atom = struct { start: u64, body: u64, end: u64, kind: [4]u8 };
+
 fn atom(s: anytype, at: u64, end: u64) !Atom {
     if (at > end or end - at < 8) return error.TruncatedAtom;
     var b: [8]u8 = undefined;
@@ -16,9 +18,11 @@ fn atom(s: anytype, at: u64, end: u64) !Atom {
     if (size < header or size > end - at) return error.BadAtomSize;
     return .{ .start = at, .body = at + header, .end = at + size, .kind = b[4..8].* };
 }
+
 fn is(a: Atom, key: []const u8) bool {
     return std.mem.eql(u8, &a.kind, key);
 }
+
 fn find(s: anytype, start: u64, end: u64, key: []const u8) !?Atom {
     var at = start;
     var budget: usize = 0;
@@ -30,14 +34,19 @@ fn find(s: anytype, start: u64, end: u64, key: []const u8) !?Atom {
     }
     return null;
 }
+
 fn minimum(a: Atom, bytes: u64) !void {
     if (a.end - a.body < bytes) return error.TruncatedAtom;
 }
+
 fn child(s: anytype, a: Atom, key: []const u8) !Atom {
     return try find(s, a.body, a.end, key) orelse error.MissingAtom;
 }
+
 pub const Packet = struct { offset: u64, size: u32, dts: u64, duration: u32 };
+
 pub const Chapter = struct { ticks_100ns: u64 = 0, name: [128]u8 = @splat(0), len: usize = 0 };
+
 pub const Track = struct {
     kind: enum { aac, alac } = .aac,
     rate: u32 = 0,
@@ -60,10 +69,12 @@ pub const Track = struct {
     media_duration: u64 = 0,
     lead: u64 = 0,
     frames: u64 = 0,
+
     pub fn size(self: *const Track, s: anytype, index: u32) !u32 {
         if (index >= self.count) return error.SampleBounds;
         return if (self.fixed_size != 0) self.fixed_size else s.int(u32, self.stsz + @as(u64, index) * 4, .big);
     }
+
     pub fn packet(self: *const Track, s: anytype, index: u32) !Packet {
         if (index >= self.count) return error.SampleBounds;
         var sample_base: u64 = 0;
@@ -102,6 +113,7 @@ pub const Track = struct {
         }
         return error.MissingTiming;
     }
+
     pub fn seekSample(self: *const Track, s: anytype, frame: u64) !u32 {
         const target = std.math.add(u64, @min(frame, self.frames), self.lead) catch return error.BadTiming;
         var base: u64 = 0;
@@ -118,12 +130,14 @@ pub const Track = struct {
         return self.count - 1;
     }
 };
+
 fn table(s: anytype, a: Atom, width: u64) !struct { at: u64, count: u32 } {
     if (a.end - a.body < 8) return error.TruncatedTable;
     const count = try s.int(u32, a.body + 4, .big);
     if (count == 0 or count > 1000000 or @as(u64, count) * width > a.end - a.body - 8) return error.BadTable;
     return .{ .at = a.body + 8, .count = count };
 }
+
 fn descriptor(bytes: []const u8, at: *usize) !struct { tag: u8, data: []const u8 } {
     if (at.* >= bytes.len) return error.BadDescriptor;
     const tag = bytes[at.*];
@@ -145,6 +159,7 @@ fn descriptor(bytes: []const u8, at: *usize) !struct { tag: u8, data: []const u8
     at.* += length;
     return .{ .tag = tag, .data = data };
 }
+
 fn esds(t: *Track, bytes: []const u8) !void {
     var at: usize = 0;
     const es = try descriptor(bytes, &at);
@@ -166,6 +181,7 @@ fn esds(t: *Track, bytes: []const u8) !void {
     @memcpy(t.config[0..cfg.data.len], cfg.data);
     t.config_len = cfg.data.len;
 }
+
 fn parseTrack(s: anytype, tr: Atom, movie_rate: u32) !?Track {
     const mdia = try child(s, tr, "mdia");
     const handler = try child(s, mdia, "hdlr");
@@ -272,6 +288,7 @@ fn parseTrack(s: anytype, tr: Atom, movie_rate: u32) !?Track {
     if (samples != t.count or duration < t.media_duration) return error.BadTiming;
     return t;
 }
+
 pub fn parse(s: anytype) !Track {
     const moov = try find(s, 0, s.length, "moov") orelse return error.MissingMovie;
     const mvhd = try child(s, moov, "mvhd");
@@ -322,6 +339,7 @@ pub const Cursor = struct {
     chunk_run: u32 = 0,
     time_left: u32 = 0,
     time_run: u32 = 0,
+
     pub fn init(t: *const Track, s: anytype, index: u32) !Cursor {
         var c = Cursor{ .track = t, .index = index, .current = try t.packet(s, index) };
         var base: u64 = 0;
@@ -350,6 +368,7 @@ pub const Cursor = struct {
         }
         return c;
     }
+
     pub fn next(c: *Cursor, s: anytype) !?Packet {
         const t = c.track;
         if (c.index >= t.count) return null;
@@ -378,6 +397,7 @@ pub const Cursor = struct {
 };
 
 pub const Chapters = struct { entries: [32]Chapter = @splat(.{}), count: usize = 0 };
+
 pub fn readChapters(s: anytype) !Chapters {
     var result = Chapters{};
     const moov = try find(s, 0, s.length, "moov") orelse return error.MissingMovie;

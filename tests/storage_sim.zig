@@ -355,9 +355,11 @@ const WritableCard = struct {
     fail_at: ?usize = null,
     first: [512]u8 = @splat(0),
     second: [512]u8 = @splat(0),
+
     pub fn readBlocks(self: *@This(), lba: u32, out: []u8) !void {
         try self.base.readBlocks(lba, out);
     }
+
     pub fn writeBlocks(self: *@This(), lba: u32, bytes: []const u8) !void {
         // Only the declared fragmented file's two data sectors may change.
         if ((lba != data_lba + 1 and lba != data_lba + 3) or bytes.len != 512) return error.UnrelatedWrite;
@@ -365,8 +367,10 @@ const WritableCard = struct {
         self.writes += 1;
         @memcpy(if (lba == data_lba + 1) &self.first else &self.second, bytes);
     }
+
     pub fn sync(_: *@This()) !void {}
 };
+
 test "fixed allocation writer follows fragments without touching FAT or extending files" {
     var card: WritableCard = .{};
     var scratch: [512]u8 = undefined;

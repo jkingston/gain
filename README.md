@@ -379,15 +379,23 @@ card; unplug and reconnect the cable to transfer again. Eject before unplugging
 so the host can flush its own filesystem cache.
 
 The implementation uses a pinned TinyUSB device/MSC/DWC2 subset and Zig board
-hooks and callbacks. The F20 port uses high-speed USB with bounded 4 KiB sector
-buffers and CPU FIFO transfers; it does not depend on USB DMA cache coherence.
+hooks and callbacks. The F20 port uses high-speed USB with bounded 32 KiB sector
+buffers and controller DMA. USB buffers occupy a reserved 128 KiB uncached
+identity-mapped window: CPU pointers are physical addresses, and SD uses its
+uncached alias of the same memory. Whole aligned sectors pass directly between
+controllers; partial or foreign buffers use the bounded bounce path. One TLB
+entry (31) is reserved while USB is initialized. The original entry and CP0
+state are preserved, and the USB core is stopped and reset before restoring
+the mapping for ROM handoff. Upstream C sources are unchanged; the mapping,
+sector policy and bridges are Zig.
 SD writes wait for programming completion and CMD13 card-ready status before
 acknowledgement. Failed card I/O latches an unavailable medium until the next
 ownership transition. `0xa108:0x1002` is a development USB identity; a distributed
 hardware product needs an assigned identity.
 
 `mise run test-usb` exercises the production class, callbacks, storage policy,
-fragmented I/O, injected faults and eject status ordering in Debug and
+fragmented I/O, shared-buffer bounds, mapping lifecycle, reset timeouts,
+injected faults and eject status ordering in Debug and
 ReleaseFast. The default host suite includes these tests. On macOS, with an F20
 in mask-ROM mode, run:
 
@@ -395,10 +403,13 @@ in mask-ROM mode, run:
 GAIN_USBBOOT=/path/to/usbboot mise run check-usb-f20 -- --output /path/outside/gain/usb-check
 ```
 
-This path has passed the complete qualification on an F20 V2.7: real SD-fed
-playback stopped, no host bytes transferred before worker shutdown, both eject
-cycles remounted cleanly, device and fresh-host readback agreed, test files were
-removed, and USB power/charging enable remained set.
+The qualification checks that real SD-fed playback stops before host sector
+access, both eject cycles remount cleanly, device and fresh-host readback agree,
+only the test files are removed, and USB power/charging enable remains set.
+On an F20 V2.7, a 64 MiB run measured 8.41 MB/s writing and 10.51 MB/s reading
+from a fresh host mount. SHA-256, independent native FAT readback, direct-buffer
+counters and automatic ROM return passed. These are measured filesystem rates
+for that card and run, not a USB bus-speed guarantee.
 
 The RAM-only qualification executable first plays an existing supported track
 (at least 2 MiB, at very low volume) and verifies that USB configuration stops
@@ -406,10 +417,12 @@ playback and joins its workers before any host sector access. It then exposes
 the real SD card. Its host runner
 checks USB identity, physical port, card capacity and filesystem before creating
 a new `.gain-usb-check` directory; an existing directory is refused. It copies a
-1 MiB pattern, tests Unicode create/rename/delete, ejects, verifies the file
+16 MiB position-varying pattern by default (`--transfer-mib 1|16|64`),
+tests Unicode create/rename/delete, ejects, verifies the file
 through the device’s freshly mounted FAT reader, reconnects and verifies SHA256
 on a fresh host mount, removes only its own test files and ejects again. It
-checks the ownership latch, live player loop, USB power and charging enable,
+checks that DMA and direct-buffer reads/writes were exercised, the ownership
+latch, live player loop, USB power and charging enable,
 then returns to ROM. On failure, it leaves evidence and any test files for
 inspection rather than deleting unknown data. No formatting or flash writes
 occur. Narrow diagnostic control requests are linked only into this separate
@@ -425,6 +438,8 @@ The source keeps SoC and board knowledge separate without a runtime HAL:
 | `src/f20_v27.zig` | F20 V2.7 wiring, panel data and verified LPDDR profile |
 | `src/f20.zig` | Compile-time F20 device facade used by product code |
 | `src/sd.zig` | Native X1000 SD controller |
+| `src/x1000_dma.zig` | Reserved uncached identity mapping with saved/restored CPU state |
+| `src/usb_core_reset.zig` | Bounded USB DMA reset policy with deterministic driver tests |
 | `src/fat32.zig` | Portable allocation-free FAT32 reader |
 | `src/wav.zig` | Portable bounded RIFF/WAVE parser |
 | `src/pcm.zig` | Portable allocation-free WAV PCM to DMA frame conversion |

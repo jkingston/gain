@@ -1,8 +1,10 @@
 //! Folder navigation shared by the F20 application and device qualification.
 const fat32 = @import("fat32.zig");
 const player_view = @import("player_view.zig");
+
 const maximum_depth = 8;
 const visible_rows = player_view.visible_rows;
+
 pub fn Browser(comptime Volume: type) type {
     return struct {
         const Self = @This();
@@ -30,6 +32,7 @@ pub fn Browser(comptime Volume: type) type {
             selected: [fat32.maximum_name_bytes]u8 = @splat(0),
             selected_length: usize = 0,
         };
+
         pub fn bookmark(self: *const Self, volume: *Volume) !Bookmark {
             var result = Bookmark{ .titles = self.titles, .lengths = self.title_lengths, .depth = self.depth };
             if (try self.selectedEntry(volume)) |entry| {
@@ -38,6 +41,7 @@ pub fn Browser(comptime Volume: type) type {
             }
             return result;
         }
+
         /// Restore the deepest surviving folder and selected filename using a
         /// fresh FAT mount. Deleted or renamed paths fall back to their parent.
         pub fn restore(self: *Self, volume: *Volume, saved: Bookmark) !void {
@@ -49,6 +53,7 @@ pub fn Browser(comptime Volume: type) type {
             }
             if (saved.selected_length != 0) _ = try self.find(volume, saved.selected[0..saved.selected_length]);
         }
+
         fn find(self: *Self, volume: *Volume, name: []const u8) !?fat32.DirectoryEntry {
             var iterator = try volume.iterate(self.directory());
             var index: usize = 0;
@@ -120,6 +125,7 @@ pub fn Browser(comptime Volume: type) type {
         pub fn home(self: *Self) void {
             self.depth = 0;
         }
+
         pub fn draw(browser: *const Self, volume: *Volume, scene: *@import("ui.zig").Ui, battery_mv: u32, attenuation: u8, theme: @import("ui.zig").Theme) !void {
             try player_view.browser(scene, browser.title(), browser.counts[browser.depth] == 0, battery_mv, attenuation, theme);
 
@@ -141,6 +147,7 @@ pub fn Browser(comptime Volume: type) type {
                 }
             }
         }
+
         pub fn adjacentTrack(
             browser: *Self,
             volume: *Volume,
@@ -157,6 +164,7 @@ pub fn Browser(comptime Volume: type) type {
         }
     };
 }
+
 pub fn isVisibleEntry(entry: *const fat32.DirectoryEntry) bool {
     if (entry.attributes & 0x06 != 0) return false;
     const name = entry.name();
@@ -192,35 +200,50 @@ const FakeVolume = struct {
     fail: bool = false,
     relocated: bool = false,
     deleted: bool = false,
+
     const Iterator = struct {
         entries: []const fat32.DirectoryEntry,
         position: usize = 0,
+
         pub fn next(self: *Iterator) !?fat32.DirectoryEntry {
             if (self.position == self.entries.len) return null;
             defer self.position += 1;
             return self.entries[self.position];
         }
     };
+
     pub fn rootDirectory(_: *FakeVolume) fat32.Directory {
         return .{ .first_cluster = 2 };
     }
+
     pub fn iterate(self: *FakeVolume, directory: fat32.Directory) !Iterator {
         if (self.fail) return error.CardRemoved;
         if (self.relocated and directory.first_cluster == 3) return error.StaleCluster;
-        return .{ .entries = if (directory.first_cluster == 2) (if (self.deleted) root[1..] else if (self.relocated) &relocated_root else &root) else &folder };
+        return .{
+            .entries = if (directory.first_cluster == 2) (if (self.deleted) root[1..] else if (self.relocated) &relocated_root else &root) else &folder,
+        };
     }
+
     fn entry(comptime name: []const u8, kind: fat32.EntryKind, cluster: u32) fat32.DirectoryEntry {
         var result = fat32.DirectoryEntry{ .kind = kind, .first_cluster = cluster, .size = 32, .attributes = 0 };
         @memcpy(result.name_bytes[0..name.len], name);
         result.name_length = name.len;
         return result;
     }
-    const root = [_]fat32.DirectoryEntry{ entry("Albums", .directory, 3), entry("notes.txt", .file, 4), entry("track.FLAC", .file, 5), entry("other.opus", .file, 6) };
+    const root = [_]fat32.DirectoryEntry{
+        entry("Albums", .directory, 3),
+        entry("notes.txt", .file, 4),
+        entry("track.FLAC", .file, 5),
+        entry("other.opus", .file, 6),
+    };
+
     const relocated_root = [_]fat32.DirectoryEntry{ entry("Albums", .directory, 30), entry("track.FLAC", .file, 50), entry("other.opus", .file, 60) };
     const folder = [_]fat32.DirectoryEntry{entry("song.m4a", .file, 7)};
 };
+
 test "real browser restores parent selection and skips unsupported files during navigation" {
     const testing = @import("std").testing;
+
     var volume = FakeVolume{};
     var browser = try Browser(FakeVolume).init(&volume);
     try testing.expectEqual(@as(usize, 3), browser.counts[0]);
@@ -234,8 +257,10 @@ test "real browser restores parent selection and skips unsupported files during 
     try testing.expectEqualStrings("other.opus", (try browser.adjacentTrack(&volume, 1)).?.name());
     try testing.expectEqualStrings("track.FLAC", (try browser.adjacentTrack(&volume, 1)).?.name());
 }
+
 test "directory read failure leaves browser position and title intact" {
     const testing = @import("std").testing;
+
     var volume = FakeVolume{};
     var browser = try Browser(FakeVolume).init(&volume);
     const entry = (try browser.selectedEntry(&volume)).?;
@@ -248,6 +273,7 @@ test "directory read failure leaves browser position and title intact" {
 
 test "USB remount restores by names after clusters change and falls back after deletion" {
     const testing = @import("std").testing;
+
     var volume = FakeVolume{};
     var browser = try Browser(FakeVolume).init(&volume);
     try browser.enter(&volume, (try browser.selectedEntry(&volume)).?);

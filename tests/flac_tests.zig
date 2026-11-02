@@ -101,6 +101,7 @@ fn fuzzFlac(_: void, smith: *std.testing.Smith) !void {
         .total_samples = 0,
         .first_frame_offset = 0,
     };
+
     var left: [1_024]i32 = undefined;
     var right: [1_024]i32 = undefined;
     _ = flac.decodeFrame(bytes, info, &left, &right) catch {};

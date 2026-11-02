@@ -1,9 +1,11 @@
 //! Versioned RAM-only player qualification report; no persisted device state.
 const std = @import("std");
+
 pub const address = 0xa0700000;
 pub const magic = 0x47415031;
 pub const version = 1;
 pub const timer_hz = 6_000_000;
+
 pub const Report = extern struct {
     signature: u32 = magic,
     revision: u32 = version,
@@ -34,9 +36,11 @@ pub const Report = extern struct {
     volume_changes: u32 = 0,
     minimum_fifo: u32 = 0,
 };
+
 comptime {
     if (@sizeOf(Report) != 128) @compileError("player report ABI changed");
 }
+
 pub fn validate(report: Report) !void {
     if (report.signature != magic or report.revision != version or report.complete != 1) return error.IncompleteReport;
     if (report.error_code != 0 or report.cause != 0) return error.PlayerFailure;
@@ -50,10 +54,21 @@ pub fn validate(report: Report) !void {
     const capacities = [_]u32{ 32 * 1024, 32 * 1024, 32 * 1024, 352 * 1024, 64 * 1024 };
     for (report.stack_used, capacities) |used, capacity| if (used == 0 or used > capacity - 4096) return error.StackBudget;
 }
+
 test "qualification rejects incomplete, failed and over-budget measurements" {
     var report = Report{ .complete = 1, .sample_rate = 48000, .periods = 1, .ui_polls = 2, .stack_used = @splat(1024) };
     try validate(report);
-    inline for (.{ .{ "complete", 0, error.IncompleteReport }, .{ "underruns", 1, error.PlaybackFailure }, .{ "error_code", 1, error.PlayerFailure }, .{ "maximum_fill_ticks", 15001, error.FillBudget }, .{ "heap_peak", 262145, error.HeapBudget }, .{ "startup_ticks", 3000001, error.StartupBudget }, .{ "maximum_ui_ticks", 60001, error.UiBudget }, .{ "maximum_ui_gap_ticks", 210001, error.UiBudget }, .{ "maximum_irq_ticks", 301, error.InterruptBudget } }) |mutation| {
+    inline for (.{
+        .{ "complete", 0, error.IncompleteReport },
+        .{ "underruns", 1, error.PlaybackFailure },
+        .{ "error_code", 1, error.PlayerFailure },
+        .{ "maximum_fill_ticks", 15001, error.FillBudget },
+        .{ "heap_peak", 262145, error.HeapBudget },
+        .{ "startup_ticks", 3000001, error.StartupBudget },
+        .{ "maximum_ui_ticks", 60001, error.UiBudget },
+        .{ "maximum_ui_gap_ticks", 210001, error.UiBudget },
+        .{ "maximum_irq_ticks", 301, error.InterruptBudget },
+    }) |mutation| {
         var bad = report;
         @field(bad, mutation[0]) = mutation[1];
         try std.testing.expectError(mutation[2], validate(bad));

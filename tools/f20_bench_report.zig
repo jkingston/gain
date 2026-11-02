@@ -63,6 +63,7 @@ comptime {
 
 test "track sparse completed cases" {
     const std = @import("std");
+
     const mask = caseBit(.decode_frames) | caseBit(.lpc_order_4) | caseBit(.sd_open);
     try std.testing.expect(caseCompleted(mask, .decode_frames));
     try std.testing.expect(!caseCompleted(mask, .stream_cached));

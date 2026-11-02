@@ -16,6 +16,7 @@ const playback = @import("playback.zig");
 const input_stream = @import("input_stream.zig");
 const codec_pool = @import("codec_pool.zig");
 const stack = @import("task_stack.zig");
+
 const stacks = [_]memory.Region{ memory.output_stack, memory.ui_stack, memory.control_stack, memory.codec_stack, memory.storage_stack };
 const event = 1;
 const timer_hz = x.Timer.milliseconds(1000);
@@ -68,6 +69,7 @@ const Workspace = struct {
         };
     }
 };
+
 pub const Report = struct {
     playback: media.Result,
     runtime: port.Metrics,
@@ -81,6 +83,7 @@ pub const Report = struct {
     maximum_ui_gap_ticks: u32,
     stack_used: [stacks.len]u32,
 };
+
 fn Player(comptime Reader: type) type {
     return struct {
         const Self = @This();
@@ -147,11 +150,31 @@ fn Player(comptime Reader: type) type {
             };
             self.runtime.hardware_interrupt = interrupt;
             self.runtime.run(.{
-                .{ .entry = outputEntry, .stack_top = @intCast(memory.output_stack.cachedTop()), .stack_bottom = @intCast(memory.output_stack.cached() + stack.guard_bytes) },
-                .{ .entry = uiEntry, .stack_top = @intCast(memory.ui_stack.cachedTop()), .stack_bottom = @intCast(memory.ui_stack.cached() + stack.guard_bytes) },
-                .{ .entry = controlEntry, .stack_top = @intCast(memory.control_stack.cachedTop()), .stack_bottom = @intCast(memory.control_stack.cached() + stack.guard_bytes) },
-                .{ .entry = codecEntry, .stack_top = @intCast(memory.codec_stack.cachedTop()), .stack_bottom = @intCast(memory.codec_stack.cached() + stack.guard_bytes) },
-                .{ .entry = storageEntry, .stack_top = @intCast(memory.storage_stack.cachedTop()), .stack_bottom = @intCast(memory.storage_stack.cached() + stack.guard_bytes) },
+                .{
+                    .entry = outputEntry,
+                    .stack_top = @intCast(memory.output_stack.cachedTop()),
+                    .stack_bottom = @intCast(memory.output_stack.cached() + stack.guard_bytes),
+                },
+                .{
+                    .entry = uiEntry,
+                    .stack_top = @intCast(memory.ui_stack.cachedTop()),
+                    .stack_bottom = @intCast(memory.ui_stack.cached() + stack.guard_bytes),
+                },
+                .{
+                    .entry = controlEntry,
+                    .stack_top = @intCast(memory.control_stack.cachedTop()),
+                    .stack_bottom = @intCast(memory.control_stack.cached() + stack.guard_bytes),
+                },
+                .{
+                    .entry = codecEntry,
+                    .stack_top = @intCast(memory.codec_stack.cachedTop()),
+                    .stack_bottom = @intCast(memory.codec_stack.cached() + stack.guard_bytes),
+                },
+                .{
+                    .entry = storageEntry,
+                    .stack_top = @intCast(memory.storage_stack.cachedTop()),
+                    .stack_bottom = @intCast(memory.storage_stack.cached() + stack.guard_bytes),
+                },
             });
             var stack_used: [stacks.len]u32 = @splat(0);
             for (stacks, 0..) |region, index| {
@@ -186,32 +209,41 @@ fn Player(comptime Reader: type) type {
                 .stack_used = stack_used,
             };
         }
+
         fn current() *Self {
             return active.?;
         }
+
         pub fn cancelled(self: *Self) bool {
             return self.cancelled_flag.load(.acquire);
         }
+
         pub fn wakeStorage(self: *Self) void {
             self.runtime.notify(.storage, event);
         }
+
         pub fn wakeInput(self: *Self) void {
             self.runtime.notify(.codec, event);
         }
+
         pub fn prepareInputWait(self: *Self) void {
             _ = self.runtime.take(event);
         }
+
         pub fn waitInput(self: *Self) void {
             self.runtime.wait(event, null);
         }
+
         fn fail(self: *Self, failure: anyerror) void {
             _ = self.error_code.cmpxchgStrong(0, @intFromError(failure), .acq_rel, .acquire);
             self.cancel();
         }
+
         fn cancel(self: *Self) void {
             self.cancelled_flag.store(true, .release);
             for ([_]port.Task{ .output, .codec, .storage, .control }) |task| self.runtime.notify(task, event);
         }
+
         pub fn configure(self: *Self, information: info.Information) !void {
             if (self.cancelled()) return error.Cancelled;
             if (self.header_ready.load(.acquire)) {
@@ -227,6 +259,7 @@ fn Player(comptime Reader: type) type {
             self.header_ready.store(true, .release);
             self.runtime.notify(.output, event);
         }
+
         pub fn push(self: *Self, frames: []const pcm.StereoFrame) !void {
             var offset: usize = 0;
             while (offset < frames.len) {
@@ -241,6 +274,7 @@ fn Player(comptime Reader: type) type {
                 }
             }
         }
+
         fn codecEntry() callconv(.c) noreturn {
             const self = current();
             _ = decoder.run(&self.input, self.length, Self, self, self.workspace.decoder, 0) catch |failure| {
@@ -252,6 +286,7 @@ fn Player(comptime Reader: type) type {
             self.runtime.notify(.storage, event);
             self.runtime.retire();
         }
+
         fn storageEntry() callconv(.c) noreturn {
             const self = current();
             while (true) {
@@ -272,6 +307,7 @@ fn Player(comptime Reader: type) type {
                 self.runtime.wait(event, null);
             }
         }
+
         fn render(self: *Self, slot: u8) !void {
             const started = x.Timer.now();
             const bytes = @as([*]u8, @ptrFromInt(self.resources.buffers[slot].address))[0..self.plan.bytes];
@@ -281,6 +317,7 @@ fn Player(comptime Reader: type) type {
             self.periods += 1;
             self.runtime.notify(.codec, event);
         }
+
         fn boundEnd(self: *Self) !void {
             if (self.end_bounded or !self.codec_done.load(.acquire)) return;
             const data_chunks = std.math.divCeil(u64, self.produced_frames, self.plan.frames) catch return error.InvalidDuration;
@@ -291,6 +328,7 @@ fn Player(comptime Reader: type) type {
             try self.state.?.finishAfter(@intCast(total_chunks));
             self.end_bounded = true;
         }
+
         fn outputEntry() callconv(.c) noreturn {
             const self = current();
             while (true) {
@@ -326,7 +364,11 @@ fn Player(comptime Reader: type) type {
                         continue;
                     }
                     self.output_idle.store(false, .release);
-                    self.state = playback.State.init(.{ .buffer_count = self.config.buffer_count, .descriptor_count = self.config.descriptor_count, .total_chunks = std.math.maxInt(u32) }) catch |failure| {
+                    self.state = playback.State.init(.{
+                        .buffer_count = self.config.buffer_count,
+                        .descriptor_count = self.config.descriptor_count,
+                        .total_chunks = std.math.maxInt(u32),
+                    }) catch |failure| {
                         self.fail(failure);
                         continue;
                     };
@@ -334,6 +376,7 @@ fn Player(comptime Reader: type) type {
                         self.fail(failure);
                         continue;
                     };
+
                     var failed = false;
                     for (0..self.config.buffer_count) |slot| self.render(@intCast(slot)) catch |failure| {
                         self.fail(failure);
@@ -352,6 +395,7 @@ fn Player(comptime Reader: type) type {
                     self.fail(failure);
                     continue;
                 };
+
                 const observed = self.engine.?.pollDma() catch |failure| {
                     self.fail(failure);
                     continue;
@@ -365,6 +409,7 @@ fn Player(comptime Reader: type) type {
                         self.fail(failure);
                         continue;
                     };
+
                     var failed = false;
                     for (0..completions) |_| {
                         const transition = self.state.?.advance(self.state.?.nextDescriptor()) catch |failure| {
@@ -406,6 +451,7 @@ fn Player(comptime Reader: type) type {
                 self.runtime.wait(event, self.runtime.now() + period_ticks);
             }
         }
+
         fn controlEntry() callconv(.c) noreturn {
             const self = current();
             while (true) {
@@ -425,7 +471,12 @@ fn Player(comptime Reader: type) type {
                     continue;
                 }
                 if (self.prepare_requested and !self.prepared) {
-                    self.engine = audio.Engine.init(self.resources, .{ .descriptor_count = self.config.descriptor_count, .buffer_count = self.config.buffer_count, .chunk_bytes = @intCast(self.plan.bytes), .sample_format = audio.sampleFormat(self.plan.format) }) catch |failure| {
+                    self.engine = audio.Engine.init(self.resources, .{
+                        .descriptor_count = self.config.descriptor_count,
+                        .buffer_count = self.config.buffer_count,
+                        .chunk_bytes = @intCast(self.plan.bytes),
+                        .sample_format = audio.sampleFormat(self.plan.format),
+                    }) catch |failure| {
                         self.fail(failure);
                         continue;
                     };
@@ -451,6 +502,7 @@ fn Player(comptime Reader: type) type {
                 self.runtime.wait(event, self.runtime.now() + control_ticks);
             }
         }
+
         fn uiEntry() callconv(.c) noreturn {
             const self = current();
             while (true) {
@@ -461,7 +513,13 @@ fn Player(comptime Reader: type) type {
                     const ui_started = x.Timer.now();
                     if (self.previous_ui_tick) |previous| self.maximum_ui_gap_ticks = @max(self.maximum_ui_gap_ticks, ui_started -% previous);
                     self.previous_ui_tick = ui_started;
-                    const command = control.poll(control.context, .{ .phase = if (self.started) .playing else .preparing, .sample_rate = if (ready) self.information.sample_rate else 0, .output_format = if (ready) self.information.output_format else .signed_24_in_u32, .total_frames = total, .played_frames = if (total == 0) played else @min(total, played) });
+                    const command = control.poll(control.context, .{
+                        .phase = if (self.started) .playing else .preparing,
+                        .sample_rate = if (ready) self.information.sample_rate else 0,
+                        .output_format = if (ready) self.information.output_format else .signed_24_in_u32,
+                        .total_frames = total,
+                        .played_frames = if (total == 0) played else @min(total, played),
+                    });
                     self.maximum_ui_ticks = @max(self.maximum_ui_ticks, x.Timer.elapsed(ui_started));
                     self.ui_polls += 1;
                     switch (command) {
@@ -482,6 +540,7 @@ fn Player(comptime Reader: type) type {
                 self.runtime.wait(event, self.runtime.now() + ui_ticks);
             }
         }
+
         fn interrupt(runtime: *port.Runtime) void {
             if (x.Interrupts.pending(.pdma_descriptor) or x.Interrupts.pending(.pdma) or x.Interrupts.pending(.aic)) {
                 x.Interrupts.mask(.pdma);
@@ -494,12 +553,14 @@ fn Player(comptime Reader: type) type {
                 runtime.notifyFromInterrupt(.storage, event);
             }
         }
+
         fn prepareSd(context: *anyopaque, wanted: u32) void {
             const self: *Self = @ptrCast(@alignCast(context));
             _ = self.runtime.take(event);
             x.Msc0.interrupt_mask.write(~wanted);
             x.Interrupts.unmask(.msc0);
         }
+
         fn waitSd(context: *anyopaque, remaining: u32) void {
             const self: *Self = @ptrCast(@alignCast(context));
             self.runtime.wait(event, self.runtime.now() + remaining);

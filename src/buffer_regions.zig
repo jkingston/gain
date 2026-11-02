@@ -1,5 +1,6 @@
 //! Validate caller-owned scratch once at session admission, outside hot loops.
 const std = @import("std");
+
 pub fn disjoint(regions: []const []const u8) bool {
     for (regions, 0..) |region, i| {
         if (region.len == 0) continue;
@@ -14,6 +15,7 @@ pub fn disjoint(regions: []const []const u8) bool {
     }
     return true;
 }
+
 test "scratch admission accepts touching regions and rejects partial or complete aliases" {
     var bytes: [64]u8 = undefined;
     try std.testing.expect(disjoint(&.{ bytes[0..32], bytes[32..64], bytes[12..12] }));

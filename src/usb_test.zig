@@ -1,13 +1,15 @@
 //! Production MSC wire protocol with deterministic endpoints and block I/O.
 const std = @import("std");
 const c = @import("c_usb");
+
 const Endpoint = struct {
     buffer: [*c]u8 = null,
     length: u16 = 0,
     busy: bool = false,
     stalled: bool = false,
-    snapshot: [4096]u8 = @splat(0),
+    snapshot: [32768]u8 = @splat(0),
 };
+
 var endpoints: [256]Endpoint = @splat(.{});
 const bridge = @import("usb_msc.zig");
 const storage = @import("usb_storage.zig");
@@ -16,48 +18,62 @@ const descriptors = @import("usb_descriptors.zig");
 export fn tud_speed_get() c.tusb_speed_t {
     return c.TUSB_SPEED_HIGH;
 }
+
 export fn tud_control_status(_: u8, _: ?*const c.tusb_control_request_t) bool {
     return true;
 }
+
 export fn tud_control_xfer(_: u8, _: ?*const c.tusb_control_request_t, _: ?*anyopaque, _: u16) bool {
     return true;
 }
+
 export fn usbd_edpt_open(_: u8, _: ?*const c.tusb_desc_endpoint_t) bool {
     return true;
 }
+
 export fn usbd_open_edpt_pair(_: u8, descriptor: [*c]const u8, _: u8, _: u8, out: [*c]u8, in: [*c]u8) bool {
     for ([_]u8{ descriptor[2], descriptor[9] }) |ep| {
         if (ep & 0x80 == 0) out.* = ep else in.* = ep;
     }
     return true;
 }
+
 export fn usbd_edpt_claim(_: u8, ep: u8) bool {
     return !endpoints[ep].busy;
 }
+
 export fn usbd_edpt_busy(_: u8, ep: u8) bool {
     return endpoints[ep].busy;
 }
+
 export fn usbd_edpt_stalled(_: u8, ep: u8) bool {
     return endpoints[ep].stalled;
 }
+
 export fn usbd_edpt_rx_consume(_: u8, _: u8) void {}
+
 export fn usbd_edpt_stall(_: u8, ep: u8) void {
     endpoints[ep].stalled = true;
     endpoints[ep].busy = false;
 }
+
 export fn usbd_edpt_abort(_: u8, ep: u8) void {
     endpoints[ep].busy = false;
 }
+
 export fn dcd_event_handler(_: ?*const c.dcd_event_t, _: bool) void {
     @panic("unexpected async completion in synchronous block-device test");
 }
+
 export fn usbd_defer_func_after_queue(func: c.osal_task_func_t, param: ?*anyopaque) bool {
     func.?(param);
     return true;
 }
+
 export fn usbd_defer_func(func: c.osal_task_func_t, param: ?*anyopaque, _: bool) void {
     func.?(param);
 }
+
 export fn usbd_edpt_xfer(_: u8, ep: u8, buffer: [*c]u8, length: u16, _: bool) bool {
     const endpoint = &endpoints[ep];
     std.debug.assert(!endpoint.busy and length <= endpoint.snapshot.len);
@@ -75,6 +91,7 @@ fn hostOut(eps: anytype, bytes: []const u8) !void {
     ep.busy = false;
     try std.testing.expect(c.mscd_xfer_cb(0, 1, c.XFER_RESULT_SUCCESS, @intCast(bytes.len)));
 }
+
 fn finish(eps: anytype) !void {
     const ep = &eps[0x81];
     try std.testing.expect(ep.busy);
@@ -82,6 +99,7 @@ fn finish(eps: anytype) !void {
     ep.busy = false;
     try std.testing.expect(c.mscd_xfer_cb(0, 0x81, c.XFER_RESULT_SUCCESS, bytes));
 }
+
 fn command(eps: anytype, opcode: u8, data_bytes: u32, in: bool, byte4: u8, lba: u32, blocks: u16) !void {
     var cbw: [31]u8 = @splat(0);
     std.mem.writeInt(u32, cbw[0..4], 0x43425355, .little);
@@ -107,6 +125,7 @@ fn setup(store: *storage.Store) !void {
     c.mscd_reset(0);
     try std.testing.expectEqual(23, c.mscd_open(0, @ptrCast(&descriptors.high[9]), 23));
 }
+
 test "production MSC write read sync eject and reset obey wire status ordering" {
     var device: storage.TestDevice = .{};
     var bounce: [4096]u8 align(4) = undefined;
@@ -122,7 +141,7 @@ test "production MSC write read sync eject and reset obey wire status ordering" 
     try std.testing.expectEqual(0, endpoints[0x81].snapshot[12]);
     try finish(&endpoints);
     try command(&endpoints, 0x28, 4096, true, 0, 2, 8);
-    try std.testing.expectEqualSlices(u8, &expected, &endpoints[0x81].snapshot);
+    try std.testing.expectEqualSlices(u8, &expected, endpoints[0x81].snapshot[0..4096]);
     try finish(&endpoints);
     try finish(&endpoints);
     try command(&endpoints, 0x35, 0, false, 0, 0, 0);
@@ -150,6 +169,7 @@ test "production MSC write read sync eject and reset obey wire status ordering" 
     try std.testing.expectEqual(-1, c.tud_msc_read10_cb(1, 0, 0, &expected, 512));
     try std.testing.expectEqualSlices(u8, &expected, device.bytes[1024..5120]);
 }
+
 test "failed flush returns failed CSW and never grants player access" {
     var device: storage.TestDevice = .{};
     var bounce: [4096]u8 align(4) = undefined;
@@ -163,6 +183,7 @@ test "failed flush returns failed CSW and never grants player access" {
     try std.testing.expectEqual(storage.State.host, store.session.state);
     try std.testing.expect(!store.session.playerAllowed());
 }
+
 test "malformed CBW stalls bulk endpoints and class reset recovers" {
     var device: storage.TestDevice = .{};
     var bounce: [4096]u8 align(4) = undefined;
@@ -181,4 +202,73 @@ test "malformed CBW stalls bulk endpoints and class reset recovers" {
     try std.testing.expectEqual(23, c.mscd_open(0, @ptrCast(&descriptors.high[9]), 23));
     try command(&endpoints, 0, 0, true, 0, 0, 0);
     try finish(&endpoints);
+}
+
+test "32 KiB MSC batches preserve data across command and partial block boundaries" {
+    const Disk = struct {
+        bytes: [128 * 512]u8 = @splat(0),
+        last_buffer: usize = 0,
+
+        fn capacity(_: *anyopaque) u64 {
+            return 128;
+        }
+
+        fn present(_: *anyopaque) bool {
+            return true;
+        }
+
+        fn read(context: *anyopaque, lba: u32, out: []u8) !void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.last_buffer = @intFromPtr(out.ptr);
+            @memcpy(out, self.bytes[@as(usize, lba) * 512 ..][0..out.len]);
+        }
+
+        fn write(context: *anyopaque, lba: u32, input: []const u8) !void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.last_buffer = @intFromPtr(input.ptr);
+            @memcpy(self.bytes[@as(usize, lba) * 512 ..][0..input.len], input);
+        }
+
+        fn sync(_: *anyopaque) !void {}
+    };
+
+    var device: Disk = .{};
+    var bounce: [32768]u8 align(4) = undefined;
+    var store = try storage.Store.init(.{
+        .context = &device,
+        .capacity = Disk.capacity,
+        .present = Disk.present,
+        .read = Disk.read,
+        .write = Disk.write,
+        .sync = Disk.sync,
+    }, &bounce);
+    try setup(&store);
+    defer bridge.bind(null);
+    const shared_start = @intFromPtr(endpoints[1].buffer);
+    store.device.shared = .{ .start = shared_start, .bytes = c.CFG_TUD_MSC_EP_BUFSIZE };
+    var payload: [32768]u8 = undefined;
+    for (&payload, 0..) |*byte, i| byte.* = @truncate(i * 73 + i / 11);
+    try command(&endpoints, 0x2a, 32768, false, 0, 1, 64);
+    try hostOut(&endpoints, &payload);
+    try std.testing.expectEqual(shared_start, device.last_buffer);
+    try std.testing.expectEqualSlices(u8, &payload, device.bytes[512..][0..32768]);
+    try std.testing.expectEqual(0, endpoints[0x81].snapshot[12]);
+    try finish(&endpoints);
+    try command(&endpoints, 0x28, 32768, true, 0, 1, 64);
+    try std.testing.expectEqualSlices(u8, &payload, &endpoints[0x81].snapshot);
+    try std.testing.expectEqual(shared_start, device.last_buffer);
+    try finish(&endpoints);
+    try finish(&endpoints);
+    // An offset update must not alter either neighbouring byte.
+    var marker = [_]u8{ 9, 8, 7 };
+    try std.testing.expectEqual(3, c.tud_msc_write10_cb(0, 1, 511, &marker, marker.len));
+    try std.testing.expectEqual(@intFromPtr(&bounce), device.last_buffer);
+    try std.testing.expectEqual(payload[510], device.bytes[512 + 510]);
+    try std.testing.expectEqualSlices(u8, &marker, device.bytes[1023..1026]);
+    try std.testing.expectEqual(payload[514], device.bytes[1026]);
+}
+
+test {
+    std.testing.refAllDecls(@import("x1000_dma.zig"));
+    std.testing.refAllDecls(@import("usb_core_reset.zig"));
 }

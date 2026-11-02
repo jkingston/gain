@@ -4,9 +4,11 @@ const std = @import("std");
 const x = @import("x1000.zig");
 const executive = @import("executive.zig");
 const dispatch_state = @import("task_dispatch.zig");
+
 pub const Context = dispatch_state.Context;
 pub const Task = executive.Task;
 pub const Entry = *const fn () callconv(.c) noreturn;
+
 pub const Specification = struct { entry: Entry, stack_top: u32, stack_bottom: u32 = 0 };
 const interrupt_enable = Context.interrupt_enable;
 const exception_level: u32 = 1 << 1;
@@ -17,6 +19,7 @@ const alternate_vector: u32 = 1 << 23;
 const no_deadline = dispatch_state.no_deadline;
 const maintenance_ticks = std.math.maxInt(i32);
 const Operation = dispatch_state.Operation;
+
 extern fn gain_task_trap(u32, u32, u32, u32) callconv(.c) void;
 extern var _gp: u8;
 var active: ?*Runtime = null;
@@ -85,33 +88,39 @@ pub const Runtime = struct {
         const ticks = deadline orelse no_deadline;
         gain_task_trap(@backingInt(Operation.wait), events, @truncate(ticks), @truncate(ticks >> 32));
     }
+
     pub fn stop(self: *Runtime) noreturn {
         std.debug.assert(self.scheduler.current != .idle);
         gain_task_trap(@backingInt(Operation.stop), 0, 0, 0);
         unreachable;
     }
+
     /// Call only after local resources and decoder defers have unwound.
     pub fn retire(self: *Runtime) noreturn {
         std.debug.assert(self.scheduler.current != .idle);
         gain_task_trap(@backingInt(Operation.retire), 0, 0, 0);
         unreachable;
     }
+
     pub fn now(self: *Runtime) u64 {
         const status = maskInterrupts();
         defer restoreInterrupts(status);
         return self.clock.sample(x.Timer.now());
     }
+
     pub fn take(self: *Runtime, events: u32) u32 {
         const status = maskInterrupts();
         defer restoreInterrupts(status);
         return self.scheduler.policy.take(self.scheduler.current, events);
     }
+
     pub fn notify(self: *Runtime, task: Task, events: u32) void {
         const status = maskInterrupts();
         defer restoreInterrupts(status);
         self.notifyFromInterrupt(task, events);
         gain_task_trap(@backingInt(Operation.reschedule), 0, 0, 0);
     }
+
     pub fn notifyFromInterrupt(self: *Runtime, task: Task, events: u32) void {
         self.scheduler.policy.notify(task, events);
     }
@@ -146,34 +155,43 @@ pub const Runtime = struct {
         return selected_frame;
     }
 };
+
 extern fn exception_panic(u32, u32, u32) callconv(.c) noreturn;
+
 fn fatal(cause: u32, epc: u32, status: u32) noreturn {
     exception_panic(cause, epc, status);
 }
+
 pub fn dispatch(frame: *Context, entry: u32, cause: u32) *Context {
     return if (active) |runtime| runtime.interrupt(frame, entry, cause) else fatal(cause, frame.epc, frame.status);
 }
+
 fn maskInterrupts() u32 {
     return asm volatile ("di %[old];ehb"
         : [old] "=r" (-> u32),
         :
         : .{ .memory = true });
 }
+
 fn restoreInterrupts(status: u32) void {
     if (status & interrupt_enable != 0) asm volatile ("ei;ehb" ::: .{ .memory = true });
 }
+
 const Timer = struct {
     const base = 0xb2000000;
     const channel: u32 = 1;
+
     fn initialize() void {
         shutdown();
         x.write32(base, (x.read32(base) & ~@as(u32, 3)) | 1);
     }
+
     fn shutdown() void {
         x.write32(base + 0x38, channel);
         x.write32(base + 0x10, channel);
         x.write32(base + 0x0c, ~channel);
     }
+
     fn arm(ticks: u32) void {
         shutdown();
         x.write32(base + 0x14, ticks);

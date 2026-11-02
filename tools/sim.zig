@@ -4,6 +4,7 @@ const builtin = @import("builtin");
 const sdl = @import("sdl");
 const api = @import("gain_simulator");
 const core = @import("sim_core.zig");
+
 const Allocator = std.mem.Allocator;
 const frame_interval_ms = 1000 / 60;
 
@@ -33,6 +34,7 @@ const Loaded = struct {
         interface.init.?(now());
         return .{ .handle = handle, .interface = interface, .source = path, .temporary = temporary, .allocator = allocator };
     }
+
     fn close(self: *Loaded) void {
         if (self.interface.deinit) |deinit| deinit();
         sdl.SDL_UnloadObject(self.handle);
@@ -40,6 +42,7 @@ const Loaded = struct {
         self.allocator.free(self.source);
         self.allocator.free(self.temporary);
     }
+
     fn replace(self: *Loaded, directory: []const u8, source: ?[]const u8) !void {
         var state: [api.snapshot_capacity]u8 = undefined;
         const preserving_state = source == null and self.interface.save != null;
@@ -55,6 +58,7 @@ const Loaded = struct {
         self.* = candidate;
     }
 };
+
 const Options = struct {
     app: ?[]const u8 = null,
     directory: ?[]const u8 = null,
@@ -62,8 +66,11 @@ const Options = struct {
     watch: bool = false,
     headless: bool = false,
 };
+
 const Geometry = struct { window_width: i32, window_height: i32, render_width: i32, render_height: i32, scale: i32, screen_x: i32, screen_y: i32 };
+
 const Response = struct { id: u64, ok: bool = true, failure: ?[]const u8 = null, geometry: Geometry };
+
 const Host = struct {
     init: std.process.Init,
     directory: [:0]u8,
@@ -89,22 +96,42 @@ const Host = struct {
         var rh: c_int = 0;
         if (!sdl.SDL_GetWindowSize(self.window, &w, &h) or !sdl.SDL_GetRenderOutputSize(self.renderer, &rw, &rh)) return error.WindowGeometry;
         // Minimized or temporarily unavailable drawables must not terminate the app.
-        const v = core.viewport(rw, rh) catch return .{ .window_width = w, .window_height = h, .render_width = rw, .render_height = rh, .scale = 0, .screen_x = 0, .screen_y = 0 };
-        return .{ .window_width = w, .window_height = h, .render_width = rw, .render_height = rh, .scale = v.scale, .screen_x = v.rect.x, .screen_y = v.rect.y };
+        const v = core.viewport(rw, rh) catch return .{
+            .window_width = w,
+            .window_height = h,
+            .render_width = rw,
+            .render_height = rh,
+            .scale = 0,
+            .screen_x = 0,
+            .screen_y = 0,
+        };
+        return .{
+            .window_width = w,
+            .window_height = h,
+            .render_width = rw,
+            .render_height = rh,
+            .scale = v.scale,
+            .screen_x = v.rect.x,
+            .screen_y = v.rect.y,
+        };
     }
+
     fn deliver(self: *Host, input: api.Input, phase: api.Phase, at: u64) void {
         const event = api.Event{ .input = input, .phase = phase };
         if (self.buttons.apply(event)) self.app.interface.input.?(event, at);
     }
+
     fn tap(self: *Host, input: api.Input, at: u64) void {
         if (self.buttons.held & (@as(u16, 1) << @intCast(@backingInt(input))) != 0) return;
         self.deliver(input, .press, at);
         self.deliver(input, .release, at);
     }
+
     fn releaseAll(self: *Host, at: u64) void {
         for (std.enums.values(api.Input)) |input| self.deliver(input, .release, at);
         self.keys = .{};
     }
+
     fn replace(self: *Host, source: ?[]const u8) !void {
         // Failed replacement keeps both the old module and its held-input state.
         try self.app.replace(self.directory, source);
@@ -112,6 +139,7 @@ const Host = struct {
         self.watch = .{ .seen = stamp(self.app.source) };
         self.dirty = true;
     }
+
     fn apply(self: *Host, request: core.Request, pixels: *const api.Pixels) !bool {
         switch (request.op) {
             .input => switch (request.phase) {
@@ -143,6 +171,7 @@ const Host = struct {
         }
         return false;
     }
+
     fn respond(self: *Host, response: Response) !void {
         const bytes = try std.json.Stringify.valueAlloc(self.init.gpa, response, .{});
         errdefer self.init.gpa.free(bytes);
@@ -152,6 +181,7 @@ const Host = struct {
         self.last_response = bytes;
         self.last_id = response.id;
     }
+
     fn command(self: *Host, pixels: *const api.Pixels) !bool {
         const stream = sdl.SDL_IOFromFile(self.request_path, "rb") orelse return false;
         var buffer: [core.max_request_bytes + 1]u8 = undefined;
@@ -177,6 +207,7 @@ const Host = struct {
         try self.respond(.{ .id = request.id, .ok = failure == null, .failure = failure, .geometry = try self.geometry() });
         return quit;
     }
+
     fn draw(self: *Host, pixels: *const api.Pixels) !void {
         const g = try self.geometry();
         if (g.scale == 0) return error.DisplayUnavailable;
@@ -194,6 +225,7 @@ pub fn main(init: std.process.Init) !void {
         return err;
     };
 }
+
 fn run(init: std.process.Init) !void {
     const arena = init.arena.allocator();
     var args = std.process.Args.Iterator.init(init.minimal.args);
@@ -226,7 +258,10 @@ fn run(init: std.process.Init) !void {
     const cwd = try std.process.currentPathAlloc(init.io, arena);
     var random: u64 = undefined;
     init.io.random(std.mem.asBytes(&random));
-    const directory = if (options.directory) |path| try std.fs.path.resolve(arena, &.{ cwd, path }) else try std.fs.path.join(arena, &.{ init.environ_map.get("TMPDIR") orelse "/tmp", try std.fmt.allocPrint(arena, "gain-sim-{x}", .{random}) });
+    const directory = if (options.directory) |path| try std.fs.path.resolve(arena, &.{
+        cwd,
+        path,
+    }) else try std.fs.path.join(arena, &.{ init.environ_map.get("TMPDIR") orelse "/tmp", try std.fmt.allocPrint(arena, "gain-sim-{x}", .{random}) });
     const directory_z = try arena.dupeSentinel(u8, directory, 0);
     // A new directory is an exclusive instance claim. Never share command files.
     try std.Io.Dir.cwd().createDir(init.io, directory, .default_dir);
@@ -256,13 +291,17 @@ fn run(init: std.process.Init) !void {
     std.debug.print("gain-sim control directory: {s}\n", .{directory});
     while (true) {
         const at = now();
-        if (options.watch and host.watch.observe(stamp(host.app.source), at)) host.replace(null) catch |err| std.debug.print("Reload kept current app: {s}\n", .{@errorName(err)});
+        if (options.watch and host.watch.observe(stamp(host.app.source), at)) host.replace(null) catch |err| std.debug.print("Reload kept current app: {s}\n", .{
+            @errorName(err),
+        });
         var event: sdl.SDL_Event = undefined;
         while (sdl.SDL_PollEvent(&event)) switch (event.type) {
             sdl.SDL_EVENT_QUIT => return,
             sdl.SDL_EVENT_KEY_DOWN, sdl.SDL_EVENT_KEY_UP => {
                 if (event.key.key == sdl.SDLK_F5) {
-                    if (event.type == sdl.SDL_EVENT_KEY_DOWN and !event.key.repeat) host.replace(null) catch |err| std.debug.print("Reload kept current app: {s}\n", .{@errorName(err)});
+                    if (event.type == sdl.SDL_EVENT_KEY_DOWN and !event.key.repeat) host.replace(null) catch |err| std.debug.print("Reload kept current app: {s}\n", .{
+                        @errorName(err),
+                    });
                     continue;
                 }
                 if (key(event.key.key)) |input| {
@@ -301,14 +340,17 @@ fn run(init: std.process.Init) !void {
         if (elapsed < frame_interval_ms) sdl.SDL_Delay(@intCast(frame_interval_ms - elapsed));
     }
 }
+
 fn stamp(path: [*:0]const u8) ?core.Stamp {
     var info: sdl.SDL_PathInfo = undefined;
     if (!sdl.SDL_GetPathInfo(path, &info)) return null;
     return .{ .size = info.size, .modified = info.modify_time };
 }
+
 fn now() u64 {
     return sdl.SDL_GetTicksNS() / 1_000_000;
 }
+
 fn dynamicExtension() []const u8 {
     return switch (builtin.os.tag) {
         .macos => ".dylib",
@@ -316,6 +358,7 @@ fn dynamicExtension() []const u8 {
         else => ".so",
     };
 }
+
 fn key(code: sdl.SDL_Keycode) ?api.Input {
     return switch (code) {
         sdl.SDLK_UP, sdl.SDLK_K => .up,
@@ -331,11 +374,13 @@ fn key(code: sdl.SDL_Keycode) ?api.Input {
         else => null,
     };
 }
+
 fn save(path: [*:0]const u8, pixels: *const api.Pixels) !void {
     const surface = sdl.SDL_CreateSurfaceFrom(api.width, api.height, sdl.SDL_PIXELFORMAT_RGB565, @constCast(pixels), api.width * 2) orelse return error.CaptureFailed;
     defer sdl.SDL_DestroySurface(surface);
     if (!sdl.SDL_SaveBMP(surface, path)) return error.CaptureFailed;
 }
+
 fn usage() void {
     std.debug.print("gain-sim --app LIBRARY [--watch] [--control-dir NEW_DIRECTORY] [--headless] [--capture FILE.bmp]\nWheel/Up/Down, Enter/Space, Esc, M, [ ], +/-, P; F5 reloads.\n", .{});
 }

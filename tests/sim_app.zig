@@ -2,15 +2,18 @@
 const std = @import("std");
 const api = @import("gain_simulator");
 const options = @import("sim_fixture");
+
 const State = extern struct { press: u32 = 0, release: u32 = 0, repeat: u32 = 0, last: u32 = 0, held: u32 = 0 };
 var state = State{};
 var dirty = true;
 var last_time: u64 = 0;
+
 fn init(at: u64) callconv(.c) void {
     last_time = at;
     state = .{};
     dirty = true;
 }
+
 fn input(event: api.Event, at: u64) callconv(.c) void {
     std.debug.assert(at >= last_time);
     last_time = at;
@@ -29,6 +32,7 @@ fn input(event: api.Event, at: u64) callconv(.c) void {
     }
     dirty = true;
 }
+
 fn frame(pixels: *api.Pixels, at: u64) callconv(.c) bool {
     std.debug.assert(at >= last_time);
     last_time = at;
@@ -47,12 +51,14 @@ fn frame(pixels: *api.Pixels, at: u64) callconv(.c) bool {
     dirty = false;
     return true;
 }
+
 fn save(out: [*]u8, capacity: usize) callconv(.c) usize {
     if (options.variant == .oversized) return capacity + 1;
     if (capacity < @sizeOf(State)) return 0;
     @memcpy(out[0..@sizeOf(State)], std.mem.asBytes(&state));
     return @sizeOf(State);
 }
+
 fn restore(bytes: [*]const u8, length: usize, at: u64) callconv(.c) bool {
     std.debug.assert(at >= last_time);
     last_time = at;
@@ -62,9 +68,11 @@ fn restore(bytes: [*]const u8, length: usize, at: u64) callconv(.c) bool {
     return true;
 }
 const interface = api.Api{ .version = if (options.variant == .bad_version) 99 else api.abi_version, .init = init, .input = input, .frame = frame, .save = save, .restore = restore, .deinit = deinit };
+
 fn entry() callconv(.c) *const api.Api {
     return &interface;
 }
+
 comptime {
     @export(&entry, .{ .name = if (options.variant == .missing) "missing_entry" else "gain_app_api" });
 }
@@ -72,9 +80,13 @@ comptime {
 // Test-only lifecycle evidence across dlclose: the host must call cleanup on
 // initialized candidates too, including when restore rejects their snapshots.
 extern fn getenv([*:0]const u8) ?[*:0]const u8;
+
 extern fn fopen([*:0]const u8, [*:0]const u8) ?*anyopaque;
+
 extern fn fputc(c_int, *anyopaque) c_int;
+
 extern fn fclose(*anyopaque) c_int;
+
 fn deinit() callconv(.c) void {
     const path = getenv("GAIN_SIM_CLEANUP_LOG") orelse return;
     const file = fopen(path, "ab") orelse return;

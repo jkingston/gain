@@ -3,6 +3,7 @@ const std = @import("std");
 const gain = @import("gain");
 const fixtures = @import("fixtures");
 const checksum = @import("player_pcm_checksum.zig");
+
 var arena: [2 * 1024 * 1024]u8 align(16) = undefined;
 var packet: [65536 + 64]u8 = undefined;
 var page: [65025]u8 = undefined;
@@ -12,13 +13,16 @@ var cache: [65536]u8 = undefined;
 var compressed: [256 * 1024]u8 = undefined;
 var left: [65535]i32 = undefined;
 var right: [65535]i32 = undefined;
+
 const Reader = struct {
     bytes: []const u8,
     position: usize = 0,
+
     pub fn seekTo(self: *Reader, offset: u32) !void {
         if (offset > self.bytes.len) return error.SeekBounds;
         self.position = offset;
     }
+
     pub fn read(self: *Reader, output: []u8) !usize {
         const count = @min(output.len, self.bytes.len - self.position);
         @memcpy(output[0..count], self.bytes[self.position..][0..count]);
@@ -26,13 +30,17 @@ const Reader = struct {
         return count;
     }
 };
+
 const Sink = struct {
     hash: u32 = checksum.initial,
+
     pub fn configure(_: *Sink, _: gain.media_info.Information) !void {}
+
     pub fn push(self: *Sink, input: []const gain.pcm_reservoir.StereoFrame) !void {
         self.hash = checksum.update(self.hash, input);
     }
 };
+
 pub fn main(init: std.process.Init) !void {
     var arguments = std.process.Args.Iterator.init(init.minimal.args);
     _ = arguments.next();

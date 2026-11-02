@@ -12,6 +12,7 @@ import json
 import os
 from pathlib import Path
 import plistlib
+import random
 import struct
 import subprocess
 import tempfile
@@ -21,7 +22,7 @@ from prepare_usb import prepare
 
 ROOT = Path(__file__).resolve().parents[1]
 VENDOR, PRODUCT, SERIAL = 0xA108, 0x1002, "GAIN-F20-V27"
-FIELDS = "magic version stage failure epc state sectors read_bytes written_bytes remounts remount_error loops charge_control usb_power last_command last_flags file_bytes file_checksum file_error playback_polls played_frames playback_stopped bytes_before_grant".split()
+FIELDS = "magic version stage failure epc state sectors read_bytes written_bytes remounts remount_error loops charge_control usb_power last_command last_flags file_bytes file_checksum file_error playback_polls played_frames playback_stopped bytes_before_grant dma_enabled direct_read_bytes direct_written_bytes".split()
 TEST_DIRECTORY = ".gain-usb-check"
 
 
@@ -29,17 +30,21 @@ def checked_status(data):
     if len(data) != 4 * len(FIELDS):
         raise RuntimeError("Wrong USB qualification report length")
     result = dict(zip(FIELDS, struct.unpack(f"<{len(FIELDS)}I", data)))
-    if result["magic"] != 0x55534447 or result["version"] != 3:
+    if result["magic"] != 0x55534447 or result["version"] != 4:
         raise RuntimeError("Not the expected Gain USB qualification build")
     if result["failure"] or result["remount_error"]:
         raise RuntimeError(f"F20 qualification failed: {result}")
     return result
 
 
+_usb_runtime = None
+
+
 class Monitor:
     """Read-only control plus two ACKed lifecycle commands; no interface claim."""
 
     def __init__(self):
+        global _usb_runtime
         library = ctypes.util.find_library("usb-1.0")
         if not library and Path("/opt/homebrew/lib/libusb-1.0.dylib").exists():
             library = "/opt/homebrew/lib/libusb-1.0.dylib"
@@ -61,9 +66,15 @@ class Monitor:
         for name, (arguments, result) in signatures.items():
             function = getattr(self.lib, name)
             function.argtypes, function.restype = arguments, result
-        self.context, self.handle = pointer(), pointer()
-        if self.lib.libusb_init(ctypes.byref(self.context)):
-            raise RuntimeError("libusb initialization failed")
+        # One process-owned context keeps Darwin's hotplug thread alive across
+        # reconnects. libusb_exit on the last context can deadlock during detach.
+        if _usb_runtime is None:
+            context = pointer()
+            if self.lib.libusb_init(ctypes.byref(context)):
+                raise RuntimeError("libusb initialization failed")
+            _usb_runtime = (self.lib, context)
+        self.lib, self.context = _usb_runtime
+        self.handle = pointer()
         devices = ctypes.POINTER(pointer)()
         count = self.lib.libusb_get_device_list(self.context, ctypes.byref(devices))
         try:
@@ -94,9 +105,6 @@ class Monitor:
         if self.handle:
             self.lib.libusb_close(self.handle)
             self.handle = ctypes.c_void_p()
-        if self.context:
-            self.lib.libusb_exit(self.context)
-            self.context = ctypes.c_void_p()
 
     def read(self, request, length):
         buffer = ctypes.create_string_buffer(length)
@@ -199,11 +207,29 @@ def checksum(data):
     return value
 
 
+def remove_test_files(folder):
+    """Remove our payload and its macOS metadata, preserving unexpected files."""
+    if {path.name for path in folder.iterdir()} - {"TRANSFER.BIN", "._TRANSFER.BIN"}:
+        raise RuntimeError("Unexpected files in qualification directory; preserving it")
+    payload = folder / "TRANSFER.BIN"
+    companion = folder / "._TRANSFER.BIN"
+    if payload.is_symlink() or companion.is_symlink():
+        raise RuntimeError("Unexpected symbolic link in qualification directory")
+    if companion.exists():
+        with companion.open("rb") as stream:
+            if stream.read(4) != b"\x00\x05\x16\x07":
+                raise RuntimeError("Unexpected qualification companion; preserving it")
+        companion.unlink()
+    payload.unlink()
+    folder.rmdir()
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--usbboot", default=os.environ.get("GAIN_USBBOOT", "usbboot"))
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--skip-build", action="store_true")
+    parser.add_argument("--transfer-mib", type=int, choices=(1, 16, 64), default=16)
     args = parser.parse_args()
     output = args.output.resolve()
     if output == ROOT or ROOT in output.parents:
@@ -221,13 +247,17 @@ def main():
     try:
         before = wait_for(monitor.status, lambda value: value["state"] == 2)
         evidence["before"] = before
+        if not before["dma_enabled"]:
+            raise RuntimeError("USB DMA was not enabled")
         if not before["playback_stopped"] or not before["played_frames"] or before["bytes_before_grant"]:
             raise RuntimeError("Playback-to-USB ownership handoff was not proved")
         disk, mount = mounted_volume(before["sectors"])
         folder = mount / TEST_DIRECTORY
         folder.mkdir()  # Refuse an existing directory; never reuse user data.
-        payload = bytes(range(256)) * 4096
+        payload = random.Random(0x4741494E).randbytes(args.transfer_mib * 1024 * 1024)
         expected = hashlib.sha256(payload).hexdigest()
+        evidence["transfer_bytes"] = len(payload)
+        evidence["payload_sha256"] = expected
         path = folder / "TRANSFER.BIN"
         began = time.monotonic()
         with path.open("xb") as stream:
@@ -244,6 +274,8 @@ def main():
         subprocess.run(["/usr/sbin/diskutil", "eject", disk], check=True, timeout=30)
         after = wait_for(monitor.status, lambda value: value["state"] == 4 and value["remounts"] > before["remounts"])
         evidence["after_eject"] = after
+        if after["direct_written_bytes"] - before["direct_written_bytes"] < len(payload):
+            raise RuntimeError("Shared-buffer DMA write path was not exercised")
         if after["file_error"] or after["file_bytes"] != len(payload) or after["file_checksum"] != checksum(payload):
             raise RuntimeError("Independent device FAT readback mismatch")
         time.sleep(2)
@@ -257,10 +289,13 @@ def main():
         wait_for(monitor.status, lambda value: value["state"] == 2)
         disk, mount = mounted_volume(before["sectors"])
         path = mount / TEST_DIRECTORY / "TRANSFER.BIN"
+        began = time.monotonic()
         if hashlib.sha256(path.read_bytes()).hexdigest() != expected:
             raise RuntimeError("Fresh host mount readback mismatch")
-        path.unlink()
-        path.parent.rmdir()
+        evidence["read_seconds"] = time.monotonic() - began
+        if monitor.status()["direct_read_bytes"] - after["direct_read_bytes"] < len(payload):
+            raise RuntimeError("Shared-buffer DMA read path was not exercised")
+        remove_test_files(path.parent)
         subprocess.run(["/usr/sbin/diskutil", "eject", disk], check=True, timeout=30)
         final = wait_for(monitor.status, lambda value: value["state"] == 4 and value["remounts"] >= before["remounts"] + 2)
         evidence["final"] = final

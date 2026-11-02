@@ -2,18 +2,23 @@
 //! IDCT decoding; Zig owns input bounds, aspect ratio and area accumulation.
 const std = @import("std");
 const c = @import("c_jpeg");
+
 pub const edge = 112;
 pub const pixel_count = edge * edge;
 pub const sum_words = pixel_count * 4;
+
 pub const Tile = struct { pixels: [pixel_count]u16 = @splat(0), x: u16 = 0, y: u16 = 0, width: u16 = 0, height: u16 = 0 };
+
 pub fn decode(source: anytype, offset: u64, length: u32, sums: []u32, tile: *Tile, observer: anytype) !void {
     if (sums.len < sum_words or offset > source.length or length > source.length - offset) return error.InvalidArtwork;
     const S = @TypeOf(source);
+
     const Feed = struct {
         source: S,
         offset: u64,
         left: u32,
         failure: ?anyerror = null,
+
         fn read(buffer: [*c]u8, size: u8, actual: [*c]u8, context: ?*anyopaque) callconv(.c) u8 {
             const self: *@This() = @ptrCast(@alignCast(context));
             const n = @min(size, self.left);
@@ -28,6 +33,7 @@ pub fn decode(source: anytype, offset: u64, length: u32, sums: []u32, tile: *Til
             return 0;
         }
     };
+
     var feed = Feed{ .source = source, .offset = offset, .left = length };
     var info: c.pjpeg_image_info_t = undefined;
     if (c.pjpeg_decode_init(&info, Feed.read, &feed, 0) != 0) return feed.failure orelse error.UnsupportedArtwork;
@@ -86,17 +92,21 @@ pub fn decode(source: anytype, offset: u64, length: u32, sums: []u32, tile: *Til
 const TestSource = struct {
     bytes: []const u8,
     length: u64,
+
     pub fn read(self: *@This(), offset: u64, out: []u8) !void {
         if (offset > self.bytes.len or out.len > self.bytes.len - offset) return error.Truncated;
         @memcpy(out, self.bytes[@intCast(offset)..][0..out.len]);
     }
 };
+
 const TestObserver = struct {
     cancel: bool = false,
+
     fn cancelled(self: *@This()) bool {
         return self.cancel;
     }
 };
+
 test "JPEG bridge handles MCU sampling modes, reduction, aspect fit and cancellation" {
     const fixtures = [_][]const u8{ @embedFile("testdata/art444.jpg"), @embedFile("testdata/art420.jpg"), @embedFile("testdata/art-reduced.jpg") };
     const sums = try std.testing.allocator.alloc(u32, sum_words);

@@ -40,12 +40,14 @@ const Command = struct {
 const Completion = struct {
     done: u32,
     response_pending: bool,
+
     const Decision = struct {
         failed: bool = false,
         read_response: bool = false,
         acknowledge_response: bool = false,
         complete: bool = false,
     };
+
     fn observe(self: *Completion, flags: u32) Decision {
         if (flags & x1000.Msc0.error_flags != 0) return .{ .failed = true };
         const complete = flags & self.done != 0;
@@ -57,6 +59,7 @@ const Completion = struct {
             .complete = complete,
         };
     }
+
     fn waitMask(self: Completion) u32 {
         return self.done | x1000.Msc0.error_flags | if (self.response_pending) x1000.Msc0.response_end else @as(u32, 0);
     }
@@ -432,6 +435,7 @@ const maximum_transfer_bytes = @as(usize, maximum_blocks_per_command) * sector_b
 const card_status_errors: u32 = 0xfdffe008;
 const card_ready_for_data: u32 = 1 << 8;
 const card_transfer_state: u32 = 4;
+
 fn transferCommand(write: bool, blocks: u16) u8 {
     return if (write) (if (blocks == 1) @as(u8, 24) else 25) else (if (blocks == 1) @as(u8, 17) else 18);
 }
@@ -494,8 +498,10 @@ test "SD response and DMA completion remain correct under coalesced IRQ observat
         try testing.expectEqual(@as(usize, 1), reads);
     };
 }
+
 test "SD errors dominate completion and no-response commands never read the response FIFO" {
     const testing = @import("std").testing;
+
     var state = Completion{ .done = x1000.Msc0.dma_read_done, .response_pending = true };
     const failure = state.observe(x1000.Msc0.dma_read_done | x1000.Msc0.response_end | (1 << 8));
     try testing.expect(failure.failed and !failure.read_response and !failure.complete);
@@ -503,8 +509,10 @@ test "SD errors dominate completion and no-response commands never read the resp
     const complete = state.observe(x1000.Msc0.response_end);
     try testing.expect(complete.complete and !complete.read_response and !complete.acknowledge_response);
 }
+
 test "SD wait mask changes only after consuming a response and always includes errors" {
     const testing = @import("std").testing;
+
     var state = Completion{ .done = x1000.Msc0.dma_read_done, .response_pending = true };
     const before = state.waitMask();
     try testing.expect(!state.observe(0).complete);

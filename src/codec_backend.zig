@@ -6,6 +6,7 @@ const Alac = @import("alac_bridge.zig").Decoder;
 const faad = @import("c_faad");
 const vorbis = @import("c_vorbis");
 const opus = @import("c_opus");
+
 pub const Kind = enum(c_int) { aac, alac, vorbis, opus };
 pub const Error = error{ InvalidFormat, DecoderInit, OutOfMemory, InvalidHeader, DecodeFailed, InvalidOutput };
 
@@ -26,6 +27,7 @@ const Vorbis = struct {
         vorbis.vorbis_info_clear(&self.information);
     }
 };
+
 const State = union(Kind) {
     aac: *anyopaque,
     alac: *Alac,

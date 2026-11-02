@@ -3,12 +3,14 @@
 const std = @import("std");
 const gain = @import("gain");
 const c = @import("c_usb");
+
 const x = gain.soc;
 const usb = gain.usb;
 const report: *volatile Report = @ptrFromInt(0xa0700000);
+
 const Report = extern struct {
     magic: u32 = 0x55534447,
-    version: u32 = 3,
+    version: u32 = 4,
     stage: u32 = 0,
     failure: u32 = 0,
     epc: u32 = 0,
@@ -30,9 +32,34 @@ const Report = extern struct {
     played_frames: u32 = 0,
     playback_stopped: u32 = 0,
     bytes_before_grant: u32 = 0,
+    dma_enabled: u32 = 0,
+    direct_read_bytes: u32 = 0,
+    direct_written_bytes: u32 = 0,
 };
+
+var response: Report = .{};
 const usb_base: usize = 0xb3500000;
-const saved_offsets = [_]u16{ 0x00, 0x08, 0x0c, 0x18, 0x24, 0x28, 0x800, 0x804, 0x810, 0x814, 0x81c, 0x834, 0x900, 0x910, 0x914, 0xb00, 0xb10, 0xb14 };
+const saved_offsets = [_]u16{
+    0x00,
+    0x08,
+    0x0c,
+    0x18,
+    0x24,
+    0x28,
+    0x800,
+    0x804,
+    0x810,
+    0x814,
+    0x81c,
+    0x834,
+    0x900,
+    0x910,
+    0x914,
+    0xb00,
+    0xb10,
+    0xb14,
+};
+
 var saved: [saved_offsets.len]u32 = undefined;
 var saved_valid = false;
 var pending: u8 = 0;
@@ -40,6 +67,7 @@ var ready: u8 = 0;
 var in_player = false;
 var player_started: u32 = 0;
 var acknowledgement: u32 = 0x4741494e;
+
 extern fn rom_return() callconv(.c) noreturn;
 
 fn watchdog(seconds: u32) void {
@@ -51,19 +79,30 @@ fn watchdog(seconds: u32) void {
     x.write32(base + 8, 1);
     x.write32(base + 0x34, 1);
     x.write32(base + 0x10, ~@as(u32, 1));
-    asm volatile ("mfc0 $8, $13; li $9, 0xff7fffff; and $8, $8, $9; mtc0 $8, $13; li $8, 0x20000801; mtc0 $8, $12; ehb" ::: .{ .r8 = true, .r9 = true, .memory = true });
+    asm volatile ("mfc0 $8, $13; li $9, 0xff7fffff; and $8, $8, $9; mtc0 $8, $13; li $8, 0x20000801; mtc0 $8, $12; ehb" ::: .{
+            .r8 = true,
+            .r9 = true,
+            .memory = true,
+        });
 }
+
 fn watchdogStop() void {
     asm volatile ("di; ehb");
     x.write32(0xb2000038, 1);
     x.write32(0xb2000010, 1);
     x.write32(0xb200000c, ~@as(u32, 1));
 }
+
 fn returnRom() noreturn {
     watchdogStop();
     if (saved_valid) {
         x.write32(usb_base + 0x804, x.read32(usb_base + 0x804) | 2);
         x.write32(usb_base + 8, 0);
+        usb.resetForRom() catch {
+            // Never release DMA memory while the controller is still active.
+            x.Watchdog.start(.external, .by_1024, 1024);
+            while (true) asm volatile ("nop");
+        };
         for (saved_offsets, saved) |offset, value| if (offset != 0x804 and offset != 8) {
             x.write32(usb_base + offset, value);
         };
@@ -75,6 +114,7 @@ fn returnRom() noreturn {
     }
     rom_return();
 }
+
 export fn gain_x1000_dispatch(frame: *gain.runtime.Context, entry: u32, cause: u32) callconv(.c) *gain.runtime.Context {
     if (in_player) {
         if (x.Timer.elapsed(player_started) > x.Timer.milliseconds(20_000)) exception_panic(0xdead, frame.epc, 0);
@@ -82,9 +122,11 @@ export fn gain_x1000_dispatch(frame: *gain.runtime.Context, entry: u32, cause: u
     }
     exception_panic(cause, frame.epc, 0);
 }
+
 export fn player_check_fault(cause: u32, epc: u32) callconv(.c) noreturn {
     exception_panic(cause, epc, 0);
 }
+
 export fn exception_panic(cause: u32, epc: u32, _: u32) callconv(.c) noreturn {
     report.failure = cause;
     report.epc = epc;
@@ -92,6 +134,7 @@ export fn exception_panic(cause: u32, epc: u32, _: u32) callconv(.c) noreturn {
     returnRom();
 }
 pub const panic = std.debug.FullPanic(panicHandler);
+
 fn panicHandler(_: []const u8, address: ?usize) noreturn {
     exception_panic(0x50414e49, @truncate(address orelse 0), 0);
 }
@@ -104,7 +147,10 @@ export fn tud_vendor_control_xfer_cb(rhport: u8, stage: u8, request: ?*const c.t
         pending = 0;
         if (bytes[0] != 0xc0 or std.mem.readInt(u16, bytes[2..4], .little) != 0 or std.mem.readInt(u16, bytes[4..6], .little) != 0) return false;
         const length = std.mem.readInt(u16, bytes[6..8], .little);
-        if (bytes[1] == 0x5a and length > 0) return c.tud_control_xfer(rhport, request, @ptrCast(@volatileCast(report)), @sizeOf(Report));
+        if (bytes[1] == 0x5a and length > 0) {
+            response = report.*;
+            return c.tud_control_xfer(rhport, request, &response, @sizeOf(Report));
+        }
         if (length != 4 or (bytes[1] != 0x5b and bytes[1] != 0x5f) or !usb.session().playerAllowed()) return false;
         pending = bytes[1];
         return c.tud_control_xfer(rhport, request, &acknowledgement, 4);
@@ -115,6 +161,7 @@ export fn tud_vendor_control_xfer_cb(rhport: u8, stage: u8, request: ?*const c.t
     }
     return true;
 }
+
 export fn player_check_main() callconv(.c) void {
     report.* = .{};
     x.Timer.initialize();
@@ -122,7 +169,10 @@ export fn player_check_main() callconv(.c) void {
     saved_valid = true;
     watchdog(20);
     report.stage = 1;
-    var card = gain.storage.Controller.initialize(.{ .descriptor = @ptrFromInt(gain.memory.sd_control.uncached()), .switch_status = @ptrFromInt(gain.memory.sd_control.uncached() + 0x100) }) catch |err| {
+    var card = gain.storage.Controller.initialize(.{
+        .descriptor = @ptrFromInt(gain.memory.sd_control.uncached()),
+        .switch_status = @ptrFromInt(gain.memory.sd_control.uncached() + 0x100),
+    }) catch |err| {
         report.failure = @intFromError(err);
         returnRom();
     };
@@ -131,6 +181,7 @@ export fn player_check_main() callconv(.c) void {
         report.failure = @intFromError(err);
         returnRom();
     };
+
     var pmic = gain.power.initialize() catch |err| {
         report.failure = @intFromError(err);
         returnRom();
@@ -153,6 +204,7 @@ export fn player_check_main() callconv(.c) void {
                 report.remount_error = @intFromError(err);
                 returnRom();
             };
+
             var volume = Volume.mount(&card, scratch) catch |err| {
                 report.remount_error = @intFromError(err);
                 returnRom();
@@ -169,6 +221,9 @@ export fn player_check_main() callconv(.c) void {
         report.state = @backingInt(usb.session().state);
         report.read_bytes = @truncate(usb.counters().reads);
         report.written_bytes = @truncate(usb.counters().writes);
+        report.dma_enabled = @intFromBool(usb.dmaEnabled());
+        report.direct_read_bytes = @truncate(usb.counters().direct_reads);
+        report.direct_written_bytes = @truncate(usb.counters().direct_writes);
         report.last_command = card.last_command;
         report.last_flags = card.last_flags;
         const action = ready;
@@ -194,25 +249,37 @@ fn verifyFile(volume: *gain.storage.fat32.Volume(gain.storage.Controller)) !void
         var directory = try volume.iterate(try folder.directory());
         while (try directory.next()) |file| {
             if (!std.mem.eql(u8, file.name(), "TRANSFER.BIN")) continue;
-            if (file.size > 1024 * 1024) return error.UnexpectedFileSize;
+            if (file.size > 64 * 1024 * 1024) return error.UnexpectedFileSize;
             var reader = try volume.reader(try file.file());
-            const bytes = gain.memory.storage_burst.uncachedSlice(u8)[0..4096];
-            var checksum: u32 = 2166136261;
-            var total: u32 = 0;
-            while (true) {
-                const count = try reader.read(bytes);
-                if (count == 0) break;
-                for (bytes[0..count]) |byte| checksum = (checksum ^ byte) *% 16777619;
-                total += @intCast(count);
-            }
-            report.file_bytes = total;
-            report.file_checksum = checksum;
+            const bytes = gain.memory.storage_burst.uncachedSlice(u8)[0..32768];
+            const cached = gain.memory.decoder_cache.cachedSlice(u8)[0..bytes.len];
+            var observer = struct {
+                began: u32,
+                heartbeat: u32,
+
+                pub fn poll(self: *@This(), progress: u32) !void {
+                    if (x.Timer.elapsed(self.began) > x.Timer.milliseconds(120_000)) return error.VerifyTimeout;
+                    if (x.Timer.elapsed(self.heartbeat) >= x.Timer.milliseconds(1000)) {
+                        watchdog(20);
+                        self.heartbeat = x.Timer.now();
+                    }
+                    report.stage = 4;
+                    report.state = @backingInt(usb.session().state);
+                    report.file_bytes = progress;
+                    // Host access remains refused while the native mount owns SD.
+                    usb.poll();
+                }
+            }{ .began = x.Timer.now(), .heartbeat = x.Timer.now() };
+            const result = try @import("usb_verify.zig").verify(&reader, bytes, cached, file.size, &observer);
+            report.file_bytes = result.bytes;
+            report.file_checksum = result.checksum;
             return;
         }
     }
 }
 
 const Volume = gain.storage.fat32.Volume(gain.storage.Controller);
+
 fn firstTrack(volume: *Volume, directory: gain.storage.fat32.Directory, depth: usize) anyerror!?gain.storage.fat32.DirectoryEntry {
     if (depth == 7) return null;
     var iterator = try volume.iterate(directory);
@@ -224,6 +291,7 @@ fn firstTrack(volume: *Volume, directory: gain.storage.fat32.Directory, depth: u
     }
     return null;
 }
+
 fn playbackPoll(_: *anyopaque, status: gain.media.PlaybackStatus) gain.media.PlaybackCommand {
     report.playback_polls += 1;
     report.played_frames = @truncate(status.played_frames);
@@ -232,6 +300,7 @@ fn playbackPoll(_: *anyopaque, status: gain.media.PlaybackStatus) gain.media.Pla
     if (status.phase == .playing and status.played_frames >= status.sample_rate / 4) usb.poll();
     return if (usb.needsHandoff()) .stop else .none;
 }
+
 fn checkPlaybackHandoff(card: *gain.storage.Controller) !void {
     watchdogStop();
     var volume = try Volume.mount(card, @ptrFromInt(gain.memory.filesystem_sector.uncached()));
@@ -240,7 +309,10 @@ fn checkPlaybackHandoff(card: *gain.storage.Controller) !void {
     var context: u32 = 0;
     player_started = x.Timer.now();
     in_player = true;
-    const result = gain.player.playFile(&reader, entry.size, card, .{ .attenuation = 128, .measure_stacks = true }, .{ .context = &context, .poll = playbackPoll }) catch |err| {
+    const result = gain.player.playFile(&reader, entry.size, card, .{
+        .attenuation = 128,
+        .measure_stacks = true,
+    }, .{ .context = &context, .poll = playbackPoll }) catch |err| {
         in_player = false;
         return err;
     };

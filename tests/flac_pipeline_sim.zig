@@ -1,5 +1,6 @@
 const std = @import("std");
 const f20 = @import("f20");
+
 const fat32 = f20.storage.fat32;
 const flac_pcm = f20.flac_pcm;
 const pcm = f20.pcm;
@@ -259,6 +260,7 @@ fn write32(bytes: []u8, offset: usize, value: u32) void {
 test "FLAC output periods combine coding blocks and pad short tracks without dropping samples" {
     const Reader = struct {
         position: usize = 0,
+
         pub fn read(self: *@This(), output: []u8) !usize {
             const count = @min(output.len, encoded.len - self.position);
             @memcpy(output[0..count], encoded[self.position..][0..count]);
@@ -266,6 +268,7 @@ test "FLAC output periods combine coding blocks and pad short tracks without dro
             return count;
         }
     };
+
     var reader = Reader{};
     var compressed: [7416]u8 = undefined;
     var left: [4096]i32 = undefined;

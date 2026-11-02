@@ -1,15 +1,19 @@
 //! Scanline projection and conservative F20 region scheduling; no MMIO.
 const std = @import("std");
+
 const clock = struct {
     const tick_period = 6_000;
+
     fn before(a: u32, b: u32) bool {
         return @as(i32, @bitCast(a -% b)) < 0;
     }
 };
+
 pub const Sample = struct { began: u32, ended: u32, line: u32 };
 pub const maximum_read_ticks = 300; // 50 us; retry a sample preempted by audio.
 pub const prepare_lead = 18_000; // 3 ms covers audio preemption plus wrap rendering.
 pub const target_line = 160; // Beyond the central 108..131 animation lane.
+
 pub const Config = struct {
     period: u32,
     lines: u32,
@@ -88,6 +92,7 @@ fn blockedRows(rect: @import("presentation.zig").Region) [244]bool {
     }
     return blocked;
 }
+
 pub fn safeLines(rect: @import("presentation.zig").Region, target: u32) u32 {
     if (target >= 244) return 0;
     const blocked = blockedRows(rect);
@@ -95,6 +100,7 @@ pub fn safeLines(rect: @import("presentation.zig").Region, target: u32) u32 {
     while (distance < 244 and !blocked[(target + distance) % 244]) distance += 1;
     return distance;
 }
+
 pub fn regionTarget(rect: @import("presentation.zig").Region, period: u32, previous: u32) !u32 {
     try (Config{ .period = period, .lines = 244 }).validate();
     if (previous >= 244) return error.PanelPhase;
@@ -128,12 +134,14 @@ pub fn regionTarget(rect: @import("presentation.zig").Region, period: u32, previ
 }
 
 pub const Launch = enum { wait, commit, retarget };
+
 /// Cooperative callers must re-sample a missed deadline, never issue a late
 /// transfer into a region which scanout may already have reached.
 pub fn launchAt(now: u32, deadline: u32) Launch {
     if (clock.before(now, deadline)) return .wait;
     return if (now -% deadline <= 120) .commit else .retarget;
 }
+
 test "late decode cannot launch a prepared surface into the scan beam" {
     for ([_]u32{ 1000, 0xfffffff0 }) |deadline| {
         try std.testing.expectEqual(Launch.wait, launchAt(deadline -% 1, deadline));
@@ -143,9 +151,15 @@ test "late decode cannot launch a prepared surface into the scan beam" {
         try std.testing.expectEqual(Launch.retarget, launchAt(deadline +% (49 * 6000), deadline));
     }
 }
+
 test "every player damage region reserves bus drain and a scanline guard" {
     const Region = @import("presentation.zig").Region;
-    for ([_]Region{ .{ .x = 275, .y = 7, .width = 18, .height = 7 }, .{ .x = 0, .y = 180, .width = 320, .height = 42 }, .{ .x = 7, .y = 59, .width = 306, .height = 23 } }) |region| {
+    for ([_]Region{ .{
+        .x = 275,
+        .y = 7,
+        .width = 18,
+        .height = 7,
+    }, .{ .x = 0, .y = 180, .width = 320, .height = 42 }, .{ .x = 7, .y = 59, .width = 306, .height = 23 } }) |region| {
         for (0..244) |previous| {
             const target = try regionTarget(region, 87480, @intCast(previous));
             const required = region.pixels() * 2 + 6600;

@@ -1,23 +1,33 @@
 //! Portable catalogue and reconciliation policy. No filesystem, clock, decoder or UI dependency.
 const std = @import("std");
+
 const A = std.mem.Allocator;
+
 pub const Mode = enum { quick, verify };
+
 pub const Kind = enum { audio, directory, playlist, artwork };
+
 pub const Stamp = struct {
     size: u64 = 0,
     modified: i64 = 0,
     device: u64 = 0,
     inode: u64 = 0,
+
     pub fn same(a: Stamp, b: Stamp) bool {
         return a.size == b.size and a.modified == b.modified and a.device == b.device and a.inode == b.inode;
     }
+
     pub fn identity(a: Stamp, b: Stamp) bool {
         return a.inode != 0 and a.device == b.device and a.inode == b.inode;
     }
 };
+
 pub const Entry = struct { path: []const u8, kind: Kind, stamp: Stamp = .{} };
+
 pub const Enumeration = struct { source: u64, entries: []const Entry };
+
 pub const Gain = struct { track_db: ?f64 = null, album_db: ?f64 = null, track_peak: ?f64 = null, album_peak: ?f64 = null };
+
 pub const Metadata = struct {
     title: []const u8 = "",
     artist: []const u8 = "",
@@ -45,7 +55,9 @@ pub const Metadata = struct {
     artist_from_context: bool = false,
     album_artist_from_context: bool = false,
 };
+
 pub const Track = struct { id: u64, path: []const u8, stamp: Stamp, meta: Metadata, album_index: u32 = 0, error_name: []const u8 = "" };
+
 pub const Artwork = struct {
     recipe: []const u8 = "",
     source: []const u8 = "",
@@ -58,10 +70,23 @@ pub const Artwork = struct {
     height: u16 = 112,
     error_name: []const u8 = "",
 };
-pub const Album = struct { id: u64, key: []const u8, title: []const u8, artist: []const u8, directory: []const u8, tracks: []const u32, art: Artwork = .{} };
+
+pub const Album = struct {
+    id: u64,
+    key: []const u8,
+    title: []const u8,
+    artist: []const u8,
+    directory: []const u8,
+    tracks: []const u32,
+    art: Artwork = .{},
+};
+
 pub const Artist = struct { name: []const u8, albums: []const u32 };
+
 pub const PlaylistItem = struct { track_id: u64 = 0, path: []const u8, missing: bool = false };
+
 pub const Playlist = struct { path: []const u8, name: []const u8, items: []const PlaylistItem };
+
 pub const Stats = struct {
     candidates: u32 = 0,
     visited: u32 = 0,
@@ -75,6 +100,7 @@ pub const Stats = struct {
     art_prepared: u32 = 0,
     art_reused: u32 = 0,
 };
+
 pub const Catalog = struct {
     version: u32 = 1,
     source: u64 = 0,
@@ -85,31 +111,39 @@ pub const Catalog = struct {
     artists: []const Artist = &.{},
     playlists: []const Playlist = &.{},
     stats: Stats = .{},
+
     pub fn trackById(self: *const Catalog, id: u64) ?usize {
         for (self.tracks, 0..) |track, i| if (track.id == id) return i;
         return null;
     }
+
     pub fn albumById(self: *const Catalog, id: u64) ?usize {
         for (self.albums, 0..) |album, i| if (album.id == id) return i;
         return null;
     }
 };
+
 pub const Owned = struct {
     arena: std.heap.ArenaAllocator,
     value: Catalog,
+
     pub fn deinit(self: *Owned) void {
         self.arena.deinit();
     }
+
     pub fn bytes(self: *const Owned) usize {
         return self.arena.queryCapacity();
     }
 };
+
 pub fn hash(value: []const u8) u64 {
     return std.hash.Wyhash.hash(0x4741494e, value);
 }
+
 pub fn text(a: A, value: []const u8) ![]const u8 {
     return a.dupe(u8, value);
 }
+
 pub fn clone(a: A, value: anytype) !@TypeOf(value) {
     const T = @TypeOf(value);
     switch (@typeInfo(T)) {
@@ -127,6 +161,7 @@ pub fn clone(a: A, value: anytype) !@TypeOf(value) {
         else => return value,
     }
 }
+
 fn equalMeta(left: Metadata, right: Metadata) bool {
     inline for (@typeInfo(Metadata).@"struct".field_names) |name| {
         const l = @field(left, name);
@@ -137,6 +172,7 @@ fn equalMeta(left: Metadata, right: Metadata) bool {
     }
     return true;
 }
+
 fn fallback(a: A, path: []const u8, meta: *Metadata) !void {
     if (meta.title.len == 0 or meta.title_from_file) {
         meta.title = try text(a, std.fs.path.stem(path));
@@ -150,6 +186,7 @@ fn fallback(a: A, path: []const u8, meta: *Metadata) !void {
     if (meta.album_artist_from_context) meta.album_artist = if (meta.compilation) "Various Artists" else meta.artist;
     if (meta.disc == 0) meta.disc = 1;
 }
+
 pub fn editionRoot(path: []const u8) []const u8 {
     const directory = std.fs.path.dirname(path) orelse "";
     const leaf = std.fs.path.basename(directory);
@@ -162,6 +199,7 @@ pub fn editionRoot(path: []const u8) []const u8 {
     }
     return directory;
 }
+
 pub fn lessText(left: []const u8, right: []const u8) bool {
     var l: usize = 0;
     var r: usize = 0;
@@ -191,11 +229,13 @@ pub fn lessText(left: []const u8, right: []const u8) bool {
     if (l != left.len or r != right.len) return l == left.len;
     return std.mem.order(u8, left, right) == .lt;
 }
+
 fn albumLess(_: void, left: Album, right: Album) bool {
     if (!std.ascii.eqlIgnoreCase(left.artist, right.artist)) return lessText(left.artist, right.artist);
     if (!std.ascii.eqlIgnoreCase(left.title, right.title)) return lessText(left.title, right.title);
     return std.mem.order(u8, left.key, right.key) == .lt;
 }
+
 fn trackLess(tracks: []const Track, left: u32, right: u32) bool {
     const a = tracks[left];
     const b = tracks[right];
@@ -209,6 +249,7 @@ fn trackLess(tracks: []const Track, left: u32, right: u32) bool {
 pub fn scan(allocator: A, backend: anytype, previous: *const Catalog, mode: Mode, observer: anytype) !Owned {
     return scanWithScratch(allocator, allocator, backend, previous, mode, observer);
 }
+
 /// Temporary maps/arrays can use memory released before playback; retained
 /// strings and records stay in the returned catalogue's owning arena.
 pub fn scanWithScratch(allocator: A, scratch: A, backend: anytype, previous: *const Catalog, mode: Mode, observer: anytype) !Owned {
@@ -224,7 +265,9 @@ pub fn scanWithScratch(allocator: A, scratch: A, backend: anytype, previous: *co
     var old_paths = std.StringHashMap(usize).init(scratch);
     defer old_paths.deinit();
     if (same_source) for (previous.tracks, 0..) |track, index| try old_paths.put(track.path, index);
+
     const FileId = struct { device: u64, inode: u64 };
+
     const Match = struct { index: usize, ambiguous: bool = false };
     var old_files = std.AutoHashMap(FileId, Match).init(scratch);
     defer old_files.deinit();
@@ -237,6 +280,7 @@ pub fn scanWithScratch(allocator: A, scratch: A, backend: anytype, previous: *co
             if (match.found_existing) match.value_ptr.ambiguous = true else match.value_ptr.* = .{ .index = index };
         }
     };
+
     const seen = try a.alloc(bool, previous.tracks.len);
     @memset(seen, false);
 
@@ -270,7 +314,12 @@ pub fn scanWithScratch(allocator: A, scratch: A, backend: anytype, previous: *co
             try fallback(a, entry.path, &track.meta);
             result.stats.reused += 1;
         } else {
-            track = .{ .id = if (old) |value| value.id else hash(entry.path) ^ enumeration.source, .path = entry.path, .stamp = entry.stamp, .meta = .{} };
+            track = .{
+                .id = if (old) |value| value.id else hash(entry.path) ^ enumeration.source,
+                .path = entry.path,
+                .stamp = entry.stamp,
+                .meta = .{},
+            };
             if (old == null) {
                 while (track.id == 0 or reserved_ids.contains(track.id)) track.id = std.hash.Wyhash.hash(track.id +% 1, std.mem.asBytes(&result.generation));
                 try reserved_ids.put(track.id, {});
@@ -298,6 +347,7 @@ pub fn scanWithScratch(allocator: A, scratch: A, backend: anytype, previous: *co
     };
     result.tracks = track_storage[0..track_count];
     const mutable_tracks: []Track = @constCast(result.tracks);
+
     // One conservative context per directory, built in linear time. Missing tags
     // inherit only unanimous album fields; mixed folders keep explicit editions.
     const Hint = struct { meta: Metadata, ambiguous: bool = false };
@@ -339,13 +389,25 @@ pub fn scanWithScratch(allocator: A, scratch: A, backend: anytype, previous: *co
     defer scratch.free(key_buffer);
     for (result.tracks, 0..) |track, index| {
         const directory = editionRoot(track.path);
-        const key = try std.fmt.bufPrint(key_buffer, "{s}\x1f{s}\x1f{s}\x1f{s}", .{ track.meta.release_id, track.meta.album_artist, track.meta.album, directory });
+        const key = try std.fmt.bufPrint(key_buffer, "{s}\x1f{s}\x1f{s}\x1f{s}", .{
+            track.meta.release_id,
+            track.meta.album_artist,
+            track.meta.album,
+            directory,
+        });
         const group = try groups.getOrPut(key);
         if (!group.found_existing) {
             const owned_key = try text(a, key);
             group.key_ptr.* = owned_key;
             group.value_ptr.* = albums.items.len;
-            try albums.append(scratch, .{ .id = hash(key) ^ result.source, .key = owned_key, .title = track.meta.album, .artist = track.meta.album_artist, .directory = directory, .tracks = &.{} });
+            try albums.append(scratch, .{
+                .id = hash(key) ^ result.source,
+                .key = owned_key,
+                .title = track.meta.album,
+                .artist = track.meta.album_artist,
+                .directory = directory,
+                .tracks = &.{},
+            });
             try members.append(scratch, .empty);
         }
         try members.items[group.value_ptr.*].append(scratch, @intCast(index));
@@ -412,6 +474,7 @@ pub fn playlistPath(a: A, playlist: []const u8, value: []const u8) !?[]const u8 
     for (normalized) |*byte| if (byte.* == '\\') {
         byte.* = '/';
     };
+
     const resolved = try std.fs.path.resolvePosix(a, &.{ "/", std.fs.path.dirname(playlist) orelse "", normalized });
     return if (std.mem.startsWith(u8, resolved, "/")) resolved[1..] else resolved;
 }

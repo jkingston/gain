@@ -3,16 +3,20 @@
 const std = @import("std");
 const catalog = @import("library.zig");
 const tags = @import("mp4_tags.zig");
+
 const A = std.mem.Allocator;
+
 fn number(text: []const u8) u32 {
     var parts = std.mem.tokenizeAny(u8, text, "/ ");
     return std.fmt.parseInt(u32, parts.next() orelse "", 10) catch 0;
 }
+
 fn gain(text: []const u8) ?f64 {
     var parts = std.mem.tokenizeAny(u8, text, " dB");
     const value = std.fmt.parseFloat(f64, parts.next() orelse "") catch return null;
     return if (std.math.isFinite(value)) value else null;
 }
+
 pub fn extract(a: A, source: anytype, extension: []const u8) !catalog.Metadata {
     if (std.ascii.eqlIgnoreCase(extension, ".m4a") or std.ascii.eqlIgnoreCase(extension, ".m4b") or std.ascii.eqlIgnoreCase(extension, ".mp4")) {
         const info = try @import("mp4.zig").parse(source);
@@ -20,7 +24,28 @@ pub fn extract(a: A, source: anytype, extension: []const u8) !catalog.Metadata {
         if (summary.truncated != 0) return error.LongMetadata;
         var fields: [16][]const u8 = undefined;
         for (&fields, 0..) |*field, i| field.* = summary.values[i][0..summary.lengths[i]];
-        return .{ .title = try catalog.text(a, fields[0]), .artist = try catalog.text(a, fields[1]), .album = try catalog.text(a, fields[2]), .album_artist = try catalog.text(a, fields[3]), .date = try catalog.text(a, fields[4]), .genre = try catalog.text(a, fields[5]), .track = number(fields[6]), .disc = number(fields[7]), .release_id = try catalog.text(a, fields[8]), .sort_artist = try catalog.text(a, fields[13]), .sort_album_artist = try catalog.text(a, fields[14]), .compilation = number(fields[15]) != 0, .codec = @tagName(info.kind), .duration_ms = if (info.rate == 0) 0 else info.frames * 1000 / info.rate, .sample_rate = info.rate, .channels = info.channels, .bits = info.bits, .embedded_art = summary.art_count != 0, .tag_digest = try catalog.text(a, &std.fmt.bytesToHex(&summary.tag_digest, .lower)), .gain = .{ .track_db = gain(fields[9]), .album_db = gain(fields[10]), .track_peak = gain(fields[11]), .album_peak = gain(fields[12]) } };
+        return .{
+            .title = try catalog.text(a, fields[0]),
+            .artist = try catalog.text(a, fields[1]),
+            .album = try catalog.text(a, fields[2]),
+            .album_artist = try catalog.text(a, fields[3]),
+            .date = try catalog.text(a, fields[4]),
+            .genre = try catalog.text(a, fields[5]),
+            .track = number(fields[6]),
+            .disc = number(fields[7]),
+            .release_id = try catalog.text(a, fields[8]),
+            .sort_artist = try catalog.text(a, fields[13]),
+            .sort_album_artist = try catalog.text(a, fields[14]),
+            .compilation = number(fields[15]) != 0,
+            .codec = @tagName(info.kind),
+            .duration_ms = if (info.rate == 0) 0 else info.frames * 1000 / info.rate,
+            .sample_rate = info.rate,
+            .channels = info.channels,
+            .bits = info.bits,
+            .embedded_art = summary.art_count != 0,
+            .tag_digest = try catalog.text(a, &std.fmt.bytesToHex(&summary.tag_digest, .lower)),
+            .gain = .{ .track_db = gain(fields[9]), .album_db = gain(fields[10]), .track_peak = gain(fields[11]), .album_peak = gain(fields[12]) },
+        };
     }
     var magic: [4]u8 = undefined;
     try source.read(0, &magic);
@@ -67,6 +92,7 @@ pub fn extract(a: A, source: anytype, extension: []const u8) !catalog.Metadata {
     // tag extraction; decoding support is independent of this metadata layer.
     return result;
 }
+
 pub fn hashRange(source: anytype, at: u64, length: u64, state: *std.crypto.hash.Blake3) !void {
     var bytes: [4096]u8 = undefined;
     var done: u64 = 0;
@@ -77,6 +103,7 @@ pub fn hashRange(source: anytype, at: u64, length: u64, state: *std.crypto.hash.
         done += n;
     }
 }
+
 fn comments(a: A, source: anytype, at: u64, length: u32, result: *catalog.Metadata) !void {
     const end = at + length;
     if (length < 8) return error.BadComments;
@@ -98,7 +125,21 @@ fn comments(a: A, source: anytype, at: u64, length: u32, result: *catalog.Metada
         try source.read(cursor, prefix[0..n]);
         if (std.mem.indexOfScalar(u8, prefix[0..n], '=')) |separator| {
             const key = prefix[0..separator];
-            const keys = [_][]const u8{ "TITLE", "ARTIST", "ALBUM", "ALBUMARTIST", "DATE", "GENRE", "TRACKNUMBER", "DISCNUMBER", "MUSICBRAINZ_ALBUMID", "REPLAYGAIN_TRACK_GAIN", "REPLAYGAIN_ALBUM_GAIN", "REPLAYGAIN_TRACK_PEAK", "REPLAYGAIN_ALBUM_PEAK" };
+            const keys = [_][]const u8{
+                "TITLE",
+                "ARTIST",
+                "ALBUM",
+                "ALBUMARTIST",
+                "DATE",
+                "GENRE",
+                "TRACKNUMBER",
+                "DISCNUMBER",
+                "MUSICBRAINZ_ALBUMID",
+                "REPLAYGAIN_TRACK_GAIN",
+                "REPLAYGAIN_ALBUM_GAIN",
+                "REPLAYGAIN_TRACK_PEAK",
+                "REPLAYGAIN_ALBUM_PEAK",
+            };
             for (keys, 0..) |candidate, index| {
                 if (std.ascii.eqlIgnoreCase(key, candidate)) {
                     const bytes = size - @as(u32, @intCast(separator)) - 1;
@@ -131,6 +172,7 @@ fn comments(a: A, source: anytype, at: u64, length: u32, result: *catalog.Metada
 }
 
 pub const PictureRange = struct { offset: u64, length: u32 };
+
 /// Locate image bytes without loading the image or FLAC picture strings.
 pub fn embeddedPicture(source: anytype) !?PictureRange {
     var magic: [4]u8 = undefined;
@@ -173,19 +215,23 @@ pub fn embeddedPicture(source: anytype) !?PictureRange {
     }
     return error.MetadataBudget;
 }
+
 const TestSource = struct {
     bytes: []const u8,
     length: u64,
+
     pub fn read(self: *@This(), at: u64, out: []u8) !void {
         if (at > self.length or out.len > self.length - at) return error.Truncated;
         @memcpy(out, self.bytes[@intCast(at)..][0..out.len]);
     }
+
     pub fn int(self: *@This(), comptime T: type, at: u64, comptime endian: std.builtin.Endian) !T {
         var out: [@sizeOf(T)]u8 = undefined;
         try self.read(at, &out);
         return std.mem.readInt(T, &out, endian);
     }
 };
+
 test "FLAC picture ranges are bounded and do not include picture metadata" {
     var bytes: [43]u8 = @splat(0);
     @memcpy(bytes[0..4], "fLaC");

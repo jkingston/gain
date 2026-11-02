@@ -184,6 +184,7 @@ pub fn Decoder(comptime Reader: type) type {
                     return error.CompressedBufferTooSmall,
                 else => return failure,
             };
+
             const remaining = self.compressed_bytes - decoded.bytes_consumed;
             std.mem.copyForwards(
                 u8,
@@ -514,9 +515,11 @@ fn crc16(input: []const u8) u16 {
 fn readBe16(input: *const [2]u8) u16 {
     return (@as(u16, input[0]) << 8) | input[1];
 }
+
 fn readBe24(input: *const [3]u8) u24 {
     return (@as(u24, input[0]) << 16) | (@as(u24, input[1]) << 8) | input[2];
 }
+
 fn readBe64(input: *const [8]u8) u64 {
     var value: u64 = 0;
     for (input) |byte| value = (value << 8) | byte;

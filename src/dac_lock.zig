@@ -1,15 +1,19 @@
 //! Cooperative DAC lock acquisition: never sleep across audio DMA periods.
 const std = @import("std");
+
 pub const State = struct {
     pending: bool = false,
     started: u32 = 0,
     polled: u32 = 0,
+
     pub fn begin(self: *State, now: u32) void {
         self.* = .{ .pending = true, .started = now, .polled = now };
     }
+
     pub fn due(self: State, now: u32, interval: u32) bool {
         return self.pending and now -% self.polled >= interval;
     }
+
     pub fn observe(self: *State, now: u32, locked: bool, timeout: u32) error{DacLockTimeout}!bool {
         self.polled = now;
         if (locked) {
@@ -20,11 +24,13 @@ pub const State = struct {
         return false;
     }
 };
+
 /// stop_div is 1024 edges on revision V at <=96 kHz; revision W and >96 kHz
 /// require 16384 edges (ESS v3.7 register 10). Zero is the conservative setting.
 pub fn stopDivider(rate: u32, revision_v: bool) u4 {
     return if (revision_v and rate <= 96000) 15 else 0;
 }
+
 test "slow and high-rate acquisition services every period while waiting through timer wrap" {
     for ([_]u32{ 8000, 11025, 44100, 48000, 96000, 176400, 192000 }) |rate| {
         for ([_]bool{ false, true }) |revision_v| {
@@ -53,6 +59,7 @@ test "slow and high-rate acquisition services every period while waiting through
         }
     }
 }
+
 test "lock observation precedes timeout but missing lock remains muted" {
     var state = State{};
     state.begin(100);

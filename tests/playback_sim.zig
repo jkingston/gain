@@ -323,6 +323,7 @@ test "exhaustive bounded refill schedules remain safe" {
         .chunks = 8,
         .fifo_frames = 16,
     };
+
     const choices = [_]u16{ 0, 15, 31, 47 };
     var schedules: u32 = 0;
     for (choices) |a| for (choices) |b| for (choices) |c| for (choices) |d| for (choices) |e| {
@@ -349,6 +350,7 @@ test "refill beyond the ring deadline fails deterministically" {
         .chunks = 4,
         .fifo_frames = 8,
     };
+
     var plan = LatencyPlan.constant(0);
     plan.count = 4;
     plan.values[2] = 64;
@@ -369,6 +371,7 @@ test "measured F20 refill latency has a wide deterministic margin" {
         .chunks = 480,
         .fifo_frames = 64,
     };
+
     const measured_worst_case_frames = 193; // 24,014 timer ticks at 48 kHz.
     for (std.enums.values(TieOrder)) |order| {
         const metrics = try expectPass(simulate(

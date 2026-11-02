@@ -22,6 +22,7 @@ const maximum_i32 = 0x7fff_ffff;
 
 test "restore linear prediction" {
     const std = @import("std");
+
     var samples = [_]i32{ 2, 5, 0, 0 };
     try restore(&samples, 2, &.{ 2, -1 }, 0);
     try std.testing.expectEqualSlices(i32, &.{ 2, 5, 8, 11 }, &samples);
@@ -29,6 +30,7 @@ test "restore linear prediction" {
 
 test "reject reconstructed sample overflow" {
     const std = @import("std");
+
     var samples = [_]i32{ maximum_i32, 1 };
     try std.testing.expectError(error.InvalidSubframe, restore(&samples, 1, &.{1}, 0));
 }

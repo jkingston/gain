@@ -1,5 +1,6 @@
 const wav = @import("wav.zig");
 const sample = @import("pcm_sample.zig");
+
 pub const Sample = sample;
 
 pub const Error = error{
@@ -129,6 +130,7 @@ pub fn Stream(comptime Reader: type) type {
                 .end = self.remaining_frames == 0,
             };
         }
+
         fn convert(self: *Self, output: []u8, frames: usize) !void {
             // Bounded scratch also handles float64 stereo (16 source bytes per
             // frame) without aliasing a smaller DMA output buffer.
@@ -185,8 +187,10 @@ const maximum_u32: u64 = 0xffff_ffff;
 
 test "unaligned DMA destination fallback preserves samples, padding and canaries" {
     const std = @import("std");
+
     const Reader = struct {
         position: usize = 0,
+
         pub fn read(self: *@This(), output: []u8) !usize {
             const source = [_]u8{ 0, 0, 0x80, 0xff, 0xff, 0x7f, 1, 2, 3, 4, 5, 6 };
             const count = @min(output.len, source.len - self.position);
@@ -195,6 +199,7 @@ test "unaligned DMA destination fallback preserves samples, padding and canaries
             return count;
         }
     };
+
     var first = Reader{};
     var second = Reader{};
     const plan = try Plan.fromFormat(48000, 2, .{ .bytes = 3, .valid_bits = 24 }, 2);

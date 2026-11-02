@@ -1,17 +1,22 @@
 //! Values shared by the decoder, playback session and presentation layer.
 const pcm = @import("pcm.zig");
+
 pub const Kind = enum { wave, aiff, flac, mp3, aac, alac, vorbis, opus };
+
 pub const Text = struct {
     bytes: [128]u8 = @splat(0),
     length: usize = 0,
+
     pub fn set(self: *Text, value: []const u8) void {
         self.length = @min(value.len, self.bytes.len);
         @memcpy(self.bytes[0..self.length], value[0..self.length]);
     }
+
     pub fn slice(self: *const Text) []const u8 {
         return self.bytes[0..self.length];
     }
 };
+
 pub const Information = struct {
     kind: Kind,
     sample_rate: u32,

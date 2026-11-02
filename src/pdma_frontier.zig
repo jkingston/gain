@@ -1,8 +1,11 @@
 //! X1000 linked-DMA observation. CDOA is a descriptor offset, not a
 //! completion counter. Validate it against DSA before releasing any buffer.
 const std = @import("std");
+
 pub const Error = error{InvalidDescriptorOffset};
+
 pub const Sample = struct { link_before: u8, source: u32, link_after: u8 };
+
 /// Return the descriptor at the completion frontier. A source at the end of
 /// the old buffer and a source inside the newly fetched buffer describe the
 /// same frontier. A changing link is retried without acknowledging the event.
@@ -29,13 +32,16 @@ pub fn observe(sample: Sample, descriptor_count: u8, buffers: []const u32, chunk
     // is never completion evidence; the caller retries a bounded sample.
     return null;
 }
+
 pub const Cursor = struct {
     frontier: u7 = 0,
     unresolved_since: ?u32 = null,
+
     pub fn unresolved(self: *Cursor, now: u32, timeout: u32) error{DmaObservationTimeout}!void {
         if (self.unresolved_since == null) self.unresolved_since = now;
         if (now -% self.unresolved_since.? >= timeout) return error.DmaObservationTimeout;
     }
+
     pub fn update(self: *Cursor, next: u7) ?u7 {
         self.unresolved_since = null;
         if (next == self.frontier) return null;
@@ -43,7 +49,9 @@ pub const Cursor = struct {
         return next;
     }
 };
+
 const physical_mask: u32 = 0x1fffffff;
+
 test "completion and descriptor-fetch windows produce one frontier, including 120-link wrap" {
     const addresses = [_]u32{ 0xa0100000, 0xa0180000, 0xa0200000 };
     var cursor = Cursor{};
@@ -55,15 +63,29 @@ test "completion and descriptor-fetch windows produce one frontier, including 12
         const before = (try observe(.{ .link_before = successor * 2, .source = source + 256, .link_after = successor * 2 }, 120, &addresses, 1024)).?;
         try std.testing.expectEqual(@as(u7, @intCast(active)), before);
         try std.testing.expect(cursor.update(before) == null);
-        const complete = (try observe(.{ .link_before = successor * 2, .source = source + 1024, .link_after = successor * 2 }, 120, &addresses, 1024)).?;
+        const complete = (try observe(.{
+            .link_before = successor * 2,
+            .source = source + 1024,
+            .link_after = successor * 2,
+        }, 120, &addresses, 1024)).?;
         try std.testing.expectEqual(@as(?u7, @intCast(successor)), cursor.update(complete));
-        const fetched = (try observe(.{ .link_before = after * 2, .source = addresses[successor % 3] + 256, .link_after = after * 2 }, 120, &addresses, 1024)).?;
+        const fetched = (try observe(.{
+            .link_before = after * 2,
+            .source = addresses[successor % 3] + 256,
+            .link_after = after * 2,
+        }, 120, &addresses, 1024)).?;
         try std.testing.expect(cursor.update(fetched) == null);
-        try std.testing.expect((try observe(.{ .link_before = successor * 2, .source = addresses[successor % 3], .link_after = after * 2 }, 120, &addresses, 1024)) == null);
+        try std.testing.expect((try observe(.{
+            .link_before = successor * 2,
+            .source = addresses[successor % 3],
+            .link_after = after * 2,
+        }, 120, &addresses, 1024)) == null);
     }
 }
+
 test "captured delayed polling trace no longer double counts copied links 13 and 14" {
     const playback = @import("playback.zig");
+
     const addresses = [_]u32{ 0xa0100000, 0xa0180000, 0xa0200000 };
     var state = try playback.State.init(.{ .buffer_count = 3, .descriptor_count = 120, .total_chunks = 40 });
     // Captured sequence after volume I2C: CDOA 13 while 11 complete, then
@@ -77,7 +99,11 @@ test "captured delayed polling trace no longer double counts copied links 13 and
     const links = [_]u8{ 13, 14, 14, 15 };
     for (links) |link| {
         const active = link - 1;
-        const frontier = (try observe(.{ .link_before = link * 2, .source = addresses[active % 3] + 256, .link_after = link * 2 }, 120, &addresses, 131072)).?;
+        const frontier = (try observe(.{
+            .link_before = link * 2,
+            .source = addresses[active % 3] + 256,
+            .link_after = link * 2,
+        }, 120, &addresses, 131072)).?;
         if (cursor.update(frontier)) |next| {
             const count = try state.completionsTo(next);
             for (0..count) |_| {
@@ -88,11 +114,20 @@ test "captured delayed polling trace no longer double counts copied links 13 and
     }
     try std.testing.expectEqual(@as(u32, 14), state.chunks_completed);
 }
+
 test "invalid or incoherent DMA snapshots never release memory" {
     const addresses = [_]u32{ 0xa0100000, 0xa0180000, 0xa0200000 };
     try std.testing.expect((try observe(.{ .link_before = 2, .source = 0xdeadbeef, .link_after = 2 }, 120, &addresses, 1024)) == null);
-    try std.testing.expectError(error.InvalidDescriptorOffset, observe(.{ .link_before = 3, .source = 0x100000, .link_after = 3 }, 120, &addresses, 1024));
-    try std.testing.expectError(error.InvalidDescriptorOffset, observe(.{ .link_before = 240, .source = 0x100000, .link_after = 240 }, 120, &addresses, 1024));
+    try std.testing.expectError(error.InvalidDescriptorOffset, observe(.{
+        .link_before = 3,
+        .source = 0x100000,
+        .link_after = 3,
+    }, 120, &addresses, 1024));
+    try std.testing.expectError(error.InvalidDescriptorOffset, observe(.{
+        .link_before = 240,
+        .source = 0x100000,
+        .link_after = 240,
+    }, 120, &addresses, 1024));
 }
 
 test "an incoherent source times out across wrap rather than keeping playback alive forever" {

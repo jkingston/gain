@@ -1,5 +1,6 @@
 //! AXP192 protocol and telemetry. No board rail voltages are changed here.
 const std = @import("std");
+
 pub const Register = enum(u8) {
     power_status = 0,
     charge_status = 1,
@@ -16,13 +17,16 @@ pub const Register = enum(u8) {
     gpio1_function = 0x92,
     gpio_state = 0x94,
 };
+
 pub const Jacks = struct {
     headphone: bool,
     line: bool,
+
     pub fn fromRegister(value: u8) Jacks {
         return .{ .headphone = value & 0x10 == 0, .line = value & 0x20 == 0 };
     }
 };
+
 pub const PowerStatus = struct {
     ac_present: bool,
     usb_present: bool,
@@ -30,10 +34,19 @@ pub const PowerStatus = struct {
     battery_present: bool,
     charging: bool,
     over_temperature: bool,
+
     pub fn decode(power: u8, charge: u8) PowerStatus {
-        return .{ .ac_present = power & 0x80 != 0, .usb_present = power & 0x20 != 0, .usb_usable = power & 0x10 != 0, .battery_present = charge & 0x20 != 0, .charging = charge & 0x40 != 0, .over_temperature = charge & 0x80 != 0 };
+        return .{
+            .ac_present = power & 0x80 != 0,
+            .usb_present = power & 0x20 != 0,
+            .usb_usable = power & 0x10 != 0,
+            .battery_present = charge & 0x20 != 0,
+            .charging = charge & 0x40 != 0,
+            .over_temperature = charge & 0x80 != 0,
+        };
     }
 };
+
 pub const Telemetry = struct {
     status: PowerStatus,
     battery_mv: ?u16 = null,
@@ -42,6 +55,7 @@ pub const Telemetry = struct {
     discharge_microamps: ?u32 = null,
     jacks: Jacks,
 };
+
 pub const Error = error{ UnsupportedDevice, UnstableAdc, VerificationMismatch, JackInputsNotConfigured };
 const charge_currents_ma = [_]u16{ 100, 190, 280, 360, 450, 550, 630, 700, 780, 880, 960, 1000, 1080, 1160, 1240, 1320 };
 
@@ -51,12 +65,15 @@ pub fn Device(comptime Bus: type) type {
         bus: Bus,
         address: u7,
         jack_inputs_configured: bool = false,
+
         pub fn init(bus: Bus, address: u7) Self {
             return .{ .bus = bus, .address = address };
         }
+
         pub fn identify(self: *Self) !void {
             if (try self.read(.identity) != 3) return error.UnsupportedDevice;
         }
+
         pub fn configureJackInputs(self: *Self) !void {
             self.jack_inputs_configured = false;
             // Only GPIO0/1 function bits; never touch GPIO2 or rail controls.
@@ -64,13 +81,16 @@ pub fn Device(comptime Bus: type) type {
             try self.modify(.gpio1_function, 7, 1);
             self.jack_inputs_configured = true;
         }
+
         pub fn jacks(self: *Self) !Jacks {
             if (!self.jack_inputs_configured) return error.JackInputsNotConfigured;
             return Jacks.fromRegister(try self.read(.gpio_state));
         }
+
         pub fn powerStatus(self: *Self) !PowerStatus {
             return PowerStatus.decode(try self.read(.power_status), try self.read(.charge_status));
         }
+
         pub fn telemetry(self: *Self) !Telemetry {
             const enabled = try self.read(.adc_enable);
             var result = Telemetry{ .status = try self.powerStatus(), .jacks = try self.jacks() };
@@ -82,6 +102,7 @@ pub fn Device(comptime Bus: type) type {
             }
             return result;
         }
+
         /// Can only lower the existing current setting. Charging enable,
         /// target voltage and termination controls are preserved exactly.
         /// USB input negotiation and total system current are separate policies.
@@ -96,14 +117,17 @@ pub fn Device(comptime Bus: type) type {
             }
             if (next != old) try self.write(.charge_control, next);
         }
+
         pub fn shutdown(self: *Self) !void {
             // Read-modify-write preserves battery detection and LED policy.
             const old = try self.read(.shutdown);
             try self.bus.writeRegister(self.address, @backingInt(Register.shutdown), old | 0x80);
         }
+
         pub fn read(self: *Self, register: Register) !u8 {
             return self.bus.readRegister(self.address, @backingInt(register));
         }
+
         fn adc(self: *Self, high_register: Register, low_bits: u3) !u16 {
             const high_index = @backingInt(high_register);
             for (0..3) |_| {
@@ -114,9 +138,11 @@ pub fn Device(comptime Bus: type) type {
             }
             return error.UnstableAdc;
         }
+
         fn modify(self: *Self, register: Register, mask: u8, value: u8) !void {
             try self.write(register, ((try self.read(register)) & ~mask) | (value & mask));
         }
+
         fn write(self: *Self, register: Register, value: u8) !void {
             try self.bus.writeRegister(self.address, @backingInt(register), value);
             if (try self.read(register) != value) return error.VerificationMismatch;
@@ -130,6 +156,7 @@ pub const JackDebounce = struct {
     candidate: ?Jacks = null,
     stable: ?Jacks = null,
     since: u32 = 0,
+
     pub fn update(self: *JackDebounce, now: u32, sample: ?Jacks, settle: u32) ?Jacks {
         const value = sample orelse {
             self.candidate = null;
@@ -151,6 +178,7 @@ const Fake = struct {
     fail_register: ?u8 = null,
     rollover: bool = false,
     high_reads: u8 = 0,
+
     pub fn readRegister(self: *Fake, address: u7, reg: u8) !u8 {
         std.debug.assert(address == 0x34);
         if (self.fail_register == reg) return error.NoAcknowledge;
@@ -160,6 +188,7 @@ const Fake = struct {
         }
         return self.registers[reg];
     }
+
     pub fn writeRegister(self: *Fake, address: u7, reg: u8, value: u8) !void {
         std.debug.assert(address == 0x34);
         if (self.fail_register == reg) return error.NoAcknowledge;
@@ -167,6 +196,7 @@ const Fake = struct {
         self.writes += 1;
     }
 };
+
 test "telemetry uses correct ADC widths, units, enables and jack input modes" {
     var bus = Fake{};
     bus.registers[3] = 3;
@@ -196,6 +226,7 @@ test "telemetry uses correct ADC widths, units, enables and jack input modes" {
     const disabled = try device.telemetry();
     try std.testing.expect(disabled.battery_mv == null and disabled.charge_microamps == null);
 }
+
 test "all jack combinations and debounce wrap bounce and I2C failure" {
     for (0..4) |bits| {
         const state = Jacks.fromRegister(@as(u8, @intCast(bits)) << 4);
@@ -210,6 +241,7 @@ test "all jack combinations and debounce wrap bounce and I2C failure" {
     try std.testing.expectEqual(hp, debounce.update(0x11, .{ .headphone = false, .line = false }, 32).?);
     try std.testing.expect(debounce.update(0x12, null, 32) == null);
 }
+
 test "unstable ADC and communication failures never become plausible zero readings" {
     var bus = Fake{};
     var device = Device(*Fake).init(&bus, 0x34);
@@ -221,6 +253,7 @@ test "unstable ADC and communication failures never become plausible zero readin
     bus.fail_register = 0x79;
     try std.testing.expectError(error.NoAcknowledge, device.telemetry());
 }
+
 test "charge limiter preserves voltage, termination and enable and never raises current" {
     for (0..256) |value| for ([_]u16{ 0, 99, 100, 189, 500, 780, 1320, 65535 }) |limit| {
         var bus = Fake{};

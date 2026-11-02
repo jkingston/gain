@@ -201,6 +201,7 @@ pub const State = struct {
 
 test "coalesced descriptor notifications catch up within the buffer margin" {
     const testing = @import("std").testing;
+
     var state = try State.init(.{
         .buffer_count = 3,
         .descriptor_count = 12,

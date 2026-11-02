@@ -2,10 +2,13 @@
 const std = @import("std");
 const executive = @import("executive.zig");
 pub const Context = @import("task_context.zig").Context;
+
 pub const Task = executive.Task;
+
 pub const Operation = enum(u32) { reschedule, wait, stop, retire };
 pub const no_deadline = std.math.maxInt(u64);
 const instruction_bytes = 4;
+
 pub const Scheduler = struct {
     policy: executive.Executive = .{},
     contexts: [executive.task_count + 1]Context = @splat(.{}),
@@ -33,6 +36,7 @@ pub const Scheduler = struct {
             self.entered = true;
         }
     }
+
     /// An unchanged selection returns the live frame, never an older snapshot.
     pub fn select(self: *Scheduler, frame: *Context) *Context {
         if (!self.running) {
@@ -58,6 +62,7 @@ pub const Scheduler = struct {
         return incoming;
     }
 };
+
 fn request(operation: Operation, events: u32, deadline: ?u64) Context {
     var frame = Context{};
     frame.registers_1_to_25[3] = @backingInt(operation);
@@ -67,6 +72,7 @@ fn request(operation: Operation, events: u32, deadline: ?u64) Context {
     frame.registers_1_to_25[6] = @truncate(ticks >> 32);
     return frame;
 }
+
 test "start wait preempt and stop restore the interrupted caller" {
     var scheduler = Scheduler{};
     scheduler.policy.start(.output);
@@ -100,6 +106,7 @@ test "start wait preempt and stop restore the interrupted caller" {
     try std.testing.expectEqual(caller.floating_control, returned.floating_control);
     try std.testing.expectEqual(caller.floating_registers[31], returned.floating_registers[31]);
 }
+
 test "same-task interrupts preserve newly written registers" {
     var scheduler = Scheduler{ .current = .codec };
     scheduler.policy.start(.codec);
@@ -109,6 +116,7 @@ test "same-task interrupts preserve newly written registers" {
     try std.testing.expect(scheduler.select(&frame) == &frame);
     try std.testing.expectEqual(@as(u32, 0x11223344), scheduler.select(&frame).floating_registers[15]);
 }
+
 test "64-bit sleep deadlines survive the syscall ABI" {
     var scheduler = Scheduler{ .current = .storage };
     scheduler.policy.start(.storage);
@@ -119,6 +127,7 @@ test "64-bit sleep deadlines survive the syscall ABI" {
     scheduler.policy.notify(.storage, 0x80000000);
     try std.testing.expectEqual(Task.storage, scheduler.policy.select());
 }
+
 test "unknown traps and idle waits leave frames and policy unchanged" {
     var scheduler = Scheduler{};
     var frame = request(.wait, 1, null);

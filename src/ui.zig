@@ -107,6 +107,7 @@ pub const Surface = struct {
             .center => rect.x +| @as(i32, (rect.width -| width) / 2),
             .end => rect.x +| @as(i32, rect.width -| width),
         };
+
         var x = origin_x;
         for (value) |character| {
             if (x >= @min(@as(i32, screen_width), rect.x +| rect.width)) break;
@@ -361,6 +362,7 @@ pub fn slide(previous: *const Ui, next: *const Ui, pixels: *[pixel_count]Color, 
     renderTranslated(previous, pixels, -@as(i32, bounded));
     renderTranslated(next, pixels, @intCast(screen_width - bounded));
 }
+
 fn renderTranslated(scene: *const Ui, pixels: *[pixel_count]Color, dx: i32) void {
     const surface = Surface{ .pixels = pixels };
     for (scene.commands[0..scene.command_count]) |command| switch (command) {

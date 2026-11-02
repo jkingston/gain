@@ -1,6 +1,7 @@
 //! ES9018K2M register protocol, independent of the I2C controller and board.
 //! ESS datasheet v3.7 (2021-04-22), registers 1, 6, 7, 10-16, 21 and 64-69.
 const std = @import("std");
+
 pub const Register = enum(u8) {
     input = 1,
     volume_control = 6,
@@ -13,23 +14,31 @@ pub const Register = enum(u8) {
     status = 64,
     ratio_low = 66,
 };
+
 pub const Filter = enum(u2) { fast, slow, minimum_phase };
+
 pub const Deemphasis = enum { off, hz_32_000, hz_44_100, hz_48_000 };
+
 pub const Status = struct {
     raw: u8,
+
     pub fn supported(self: Status) bool {
         return self.raw & 0x1c == 0x10;
     }
+
     pub fn locked(self: Status) bool {
         return self.raw & 1 != 0;
     }
+
     pub fn automuted(self: Status) bool {
         return self.raw & 2 != 0;
     }
+
     pub fn revision(self: Status) enum { v, w } {
         return if (self.raw & 0x20 != 0) .v else .w;
     }
 };
+
 pub const Config = struct {
     left_attenuation: u8 = 16,
     right_attenuation: u8 = 16,
@@ -39,6 +48,7 @@ pub const Config = struct {
     stop_divider: u4 = 15,
     muted: bool = false,
 };
+
 pub const Error = error{ UnsupportedDevice, VerificationMismatch, NotConfigured, MustBeMuted, UnsupportedDeemphasisRate };
 
 /// Bus implements readRegister(address, register) and writeRegister(...).
@@ -59,9 +69,11 @@ pub fn Device(comptime Bus: type) type {
         pub fn init(bus: Bus, address: u7) Self {
             return .{ .bus = bus, .address = address };
         }
+
         pub fn status(self: *Self) !Status {
             return .{ .raw = try self.read(.status) };
         }
+
         pub fn configure(self: *Self, config: Config) !Status {
             const previously_configured = self.configured;
             self.configured = false;
@@ -93,6 +105,7 @@ pub fn Device(comptime Bus: type) type {
             if (!config.muted) try self.setMute(false);
             return identity;
         }
+
         pub fn setMute(self: *Self, muted: bool) !void {
             try self.ready();
             errdefer self.fault();
@@ -101,6 +114,7 @@ pub fn Device(comptime Bus: type) type {
             self.general = next;
             self.muted = muted;
         }
+
         /// Half-decibel attenuation, 0..127.5 dB; no PCM samples are changed.
         pub fn setVolume(self: *Self, left: u8, right: u8) !void {
             try self.ready();
@@ -108,6 +122,7 @@ pub fn Device(comptime Bus: type) type {
             try self.write(.left_volume, left);
             try self.write(.right_volume, right);
         }
+
         pub fn setFilter(self: *Self, filter: Filter) !void {
             try self.readyMuted();
             errdefer self.fault();
@@ -115,6 +130,7 @@ pub fn Device(comptime Bus: type) type {
             try self.write(.general, next);
             self.general = next;
         }
+
         /// IIR bypass is distinct from FIR/NOS bypass. External 8x oversampling
         /// is not supplied by this firmware, so register 21 bit 0 stays clear.
         pub fn setIirBypass(self: *Self, bypass: bool) !void {
@@ -124,6 +140,7 @@ pub fn Device(comptime Bus: type) type {
             try self.write(.filter_bypass, next);
             self.bypass = next;
         }
+
         pub fn setDeemphasis(self: *Self, mode: Deemphasis, sample_rate: u32) !void {
             try self.readyMuted();
             const selector: u8 = switch (mode) {
@@ -137,6 +154,7 @@ pub fn Device(comptime Bus: type) type {
             try self.write(.volume_control, next);
             self.volume_control = next;
         }
+
         /// Reading 66 first latches all four ratio bytes until 69 is read.
         pub fn measuredSampleRate(self: *Self, master_clock_hz: u32) !u32 {
             try self.ready();
@@ -147,20 +165,25 @@ pub fn Device(comptime Bus: type) type {
             }
             return @intCast((@as(u64, ratio) * master_clock_hz + (1 << 31)) >> 32);
         }
+
         fn ready(self: *Self) Error!void {
             if (!self.configured) return error.NotConfigured;
         }
+
         fn readyMuted(self: *Self) Error!void {
             try self.ready();
             if (!self.muted) return error.MustBeMuted;
         }
+
         fn read(self: *Self, register: Register) !u8 {
             return self.bus.readRegister(self.address, @backingInt(register));
         }
+
         fn write(self: *Self, register: Register, value: u8) !void {
             try self.bus.writeRegister(self.address, @backingInt(register), value);
             if (try self.read(register) != value) return error.VerificationMismatch;
         }
+
         fn fault(self: *Self) void {
             self.configured = false;
             self.muted = true;
@@ -178,6 +201,7 @@ const Fake = struct {
     corrupt_read: ?u8 = null,
     read_order: [128]u8 = undefined,
     read_count: usize = 0,
+
     pub fn readRegister(self: *Fake, address: u7, register: u8) !u8 {
         std.debug.assert(address == 0x48);
         self.calls += 1;
@@ -188,6 +212,7 @@ const Fake = struct {
         }
         return self.registers[register] ^ @as(u8, if (self.corrupt_read == register) 1 else 0);
     }
+
     pub fn writeRegister(self: *Fake, address: u7, register: u8, value: u8) !void {
         std.debug.assert(address == 0x48);
         self.calls += 1;
@@ -195,6 +220,7 @@ const Fake = struct {
         self.registers[register] = value;
         self.writes += 1;
     }
+
     fn init() Fake {
         var result = Fake{};
         result.registers[64] = 0x31;
@@ -203,6 +229,7 @@ const Fake = struct {
         return result;
     }
 };
+
 test "actual identity, reserved bits, filter selection and FIR safety" {
     var bus = Fake.init();
     var device = Device(*Fake).init(&bus, 0x48);
@@ -226,6 +253,7 @@ test "actual identity, reserved bits, filter selection and FIR safety" {
     try device.setVolume(64, 68);
     try std.testing.expect(bus.registers[15] == 64 and bus.registers[16] == 68);
 }
+
 test "wrong identity never causes a configuration write" {
     var bus = Fake.init();
     bus.registers[64] = 0xff;
@@ -233,6 +261,7 @@ test "wrong identity never causes a configuration write" {
     try std.testing.expectError(error.UnsupportedDevice, device.configure(.{}));
     try std.testing.expectEqual(@as(usize, 0), bus.writes);
 }
+
 test "every configuration communication failure prevents use and attempts mute" {
     var baseline = Fake.init();
     var good = Device(*Fake).init(&baseline, 0x48);
@@ -246,6 +275,7 @@ test "every configuration communication failure prevents use and attempts mute" 
         if (at > 1) try std.testing.expect(bus.registers[7] & 3 == 3);
     }
 }
+
 test "partial stereo write and verification failure fail closed" {
     var bus = Fake.init();
     var device = Device(*Fake).init(&bus, 0x48);
@@ -260,6 +290,7 @@ test "partial stereo write and verification failure fail closed" {
     try std.testing.expectError(error.VerificationMismatch, device.setVolume(64, 64));
     try std.testing.expect(!device.configured and device.muted);
 }
+
 test "sample ratio is read in latched order" {
     var bus = Fake.init();
     var device = Device(*Fake).init(&bus, 0x48);

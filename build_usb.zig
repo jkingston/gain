@@ -1,7 +1,8 @@
 const std = @import("std");
+
 pub fn add(b: *std.Build, module: *std.Build.Module, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, native: bool) *std.Build.Module {
     const files = b.addWriteFiles();
-    const config = files.add("tusb_config.h",
+    const config = files.add("tusb_config.h", b.fmt(
         \\#pragma once
         \\#define CFG_TUSB_MCU OPT_MCU_NONE
         \\#define CFG_TUSB_OS OPT_OS_NONE
@@ -11,12 +12,13 @@ pub fn add(b: *std.Build, module: *std.Build.Module, target: std.Build.ResolvedT
         \\#define TUP_USBIP_DWC2 1
         \\#define TUP_DCD_ENDPOINT_MAX 9
         \\#define TUP_RHPORT_HIGHSPEED 1
-        \\#define CFG_TUD_DWC2_DMA_ENABLE 0
-        \\#define CFG_TUD_DWC2_SLAVE_ENABLE 1
+        \\#define CFG_TUD_DWC2_DMA_ENABLE {d}
+        \\#define CFG_TUD_DWC2_SLAVE_ENABLE {d}
         \\#define CFG_TUD_MSC 1
-        \\#define CFG_TUD_MSC_EP_BUFSIZE 4096
+        \\#define CFG_TUD_MSC_EP_BUFSIZE 32768
+        \\#define CFG_TUSB_MEM_SECTION {s}
         \\#define CFG_TUSB_MEM_ALIGN __attribute__((aligned(32)))
-    );
+    , .{ @intFromBool(native), @intFromBool(!native), if (native) "__attribute__((section(\".usb_dma\")))" else "" }));
     _ = files.add("gain_dwc2_port.h",
         \\#define DWC2_EP_MAX 9
         \\extern const dwc2_controller_t _dwc2_controller[1];
@@ -39,9 +41,20 @@ pub fn add(b: *std.Build, module: *std.Build.Module, target: std.Build.ResolvedT
     core.addIncludePath(config.dirname());
     core.addIncludePath(b.path("vendor/tinyusb/src"));
     if (native) core.addIncludePath(b.path("src/codecs/include/native"));
-    const flags: []const []const u8 = if (native) &.{ "-std=c11", "-fno-builtin", "-mno-abicalls", "-fno-pic" } else &.{ "-std=c11", "-U__ARM_FEATURE_UNALIGNED", "-D__ARM_FEATURE_UNALIGNED=0" };
-    for ([_][]const u8{ "src/tusb.c", "src/common/tusb_fifo.c", "src/device/usbd.c", "src/class/msc/msc_device.c" }) |source| core.addCSourceFile(.{ .file = b.path(b.fmt("vendor/tinyusb/{s}", .{source})), .flags = flags });
-    if (native) for ([_][]const u8{ "dcd_dwc2.c", "dwc2_common.c" }) |source| core.addCSourceFile(.{ .file = b.path(b.fmt("vendor/tinyusb/src/portable/synopsys/dwc2/{s}", .{source})), .flags = flags });
+    const flags: []const []const u8 = if (native) &.{
+        "-std=c11",
+        "-fno-builtin",
+        "-mno-abicalls",
+        "-fno-pic",
+    } else &.{ "-std=c11", "-U__ARM_FEATURE_UNALIGNED", "-D__ARM_FEATURE_UNALIGNED=0" };
+    for ([_][]const u8{ "src/tusb.c", "src/common/tusb_fifo.c", "src/device/usbd.c", "src/class/msc/msc_device.c" }) |source| core.addCSourceFile(.{
+        .file = b.path(b.fmt("vendor/tinyusb/{s}", .{source})),
+        .flags = flags,
+    });
+    if (native) for ([_][]const u8{ "dcd_dwc2.c", "dwc2_common.c" }) |source| core.addCSourceFile(.{
+        .file = b.path(b.fmt("vendor/tinyusb/src/portable/synopsys/dwc2/{s}", .{source})),
+        .flags = flags,
+    });
     module.linkLibrary(b.addLibrary(.{ .name = if (native) "gain-usb" else "gain-usb-test", .linkage = .static, .root_module = core }));
     return api_module;
 }

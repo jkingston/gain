@@ -3,6 +3,7 @@
 //! memory primitives and libm dependencies. Hardware startup is intentionally
 //! absent: physical qualification uses the separate RAM benchmark harness.
 const gain = @import("gain");
+
 const Frame = gain.pcm_reservoir.StereoFrame;
 const memory = gain.memory;
 const packet: *[65536 + 64]u8 = @ptrFromInt(memory.compressed_ring.cached());
@@ -14,13 +15,16 @@ const compressed: *[256 * 1024]u8 = @ptrFromInt(memory.flac_compressed.cached())
 const left: *[65535]i32 = @ptrFromInt(memory.flac_left.cached());
 const right: *[65535]i32 = @ptrFromInt(memory.flac_right.cached());
 const report: *volatile [3]u32 = @ptrFromInt(0xa0700000);
+
 const Reader = struct {
     bytes: []const u8,
     position: usize = 0,
+
     pub fn seekTo(self: *Reader, target: u32) !void {
         if (target > self.bytes.len) return error.SeekBounds;
         self.position = target;
     }
+
     pub fn read(self: *Reader, out: []u8) !usize {
         const count = @min(out.len, self.bytes.len - self.position);
         @memcpy(out[0..count], self.bytes[self.position..][0..count]);
@@ -28,14 +32,17 @@ const Reader = struct {
         return count;
     }
 };
+
 const Sink = struct {
     pub fn configure(_: *Sink, info: gain.media_info.Information) !void {
         report[1] = info.sample_rate;
     }
+
     pub fn push(_: *Sink, input: []const Frame) !void {
         for (input) |frame| report[2] = report[2] +% @as(u32, @bitCast(frame.left)) +% @as(u32, @bitCast(frame.right));
     }
 };
+
 export fn _start() callconv(.c) noreturn {
     const length = report[0];
     var reader = Reader{ .bytes = @as([*]const u8, @ptrFromInt(memory.compressed_ring.uncached() + 0x40000))[0..@min(length, 1024 * 1024)] };

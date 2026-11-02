@@ -1,5 +1,6 @@
 const std = @import("std");
 const core = @import("library");
+
 const Fake = struct {
     entries: []const core.Entry,
     fail: bool = false,
@@ -11,25 +12,40 @@ const Fake = struct {
     metadata_error: bool = false,
     missing_leaf: []const u8 = "",
     other_leaf: []const u8 = "",
+
     pub fn enumerate(self: *@This(), a: std.mem.Allocator) !core.Enumeration {
         if (self.fail) return error.Disconnected;
         return .{ .source = self.source, .entries = try core.clone(a, self.entries) };
     }
+
     pub fn metadata(self: *@This(), a: std.mem.Allocator, entry: core.Entry) !core.Metadata {
         self.calls += 1;
         if (self.metadata_error) return error.CorruptTags;
         if (std.mem.eql(u8, std.fs.path.basename(entry.path), self.missing_leaf)) return .{};
-        return .{ .title = try core.text(a, self.title), .artist = "Artist", .album_artist = "Artist", .album = try core.text(a, if (std.mem.eql(u8, std.fs.path.basename(entry.path), self.other_leaf)) "Other Album" else self.album) };
+        return .{
+            .title = try core.text(a, self.title),
+            .artist = "Artist",
+            .album_artist = "Artist",
+            .album = try core.text(a, if (std.mem.eql(u8, std.fs.path.basename(entry.path), self.other_leaf)) "Other Album" else self.album),
+        };
     }
+
     pub fn artwork(self: *@This(), a: std.mem.Allocator, _: core.Album, _: []const core.Track, _: []const core.Entry, _: ?core.Artwork, _: core.Mode) !core.Artwork {
         return .{ .key = try core.text(a, self.cover) };
     }
+
     pub fn playlist(_: *@This(), _: std.mem.Allocator, _: []const u8, _: []const core.Track) !core.Playlist {
         return error.NoPlaylist;
     }
 };
+
 test "an untagged neighbour follows unanimous retags but never guesses in an ambiguous folder" {
-    var entries = [_]core.Entry{ .{ .path = "Folder/1.flac", .kind = .audio, .stamp = .{ .modified = 1 } }, .{ .path = "Folder/2.flac", .kind = .audio }, .{ .path = "Folder/3.flac", .kind = .audio } };
+    var entries = [_]core.Entry{
+        .{ .path = "Folder/1.flac", .kind = .audio, .stamp = .{ .modified = 1 } },
+        .{ .path = "Folder/2.flac", .kind = .audio },
+        .{ .path = "Folder/3.flac", .kind = .audio },
+    };
+
     var backend = Fake{ .entries = entries[0..2], .missing_leaf = "2.flac" };
     var observer = Observer{};
     var first = try core.scan(std.testing.allocator, &backend, &.{}, .quick, &observer);
@@ -49,8 +65,13 @@ test "an untagged neighbour follows unanimous retags but never guesses in an amb
     try std.testing.expectEqual(@as(usize, 3), third.value.albums.len);
     try std.testing.expectEqualStrings("Folder", third.value.tracks[1].meta.album);
 }
+
 test "reusing a renamed filename cannot produce duplicate stable track IDs" {
-    var entries = [_]core.Entry{ .{ .path = "Album/A.flac", .kind = .audio, .stamp = .{ .device = 1, .inode = 10 } }, .{ .path = "Album/B.flac", .kind = .audio, .stamp = .{ .device = 1, .inode = 10 } } };
+    var entries = [_]core.Entry{
+        .{ .path = "Album/A.flac", .kind = .audio, .stamp = .{ .device = 1, .inode = 10 } },
+        .{ .path = "Album/B.flac", .kind = .audio, .stamp = .{ .device = 1, .inode = 10 } },
+    };
+
     var backend = Fake{ .entries = entries[0..1] };
     var observer = Observer{};
     var first = try core.scan(std.testing.allocator, &backend, &.{}, .quick, &observer);
@@ -65,6 +86,7 @@ test "reusing a renamed filename cannot produce duplicate stable track IDs" {
     try std.testing.expect(recreated.value.tracks[0].id != recreated.value.tracks[1].id);
     try std.testing.expectEqual(first.value.tracks[0].id, recreated.value.tracks[1].id);
 }
+
 test "rename retains identity, updates fallback title, and deletion is committed only after enumeration" {
     var entries = [_]core.Entry{.{ .path = "Album/2.m4a", .kind = .audio, .stamp = .{ .size = 10, .modified = 1, .device = 1, .inode = 22 } }};
     var backend = Fake{ .entries = &entries, .title = "" };
@@ -84,6 +106,7 @@ test "rename retains identity, updates fallback title, and deletion is committed
     try std.testing.expectEqual(@as(u32, 1), empty.value.stats.removed);
     try std.testing.expectEqual(@as(usize, 0), empty.value.albums.len);
 }
+
 test "transient metadata failure preserves known tags and is retried on the next quick scan" {
     var entries = [_]core.Entry{.{ .path = "Album/1.m4a", .kind = .audio, .stamp = .{ .size = 10, .modified = 1 } }};
     var backend = Fake{ .entries = &entries };
@@ -103,6 +126,7 @@ test "transient metadata failure preserves known tags and is retried on the next
     try std.testing.expectEqualStrings("Recovered", recovered.value.tracks[0].meta.title);
     try std.testing.expectEqual(@as(u32, 1), recovered.value.stats.parsed);
 }
+
 test "different cards cannot inherit cached metadata even when paths and stamps match" {
     var backend = Fake{ .entries = &.{.{ .path = "Album/1.m4a", .kind = .audio, .stamp = .{ .size = 10 } }} };
     var observer = Observer{};
@@ -116,6 +140,7 @@ test "different cards cannot inherit cached metadata even when paths and stamps 
     try std.testing.expectEqual(@as(usize, 1), backend.calls);
     try std.testing.expect(first.value.tracks[0].id != second.value.tracks[0].id);
 }
+
 test "disc folders merge while duplicate editions remain separate and unnumbered files sort naturally" {
     var backend = Fake{ .entries = &.{
         .{ .path = "Release/Disc 1/10.m4a", .kind = .audio }, .{ .path = "Release/Disc 1/2.m4a", .kind = .audio },
@@ -130,17 +155,21 @@ test "disc folders merge while duplicate editions remain separate and unnumbered
     try std.testing.expect(core.lessText("2.m4a", "10.m4a"));
     try std.testing.expectEqual(@as(usize, 3), release.tracks.len);
 }
+
 test "cancellation at every progress boundary never returns a partial generation" {
     const Cancel = struct {
         calls: u32 = 0,
         at: u32,
+
         pub fn cancelled(self: *@This()) bool {
             return self.calls >= self.at;
         }
+
         pub fn progress(self: *@This(), _: []const u8, _: core.Stats, _: u32) void {
             self.calls += 1;
         }
     };
+
     var backend = Fake{ .entries = &.{.{ .path = "Album/1.m4a", .kind = .audio }} };
     for (0..4) |step| {
         var observer = Cancel{ .at = @intCast(step) };
@@ -156,27 +185,43 @@ const Model = struct {
     nodes: [16]Node = @splat(.{}),
     source: u64 = 7,
     cover: u32 = 0,
+
     pub fn enumerate(self: *@This(), a: std.mem.Allocator) !core.Enumeration {
         var list: std.ArrayList(core.Entry) = .empty;
         defer list.deinit(std.testing.allocator);
         for (self.nodes, 0..) |node, i| if (node.active) {
             const path = try std.fmt.allocPrint(a, "Artist/Album {d}/{s}{d}.flac", .{ i / 4, if (node.renamed) "renamed-" else "track-", i });
-            try list.append(std.testing.allocator, .{ .path = path, .kind = .audio, .stamp = .{ .size = 100, .modified = node.revision, .device = 1, .inode = i + 1 } });
+            try list.append(std.testing.allocator, .{
+                .path = path,
+                .kind = .audio,
+                .stamp = .{ .size = 100, .modified = node.revision, .device = 1, .inode = i + 1 },
+            });
         };
         return .{ .source = self.source, .entries = try a.dupe(core.Entry, list.items) };
     }
+
     pub fn metadata(self: *@This(), a: std.mem.Allocator, entry: core.Entry) !core.Metadata {
         const i = entry.stamp.inode - 1;
         const node = self.nodes[i];
-        return .{ .title = try std.fmt.allocPrint(a, "Title {d} revision {d}", .{ i, node.revision }), .album = try std.fmt.allocPrint(a, "Album {d}", .{i / 4}), .artist = "Artist", .album_artist = "Artist", .track = @intCast(i % 4 + 1), .disc = 1 };
+        return .{
+            .title = try std.fmt.allocPrint(a, "Title {d} revision {d}", .{ i, node.revision }),
+            .album = try std.fmt.allocPrint(a, "Album {d}", .{i / 4}),
+            .artist = "Artist",
+            .album_artist = "Artist",
+            .track = @intCast(i % 4 + 1),
+            .disc = 1,
+        };
     }
+
     pub fn artwork(self: *@This(), a: std.mem.Allocator, _: core.Album, _: []const core.Track, _: []const core.Entry, _: ?core.Artwork, _: core.Mode) !core.Artwork {
         return .{ .key = try std.fmt.allocPrint(a, "cover-{d}", .{self.cover}) };
     }
+
     pub fn playlist(_: *@This(), _: std.mem.Allocator, _: []const u8, _: []const core.Track) !core.Playlist {
         return error.Unused;
     }
 };
+
 test "deterministic stateful reconciliation matches a fresh rebuild after 512 mixed operations" {
     var model = Model{};
     var observer = Observer{};
@@ -215,15 +260,22 @@ test "deterministic stateful reconciliation matches a fresh rebuild after 512 mi
         previous = incremental;
     }
 }
+
 const Observer = struct {
     cancel: bool = false,
+
     pub fn cancelled(self: *@This()) bool {
         return self.cancel;
     }
+
     pub fn progress(_: *@This(), _: []const u8, _: core.Stats, _: u32) void {}
 };
+
 test "complete discovery groups tracks and quick reconciliation avoids metadata reads" {
-    var backend = Fake{ .entries = &.{ .{ .path = "Artist/Album/01.m4a", .kind = .audio, .stamp = .{ .size = 10, .modified = 1 } }, .{ .path = "Artist/Album/02.m4a", .kind = .audio, .stamp = .{ .size = 10, .modified = 1 } } } };
+    var backend = Fake{ .entries = &.{
+        .{ .path = "Artist/Album/01.m4a", .kind = .audio, .stamp = .{ .size = 10, .modified = 1 } },
+        .{ .path = "Artist/Album/02.m4a", .kind = .audio, .stamp = .{ .size = 10, .modified = 1 } },
+    } };
     var observer = Observer{};
     var first = try core.scan(std.testing.allocator, &backend, &.{}, .quick, &observer);
     defer first.deinit();
@@ -235,6 +287,7 @@ test "complete discovery groups tracks and quick reconciliation avoids metadata 
     try std.testing.expectEqual(@as(usize, 0), backend.calls);
     try std.testing.expectEqual(@as(u32, 2), second.value.stats.reused);
 }
+
 test "preserved-stat retag is found by verification and cover is reused" {
     var backend = Fake{ .entries = &.{.{ .path = "Artist/Album/01.m4a", .kind = .audio, .stamp = .{ .size = 10, .modified = 1 } }} };
     var observer = Observer{};
@@ -247,6 +300,7 @@ test "preserved-stat retag is found by verification and cover is reused" {
     try std.testing.expectEqual(@as(u32, 1), second.value.stats.changed);
     try std.testing.expectEqual(@as(u32, 1), second.value.stats.art_reused);
 }
+
 test "failed enumeration and cancellation cannot replace the last complete catalogue" {
     var backend = Fake{ .entries = &.{}, .fail = true };
     var observer = Observer{};
@@ -262,7 +316,12 @@ test "a 4500-track cold scan and refresh fit the F20 catalogue memory budget" {
     defer source_arena.deinit();
     const source = source_arena.allocator();
     const entries = try source.alloc(core.Entry, 4500);
-    for (entries, 0..) |*entry, i| entry.* = .{ .path = try std.fmt.allocPrint(source, "Music/Artist {d}/Album {d}/Track {d}.m4a", .{ i / 140, i / 14, i }), .kind = .audio, .stamp = .{ .size = 6000000, .modified = 123 } };
+    for (entries, 0..) |*entry, i| entry.* = .{
+        .path = try std.fmt.allocPrint(source, "Music/Artist {d}/Album {d}/Track {d}.m4a", .{ i / 140, i / 14, i }),
+        .kind = .audio,
+        .stamp = .{ .size = 6000000, .modified = 123 },
+    };
+
     const first_memory = try a.alloc(u8, 6 * 1024 * 1024);
     defer a.free(first_memory);
     const next_memory = try a.alloc(u8, first_memory.len);
@@ -290,16 +349,20 @@ test "I/O cancellation is propagated even if a one-shot cancel signal was consum
         pub fn enumerate(_: *@This(), _: std.mem.Allocator) !core.Enumeration {
             return .{ .source = 1, .entries = &.{.{ .path = "Album/1.m4a", .kind = .audio }} };
         }
+
         pub fn metadata(_: *@This(), _: std.mem.Allocator, _: core.Entry) !core.Metadata {
             return error.Cancelled;
         }
+
         pub fn artwork(_: *@This(), _: std.mem.Allocator, _: core.Album, _: []const core.Track, _: []const core.Entry, _: ?core.Artwork, _: core.Mode) !core.Artwork {
             return .{};
         }
+
         pub fn playlist(_: *@This(), _: std.mem.Allocator, _: []const u8, _: []const core.Track) !core.Playlist {
             return error.NoPlaylist;
         }
     };
+
     var backend: Backend = .{};
     var observer: Observer = .{};
     try std.testing.expectError(error.Cancelled, core.scan(std.testing.allocator, &backend, &.{}, .quick, &observer));

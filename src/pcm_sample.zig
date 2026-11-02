@@ -1,11 +1,14 @@
 //! Scalar PCM conversion to signed Q1.31. No floating-point instructions or heap.
 const std = @import("std");
+
 pub const Encoding = enum { signed, unsigned, float };
+
 pub const Format = struct {
     encoding: Encoding = .signed,
     bytes: u4,
     valid_bits: u7,
     endian: std.builtin.Endian = .little,
+
     pub fn valid(self: Format) bool {
         return switch (self.encoding) {
             .float => (self.bytes == 4 or self.bytes == 8) and self.valid_bits == @as(u7, self.bytes) * 8,
@@ -13,6 +16,7 @@ pub const Format = struct {
             .signed => self.bytes >= 1 and self.bytes <= 4 and self.valid_bits > 0 and self.valid_bits <= @as(u7, self.bytes) * 8,
         };
     }
+
     pub fn decode(self: Format, input: []const u8) i32 {
         std.debug.assert(self.valid() and input.len >= self.bytes);
         var bits: u64 = 0;
@@ -34,6 +38,7 @@ pub const Format = struct {
         };
     }
 };
+
 /// Decoder libraries return native f32 values; normalize once before buffering.
 pub fn fromFloat32(value: f32) i32 {
     return floatToQ31(@as(u32, @bitCast(value)), false);
@@ -56,10 +61,12 @@ fn floatToQ31(bits: u64, double: bool) i32 {
     const value: i32 = @intCast(magnitude);
     return if (negative) -value else value;
 }
+
 /// TPDF dither is used only when reducing a source with >24 valid bits. Native
 /// <=24-bit PCM remains exact. Fixed seeds make decoding reproducible in tests.
 pub const Quantizer = struct {
     random: u32 = 0x91e10da5,
+
     pub fn to24(self: *Quantizer, sample: i32, dither: bool) i32 {
         if (!dither) return sample >> 8;
         var value = self.random;
@@ -72,6 +79,7 @@ pub const Quantizer = struct {
         return @intCast(std.math.clamp(rounded, -8388608, 8388607));
     }
 };
+
 test "integer endian, unsigned bias and valid bits preserve native samples exactly" {
     const little = Format{ .bytes = 3, .valid_bits = 24 };
     const big = Format{ .bytes = 3, .valid_bits = 24, .endian = .big };
@@ -85,6 +93,7 @@ test "integer endian, unsigned bias and valid bits preserve native samples exact
     try std.testing.expectEqual(@as(i32, -2147483648), (Format{ .encoding = .unsigned, .bytes = 1, .valid_bits = 8 }).decode(&.{0}));
     try std.testing.expectEqual(@as(i32, 0), (Format{ .bytes = 4, .valid_bits = 24 }).decode(&.{ 0xff, 0, 0, 0 }));
 }
+
 test "IEEE float32 and float64 conversion handles boundaries, denormals and non-finite values" {
     for ([_]f64{ -2, -1, -0.75, -0.5, -0.0001, -0.0, 0, 0.0001, 0.5, 0.75, 1, 2, std.math.inf(f64), -std.math.inf(f64), std.math.nan(f64) }) |value| {
         const expected: i32 = if (std.math.isNan(value)) 0 else if (value >= 1) std.math.maxInt(i32) else if (value <= -1) std.math.minInt(i32) else @intFromFloat(value * 2147483648.0);
@@ -97,6 +106,7 @@ test "IEEE float32 and float64 conversion handles boundaries, denormals and non-
     try std.testing.expectEqual(@as(i32, 0), floatToQ31(1, true));
     try std.testing.expectEqual(@as(i32, 0), floatToQ31(1, false));
 }
+
 test "deterministic TPDF is bounded, clips safely and has no DC bias" {
     var quantizer = Quantizer{};
     var duplicate = Quantizer{};

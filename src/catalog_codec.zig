@@ -2,8 +2,11 @@
 //! persisted; callers supply bounded storage and allocation.
 const std = @import("std");
 const library = @import("library.zig");
+
 pub const schema = 1;
+
 pub const Limits = struct { remaining: usize = 12 * 1024 * 1024, elements: usize = 100_000 };
+
 pub fn encode(writer: anytype, value: anytype) anyerror!void {
     const T = @TypeOf(value);
     switch (@typeInfo(T)) {
@@ -29,6 +32,7 @@ pub fn encode(writer: anytype, value: anytype) anyerror!void {
         else => @compileError("unsupported catalogue field"),
     }
 }
+
 pub fn decode(comptime T: type, reader: anytype, allocator: std.mem.Allocator, limits: *Limits) anyerror!T {
     switch (@typeInfo(T)) {
         .@"struct" => |info| {
@@ -67,6 +71,7 @@ pub fn decode(comptime T: type, reader: anytype, allocator: std.mem.Allocator, l
         else => @compileError("unsupported catalogue field"),
     }
 }
+
 fn exact(reader: anytype, output: []u8) !void {
     var done: usize = 0;
     while (done < output.len) {
@@ -75,6 +80,7 @@ fn exact(reader: anytype, output: []u8) !void {
         done += n;
     }
 }
+
 pub fn validate(catalog: *const library.Catalog, allocator: std.mem.Allocator) !void {
     if (catalog.generation == std.math.maxInt(u64)) return error.CatalogueGeneration;
     if (catalog.version != 1) return error.CatalogueVersion;
@@ -95,12 +101,15 @@ pub fn validate(catalog: *const library.Catalog, allocator: std.mem.Allocator) !
         if (!item.missing and !ids.contains(item.track_id)) return error.CatalogueReference;
     };
 }
+
 const TestBuffer = struct {
     bytes: std.ArrayList(u8) = .empty,
     position: usize = 0,
+
     pub fn write(self: *@This(), bytes: []const u8) !void {
         try self.bytes.appendSlice(std.testing.allocator, bytes);
     }
+
     pub fn read(self: *@This(), out: []u8) !usize {
         const n = @min(out.len, self.bytes.items.len - self.position);
         @memcpy(out[0..n], self.bytes.items[self.position..][0..n]);
@@ -108,11 +117,13 @@ const TestBuffer = struct {
         return n;
     }
 };
+
 test "catalogue encoder refuses text that its decoder cannot reload" {
     var buffer: TestBuffer = .{};
     defer buffer.bytes.deinit(std.testing.allocator);
     try std.testing.expectError(error.InvalidText, encode(&buffer, library.Metadata{ .title = "A Doc\xe2\x00\x19s Example" }));
 }
+
 test "catalogue codec roundtrips metadata and bounds malformed allocations" {
     var buffer: TestBuffer = .{};
     defer buffer.bytes.deinit(std.testing.allocator);
@@ -131,9 +142,19 @@ test "catalogue codec roundtrips metadata and bounds malformed allocations" {
 
 test "complete catalogue roundtrip preserves references and rejects every truncation" {
     const member = [_]u32{0};
-    const tracks = [_]library.Track{.{ .id = 7, .path = "Music/楽団/1.m4a", .stamp = .{ .size = 12345, .modified = 13 }, .meta = .{ .title = "A song", .artist = "楽団", .album = "Album", .gain = .{ .track_db = -3.5 } } }};
+    const tracks = [_]library.Track{
+        .{
+            .id = 7,
+            .path = "Music/楽団/1.m4a",
+            .stamp = .{ .size = 12345, .modified = 13 },
+            .meta = .{ .title = "A song", .artist = "楽団", .album = "Album", .gain = .{ .track_db = -3.5 } },
+        },
+    };
+
     const albums = [_]library.Album{.{ .id = 11, .key = "release", .title = "Album", .artist = "楽団", .directory = "Music/楽団", .tracks = &member }};
-    const value = library.Catalog{ .generation = 2, .source = 1, .tracks = &tracks, .albums = &albums, .artists = &.{.{ .name = "楽団", .albums = &member }}, .playlists = &.{.{ .path = "List.m3u", .name = "List", .items = &.{.{ .track_id = 7, .path = tracks[0].path }} }} };
+    const value = library.Catalog{ .generation = 2, .source = 1, .tracks = &tracks, .albums = &albums, .artists = &.{
+        .{ .name = "楽団", .albums = &member },
+    }, .playlists = &.{.{ .path = "List.m3u", .name = "List", .items = &.{.{ .track_id = 7, .path = tracks[0].path }} }} };
     var buffer: TestBuffer = .{};
     defer buffer.bytes.deinit(std.testing.allocator);
     try encode(&buffer, value);

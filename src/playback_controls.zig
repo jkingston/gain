@@ -72,6 +72,7 @@ fn clampAttenuation(value: u8) u8 {
 
 test "opening press is ignored and a held stop fires once" {
     const testing = @import("std").testing;
+
     const play = Button.play.mask();
     var state = State.init(64);
     try testing.expectEqual(Action.none, state.update(play));
@@ -82,6 +83,7 @@ test "opening press is ignored and a held stop fires once" {
 
 test "volume changes one step per press and remains bounded" {
     const testing = @import("std").testing;
+
     var state = State.init(20);
     _ = state.update(0);
     try testing.expectEqual(Action{ .set_attenuation = 16 }, state.update(Button.volume_up.mask()));
@@ -98,6 +100,7 @@ test "volume changes one step per press and remains bounded" {
 
 test "previous and next are distinct edge-triggered actions" {
     const testing = @import("std").testing;
+
     var state = State.init(64);
     _ = state.update(0);
     try testing.expectEqual(Action.next, state.update(Button.next.mask()));
@@ -108,6 +111,7 @@ test "previous and next are distinct edge-triggered actions" {
 
 test "every input trace preserves attenuation bounds" {
     const testing = @import("std").testing;
+
     var initial: u16 = 0;
     while (initial <= 255) : (initial += 1) {
         var state = State.init(@intCast(initial));

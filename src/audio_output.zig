@@ -238,6 +238,7 @@ test "unity output preserves exact PCM and a later period sees new gain" {
         .left = @as(i32, @intCast(1_000 + index)) << 8,
         .right = -2_000 << 8,
     };
+
     var ring = try pcm_reservoir.Ring.initFilled(&source, source.len);
     var first: [20 * 8]u8 align(4) = undefined;
     var second: [20 * 8]u8 align(4) = undefined;
@@ -261,6 +262,7 @@ test "underrun consumes available frames and silences the remainder" {
         .{ .left = 100 << 16, .right = -100 << 16 },
         .{ .left = 200 << 16, .right = -200 << 16 },
     };
+
     var ring = try pcm_reservoir.Ring.initFilled(&source, source.len);
     var output: [20 * 4]u8 align(4) = undefined;
     const result = try renderPeriod(&ring, &output, plan, unity_gain_q24);
@@ -357,6 +359,7 @@ test "native low sample rates keep exact timing with the shortest integral perio
 
 test "captured late two-period poll overruns while one-period watchdog keeps ownership" {
     const playback = @import("playback.zig");
+
     const plan = try Plan.init(48_000, .signed_24_in_u32);
     const period_ticks: u32 = 60_000;
     var state = try playback.State.init(.{ .buffer_count = 3, .descriptor_count = 120, .total_chunks = 240 });
@@ -379,6 +382,7 @@ test "captured late two-period poll overruns while one-period watchdog keeps own
 
 test "watchdog phase and wake latency stay inside the three-buffer margin across ring wrap" {
     const playback = @import("playback.zig");
+
     const rates = [_]u32{ 8_000, 11_025, 12_000, 16_000, 22_050, 24_000, 32_000, 44_100, 48_000, 64_000, 88_200, 96_000, 176_400, 192_000 };
     for (rates) |rate| {
         const plan = try Plan.init(rate, .signed_24_in_u32);

@@ -1,34 +1,45 @@
 //! F20 physical RAM ownership. Cached/uncached aliases refer to the same bytes.
 const std = @import("std");
+
 pub const ram_bytes = 32 * 1024 * 1024;
+
 pub const Region = struct {
     start: u32,
     bytes: u32,
+
     pub fn cached(self: Region) usize {
         return 0x80000000 + self.start;
     }
+
     pub fn uncached(self: Region) usize {
         return 0xa0000000 + self.start;
     }
+
     pub fn end(self: Region) u32 {
         return self.start + self.bytes;
     }
+
     pub fn cachedTop(self: Region) usize {
         return self.cached() + self.bytes;
     }
+
     pub fn cachedSlice(self: Region, comptime T: type) []T {
         return @as([*]T, @ptrFromInt(self.cached()))[0 .. self.bytes / @sizeOf(T)];
     }
+
     pub fn uncachedSlice(self: Region, comptime T: type) []T {
         return @as([*]T, @ptrFromInt(self.uncached()))[0 .. self.bytes / @sizeOf(T)];
     }
 };
+
 pub const firmware = Region{ .start = 0x4000, .bytes = 0x200000 - 0x4000 };
 pub const lcd_descriptors = Region{ .start = 0x201000, .bytes = 0x1000 };
 pub const sd_control = Region{ .start = 0x202000, .bytes = 0x1000 };
 pub const filesystem_sector = Region{ .start = 0x203000, .bytes = 512 };
 pub const read_ahead = Region{ .start = 0x210000, .bytes = 2 * 64 * 1024 };
 pub const audio_descriptors = Region{ .start = 0x230000, .bytes = 4096 };
+// Two uncached identity-mapped pages, owned by the USB controller.
+pub const usb_dma = Region{ .start = 0x240000, .bytes = @import("x1000_dma.zig").window_bytes };
 pub const canvas = Region{ .start = 0x300000, .bytes = 320 * 240 * 2 };
 pub const display_snapshot = Region{ .start = 0x340000, .bytes = 320 * 240 * 2 };
 pub const display_staging = Region{ .start = 0x380000, .bytes = 320 * 42 * 2 };
@@ -56,15 +67,43 @@ pub const codec_page = Region{ .start = compressed_ring.start + 128 * 1024, .byt
 pub const codec_float_pcm = Region{ .start = compressed_ring.start + 192 * 1024, .bytes = 16384 * 4 };
 pub const stream_input = Region{ .start = codec_float_pcm.end(), .bytes = compressed_ring.end() - codec_float_pcm.end() };
 pub const interrupt_stack = Region{ .start = 0x1fdc000, .bytes = 8192 };
+// Keep ROM recovery state below all stacks so an overflow cannot destroy it.
+pub const rom_context = Region{ .start = 0x204000, .bytes = 4096 };
 pub const boot_stack = Region{ .start = 0x1fe0000, .bytes = 0x1f000 };
-pub const regions = [_]Region{ firmware, lcd_descriptors, sd_control, filesystem_sector, read_ahead, audio_descriptors, canvas, display_snapshot, display_staging, flac_left, flac_right, flac_compressed, decoder_arena, compressed_ring, pcm_reservoir, decoded_frames, audio_buffers, task_stacks, interrupt_stack, boot_stack };
+pub const regions = [_]Region{
+    firmware,
+    lcd_descriptors,
+    sd_control,
+    filesystem_sector,
+    read_ahead,
+    audio_descriptors,
+    usb_dma,
+    canvas,
+    display_snapshot,
+    display_staging,
+    flac_left,
+    flac_right,
+    flac_compressed,
+    decoder_arena,
+    compressed_ring,
+    pcm_reservoir,
+    decoded_frames,
+    audio_buffers,
+    task_stacks,
+    interrupt_stack,
+    rom_context,
+    boot_stack,
+};
+
 comptime {
+    @setEvalBranchQuota(2000);
     for (regions, 0..) |region, i| {
         if (region.end() > ram_bytes or region.start & 3 != 0 or region.bytes == 0) @compileError("invalid F20 RAM reservation");
         for (regions[i + 1 ..]) |other| {
             if (region.start < other.end() and other.start < region.end()) @compileError("F20 RAM reservations overlap");
         }
     }
+
     const Group = struct { parent: Region, children: []const Region };
     for ([_]Group{
         .{ .parent = task_stacks, .children = &.{ output_stack, ui_stack, control_stack, codec_stack, storage_stack } },
@@ -80,6 +119,7 @@ comptime {
         }
     }
 }
+
 test "DMA aliases resolve to the same physical RAM reservation" {
     inline for (regions) |region| try std.testing.expectEqual(region.cached() & 0x1fffffff, region.uncached() & 0x1fffffff);
 }
@@ -91,4 +131,8 @@ test "stream workspace slices retain byte capacity and DMA alignment" {
     try std.testing.expectEqual(@as(usize, 0), @intFromPtr(storage_burst.uncachedSlice(u8).ptr) & 15);
     try std.testing.expectEqual(task_stacks.cachedTop(), storage_stack.cachedTop());
     try std.testing.expectEqual(@as(u32, 4 * audio_buffer_capacity), audio_buffers.bytes);
+}
+
+test "ROM recovery context stays below every CPU stack" {
+    try std.testing.expect(rom_context.end() <= task_stacks.start);
 }

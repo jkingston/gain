@@ -6,7 +6,9 @@ const std = @import("std");
 pub const Task = enum(u3) { output, ui, control, codec, storage, idle };
 pub const task_count = @backingInt(Task.idle);
 pub const Events = u32;
+
 pub const Wait = struct { events: Events, deadline: ?u64 = null };
+
 const State = struct {
     pending: Events = 0,
     waiting: Events = 0,
@@ -14,6 +16,7 @@ const State = struct {
     ready: bool = false,
     retired: bool = false,
 };
+
 pub const Executive = struct {
     tasks: [task_count]State = @splat(.{}),
 
@@ -98,6 +101,7 @@ pub const Executive = struct {
 pub const Clock = struct {
     previous: u32,
     ticks: u64 = 0,
+
     pub fn sample(self: *Clock, counter: u32) u64 {
         self.ticks += counter -% self.previous;
         self.previous = counter;
@@ -118,6 +122,7 @@ test "pending notifications prevent sleep in either arrival ordering" {
         try std.testing.expectEqual(Task.idle, executive.select());
     }
 }
+
 test "higher priority work preempts without dropping lower priority readiness" {
     var executive = Executive{};
     executive.start(.storage);
@@ -133,6 +138,7 @@ test "higher priority work preempts without dropping lower priority readiness" {
     executive.wait(.ui, .{ .events = 1 }, 0);
     try std.testing.expectEqual(Task.codec, executive.select());
 }
+
 test "unrelated events latch without waking a blocked task" {
     var executive = Executive{};
     executive.wait(.storage, .{ .events = 2 }, 0);
@@ -143,6 +149,7 @@ test "unrelated events latch without waking a blocked task" {
     try std.testing.expectEqual(@as(Events, 2), executive.take(.storage, 2));
     try std.testing.expectEqual(@as(Events, 1), executive.take(.storage, 1));
 }
+
 test "deadlines wake exactly once including coincident notifications" {
     var executive = Executive{};
     executive.wait(.ui, .{ .events = 1, .deadline = 30 }, 0);
@@ -160,6 +167,7 @@ test "deadlines wake exactly once including coincident notifications" {
     try std.testing.expectEqual(Task.ui, executive.select());
     try std.testing.expectEqual(@as(?u64, null), executive.nextDeadline());
 }
+
 test "hardware wrap preserves monotonic deadlines" {
     var clock = Clock{ .previous = 0xfffffff0 };
     try std.testing.expectEqual(@as(u64, 15), clock.sample(0xffffffff));

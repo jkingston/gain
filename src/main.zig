@@ -22,19 +22,29 @@ const Display = struct {
     const red: u16 = 0xf800;
     const cyan: u16 = 0x07ff;
     const yellow: u16 = 0xffe0;
+
     fn init() bool {
         LcdDma.initialize() catch return false;
         return true;
     }
+
     fn clear(color: u16) void {
         surface.clear(color);
     }
+
     fn rectangle(x: usize, y: usize, w: usize, h: usize, color: u16) void {
         surface.fill(.{ .x = @intCast(x), .y = @intCast(y), .width = @intCast(w), .height = @intCast(h) }, color);
     }
+
     fn text(x: usize, y: usize, value: []const u8, color: u16, scale: usize) void {
-        surface.text(.{ .x = @intCast(x), .y = @intCast(y), .width = @intCast(width -| x), .height = @intCast(height -| y) }, value, .{ .color = color, .scale = @intCast(scale) });
+        surface.text(.{
+            .x = @intCast(x),
+            .y = @intCast(y),
+            .width = @intCast(width -| x),
+            .height = @intCast(height -| y),
+        }, value, .{ .color = color, .scale = @intCast(scale) });
     }
+
     fn present() bool {
         return LcdDma.transfer(0, 0, width, height);
     }
@@ -227,6 +237,7 @@ fn playbackPoll(context: *anyopaque, status: media.PlaybackStatus) media.Playbac
 const isVisibleEntry = @import("file_browser.zig").isVisibleEntry;
 
 const view_theme = ui.dark_theme;
+
 fn clippedName(name: []const u8, maximum: usize) []const u8 {
     return name[0..@min(name.len, maximum)];
 }
@@ -245,13 +256,22 @@ fn drawBrowser(volume: *Volume, browser: *const Browser, battery_mv: u32, attenu
 
 fn browserViewState(browser: *const Browser, attenuation: u8) player_view.BrowserState {
     const selected = browser.selection();
-    return .{ .directory = browser.directory().first_cluster, .first = if (selected >= visible_rows) selected - (visible_rows - 1) else 0, .selected = selected, .attenuation = attenuation };
+    return .{
+        .directory = browser.directory().first_cluster,
+        .first = if (selected >= visible_rows) selected - (visible_rows - 1) else 0,
+        .selected = selected,
+        .attenuation = attenuation,
+    };
 }
 
 fn playbackTrack(state: *const PlaybackUi) player_view.Track {
     const artist_depth = if (state.browser.depth > 1) state.browser.depth - 1 else state.browser.depth;
     const artist = state.browser.titles[artist_depth][0..state.browser.title_lengths[artist_depth]];
-    return .{ .name = state.entry.name(), .artist = if (state.browser.depth > 0) artist else "", .album = if (state.browser.depth > 0) state.browser.title() else "" };
+    return .{
+        .name = state.entry.name(),
+        .artist = if (state.browser.depth > 0) artist else "",
+        .album = if (state.browser.depth > 0) state.browser.title() else "",
+    };
 }
 
 fn showError(title: []const u8, failure: anyerror) bool {
@@ -366,6 +386,7 @@ export fn gain_main() callconv(.c) noreturn {
         .descriptor = sd_descriptor,
         .switch_status = sd_switch_status,
     };
+
     var card = storage.Controller{ .resources = resources };
     usb.initialize(&card) catch |failure| fatalError("USB", failure);
     var attenuation: u8 = 64;
@@ -388,6 +409,7 @@ export fn gain_main() callconv(.c) noreturn {
             if (usb.needsHandoff()) runUsbMode();
             continue;
         };
+
         var browser = Browser.init(&volume) catch |failure| {
             _ = showError("DIRECTORY", failure);
             waitForErrorDismiss(&input);
@@ -414,13 +436,13 @@ fn runUsbMode() void {
     _ = Display.present();
     while (true) {
         Watchdog.kick();
+        // Service completions continuously while the host owns SD.
         usb.poll();
         switch (usb.session().state) {
             .quiescing => usb.grantHost() catch {},
             .host, .ejecting => {},
             .remounting, .player, .ejected => return,
         }
-        Timer.delayMicroseconds(100);
     }
 }
 

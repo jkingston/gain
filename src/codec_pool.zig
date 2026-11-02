@@ -1,11 +1,15 @@
 //! Caller-owned, bounded C decoder allocation. One codec task binds a pool for
 //! each library call; other firmware services never use these C entry points.
 const std = @import("std");
+
 const alignment = 16;
+
 const Header = extern struct { capacity: u32, requested: u32 = 0, used: u32 = 0, reserved: u32 = 0 };
 const header_bytes = @sizeOf(Header);
 var active: ?*Pool = null;
+
 pub const Statistics = struct { live: u32 = 0, peak: u32 = 0, allocations: u32 = 0, failures: u32 = 0 };
+
 pub const Pool = struct {
     storage: []align(alignment) u8,
     statistics: Statistics = .{},
@@ -16,14 +20,17 @@ pub const Pool = struct {
         pool.header(0).* = .{ .capacity = @intCast(pool.storage.len - header_bytes) };
         return pool;
     }
+
     pub fn bind(self: *Pool) Binding {
         const previous = active;
         active = self;
         return .{ .previous = previous };
     }
+
     fn header(self: *Pool, offset: usize) *Header {
         return @ptrCast(@alignCast(self.storage.ptr + offset));
     }
+
     pub fn allocate(self: *Pool, bytes: usize) ?*anyopaque {
         self.statistics.allocations +%= 1;
         if (bytes == 0 or bytes > self.storage.len - header_bytes) return self.failed();
@@ -46,10 +53,12 @@ pub const Pool = struct {
         }
         return self.failed();
     }
+
     fn failed(self: *Pool) ?*anyopaque {
         self.statistics.failures +%= 1;
         return null;
     }
+
     pub fn release(self: *Pool, pointer: ?*anyopaque) void {
         const ptr = pointer orelse return;
         const offset = @intFromPtr(ptr) - @intFromPtr(self.storage.ptr) - header_bytes;
@@ -68,6 +77,7 @@ pub const Pool = struct {
             } else cursor = next;
         }
     }
+
     pub fn resize(self: *Pool, pointer: ?*anyopaque, bytes: usize) ?*anyopaque {
         const old = pointer orelse return self.allocate(bytes);
         if (bytes == 0) {
@@ -88,21 +98,27 @@ pub const Pool = struct {
         return replacement;
     }
 };
+
 pub const Binding = struct {
     previous: ?*Pool,
+
     pub fn end(self: Binding) void {
         active = self.previous;
     }
 };
+
 export fn gain_codec_malloc(bytes: usize) ?*anyopaque {
     return if (active) |pool| pool.allocate(bytes) else null;
 }
+
 export fn gain_codec_free(pointer: ?*anyopaque) void {
     if (active) |pool| pool.release(pointer) else std.debug.assert(pointer == null);
 }
+
 export fn gain_codec_realloc(pointer: ?*anyopaque, bytes: usize) ?*anyopaque {
     return if (active) |pool| pool.resize(pointer, bytes) else null;
 }
+
 export fn gain_codec_calloc(count: usize, bytes: usize) ?*anyopaque {
     const total = std.math.mul(usize, count, bytes) catch return null;
     const pointer = gain_codec_malloc(total) orelse return null;
@@ -126,6 +142,7 @@ test "allocation failure preserves contents and releases coalesce" {
     const full = pool.allocate(storage.len - header_bytes).?;
     pool.release(full);
 }
+
 test "C bindings restore the previous owner and calloc checks multiplication" {
     var a: [1024]u8 align(alignment) = undefined;
     var b: [1024]u8 align(alignment) = undefined;
@@ -152,14 +169,17 @@ test "seeded allocator reuse preserves live C state through resize and fragmenta
         pointer: *anyopaque,
         length: usize,
         pattern: u8,
+
         fn verify(self: @This()) !void {
             for (@as([*]const u8, @ptrCast(self.pointer))[0..self.length]) |value|
                 try std.testing.expectEqual(self.pattern, value);
         }
+
         fn fill(self: @This()) void {
             @memset(@as([*]u8, @ptrCast(self.pointer))[0..self.length], self.pattern);
         }
     };
+
     var storage: [16 * 1024]u8 align(alignment) = undefined;
     var pool = try Pool.init(&storage);
     var leases: [32]?Lease = @splat(null);
