@@ -7,6 +7,33 @@ pub const max_tracks = 8192;
 pub const max_albums = 1024;
 pub const max_artists = max_albums;
 
+/// Bound the cost of rebuilding progressive views while keeping the first
+/// useful batch immediate. The clock may wrap; intervals must be below 2^31.
+pub const PublicationCadence = struct {
+    last: ?u32 = null,
+
+    pub fn due(self: PublicationCadence, now: u32, interval: u31) bool {
+        return if (self.last) |previous| now -% previous >= interval else true;
+    }
+
+    pub fn published(self: *PublicationCadence, now: u32) void {
+        self.last = now;
+    }
+};
+
+test "progressive publication work is bounded across clock zero, wrap and scan restart" {
+    var cadence = PublicationCadence{};
+    try std.testing.expect(cadence.due(0, 300));
+    cadence.published(0);
+    for (1..300) |tick| try std.testing.expect(!cadence.due(@intCast(tick), 300));
+    try std.testing.expect(cadence.due(300, 300));
+    cadence.published(0xffffff80);
+    try std.testing.expect(!cadence.due(0xab, 300));
+    try std.testing.expect(cadence.due(0xac, 300));
+    cadence = .{};
+    try std.testing.expect(cadence.due(0xad, 300));
+}
+
 pub const Album = struct {
     id: u64,
     title: []const u8,
@@ -133,11 +160,21 @@ pub const Snapshot = struct {
         }.less);
         for (self.albums[0..self.album_count], 0..) |album, i| self.group_ranks[album.group] = @intCast(i);
         for (self.track_groups[0..self.track_count]) |*group| group.* = self.group_ranks[group.*];
-        for (self.track_order[0..self.track_count], 0..) |*rank, i| rank.* = @intCast(i);
-        std.mem.sort(u16, self.track_order[0..self.track_count], SortContext{ .view = self, .order = .album }, sortedLess);
-        for (self.track_order[0..self.track_count], 0..) |track, rank| {
-            const group = self.track_groups[track];
-            if (rank == 0 or self.track_groups[self.track_order[rank - 1]] != group) self.albums[group].first_track = @intCast(rank);
+        // Stable counting buckets avoid comparing album identities for every
+        // track comparison. Reuse the now-dead group map as per-album cursors.
+        var track_start: u16 = 0;
+        for (self.albums[0..self.album_count], 0..) |*album, rank| {
+            album.first_track = track_start;
+            self.group_ranks[rank] = track_start;
+            track_start += @intCast(album.count);
+        }
+        for (self.track_groups[0..self.track_count], 0..) |group, track| {
+            self.track_order[self.group_ranks[group]] = @intCast(track);
+            self.group_ranks[group] += 1;
+        }
+        for (self.albums[0..self.album_count]) |album| {
+            const first: usize = album.first_track;
+            std.mem.sort(u16, self.track_order[first..][0..album.count], SortContext{ .view = self, .order = .album }, sortedLess);
         }
         for (self.albums[0..self.album_count], 0..) |*album, rank| {
             if (self.artist_count == 0 or !std.ascii.eqlIgnoreCase(self.artists[self.artist_count - 1].name, album.artist)) {
@@ -150,26 +187,27 @@ pub const Snapshot = struct {
         }
         for (self.title_order[0..self.track_count], 0..) |*rank, i| rank.* = @intCast(i);
         std.mem.sort(u16, self.title_order[0..self.track_count], SortContext{ .view = self, .order = .title }, sortedLess);
-        @memcpy(self.artist_track_order[0..self.track_count], self.title_order[0..self.track_count]);
-        std.mem.sort(u16, self.artist_track_order[0..self.track_count], SortContext{ .view = self, .order = .artist_title }, sortedLess);
+        // title_order is already sorted within each artist. Stable partitioning
+        // it into artist buckets gives the same order in linear time.
         var first: u16 = 0;
-        for (self.artists[0..self.artist_count]) |*artist| {
+        for (self.artists[0..self.artist_count], 0..) |*artist, i| {
             artist.first_track = first;
+            self.group_ranks[i] = first;
             first += artist.track_count;
+        }
+        for (self.title_order[0..self.track_count]) |track| {
+            const artist = self.albums[self.track_groups[track]].artist_index;
+            self.artist_track_order[self.group_ranks[artist]] = track;
+            self.group_ranks[artist] += 1;
         }
     }
 
-    const SortContext = struct { view: *const Snapshot, order: enum { album, title, artist_title } };
+    const SortContext = struct { view: *const Snapshot, order: enum { album, title } };
 
     fn sortedLess(context: SortContext, a: u16, b: u16) bool {
         const view = context.view;
         switch (context.order) {
             .title => return titleLess(view, a, b),
-            .artist_title => {
-                const left = view.albums[view.track_groups[a]].artist_index;
-                const right = view.albums[view.track_groups[b]].artist_index;
-                return if (left != right) left < right else titleLess(view, a, b);
-            },
             .album => {
                 if (view.track_groups[a] != view.track_groups[b]) return view.track_groups[a] < view.track_groups[b];
                 const left = view.tracks[a];
@@ -380,4 +418,50 @@ test "prepared replacement is invisible until its single commit" {
     try std.testing.expectEqual(1, pair.current().tracks[0].id);
     pair.commit(revision);
     try std.testing.expectEqual(2, pair.current().tracks[0].id);
+}
+
+test "bucketed track orders match full comparison sorts for mixed and skewed libraries" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const tracks = try a.alloc(core.Track, 1024);
+    const view = try a.create(Snapshot);
+    var random = std.Random.DefaultPrng.init(0x4741494e);
+    const rng = random.random();
+    for ([_]usize{ 1, 7, 64, 1024 }) |album_count| {
+        for (tracks, 0..) |*track, i| {
+            const album = rng.uintLessThan(usize, album_count);
+            track.* = .{
+                .id = i + 1,
+                .path = try std.fmt.allocPrint(a, "Edition {d}/Track {d}.flac", .{ album, i }),
+                .stamp = .{},
+                .meta = .{
+                    .title = try std.fmt.allocPrint(a, "Title {d}", .{rng.uintLessThan(u32, 20)}),
+                    .album_artist = try std.fmt.allocPrint(a, "Artist {d}", .{album % 8}),
+                    .album = try std.fmt.allocPrint(a, "Album {d}", .{album}),
+                    .disc = rng.uintLessThan(u32, 4),
+                    .track = rng.uintLessThan(u32, 20),
+                },
+            };
+        }
+        std.mem.sort(core.Track, tracks, {}, struct {
+            fn less(_: void, left: core.Track, right: core.Track) bool {
+                return std.mem.order(u8, left.path, right.path) == .lt;
+            }
+        }.less);
+        try view.build(&.{}, tracks, 1, true, 1);
+        var reference: [1024]u16 = undefined;
+        for (&reference, 0..) |*track, i| track.* = @intCast(i);
+        std.mem.sort(u16, &reference, Snapshot.SortContext{ .view = view, .order = .album }, Snapshot.sortedLess);
+        try std.testing.expectEqualSlices(u16, &reference, view.track_order[0..tracks.len]);
+        std.mem.sort(u16, &reference, view, struct {
+            fn less(v: *const Snapshot, left: u16, right: u16) bool {
+                const left_artist = v.albums[v.track_groups[left]].artist_index;
+                const right_artist = v.albums[v.track_groups[right]].artist_index;
+                if (left_artist != right_artist) return left_artist < right_artist;
+                return v.titleLess(left, right);
+            }
+        }.less);
+        try std.testing.expectEqualSlices(u16, &reference, view.artist_track_order[0..tracks.len]);
+    }
 }

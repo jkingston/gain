@@ -23,7 +23,7 @@ pub const State = struct {
     service: ?player.StorageService = null,
     stats: core.Stats = .{},
     phase: []const u8 = "Ready",
-    last_publication: u32 = 0,
+    publication_cadence: views.PublicationCadence = .{},
     summary: diag.IndexSummary = .{},
     error_pending: ?anyerror = null,
 
@@ -91,12 +91,12 @@ pub const State = struct {
     fn checkpoint(context: *anyopaque, _: *const core.Catalog, tracks: []const core.Track, stats: core.Stats) !void {
         const self: *State = @ptrCast(@alignCast(context));
         if (poll(self)) return error.Cancelled;
-        if (self.last_publication != 0 and x.Timer.elapsed(self.last_publication) < x.Timer.milliseconds(300)) return;
+        if (!self.publication_cadence.due(x.Timer.now(), x.Timer.milliseconds(300))) return;
         const began = x.Timer.now();
         const retained_art = core.Catalog{ .albums = if (diag.catalog) |catalog| catalog.value.albums else &.{} };
         const baseline = if (!self.cold and diag.catalog != null) &diag.catalog.?.value else &retained_art;
         try self.projection.publish(baseline, tracks, self.volume.serial, false);
-        self.last_publication = x.Timer.now();
+        self.publication_cadence.published(x.Timer.now());
         diag.report.scan_worst_publication = @max(diag.report.scan_worst_publication, x.Timer.elapsed(began));
         diag.report.scan_publications += 1;
         diag.report.scan_view_tracks = @intCast(self.projection.current().track_count);
@@ -122,7 +122,7 @@ pub const State = struct {
         diag.report.scan_complete = 0;
         diag.report.scan_failure = 0;
         diag.report.scan_played_start = diag.report.live_played_frames;
-        self.last_publication = 0;
+        self.publication_cadence = .{};
         const began = x.Timer.now();
         const io_before = self.volume.device.counters;
         defer {

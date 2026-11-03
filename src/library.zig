@@ -244,6 +244,74 @@ fn trackLess(tracks: []const Track, left: u32, right: u32) bool {
     return lessText(a.path, b.path);
 }
 
+/// Entries must be in bytewise path order, as provided by both SD adapters.
+/// Search only the album subtree, then retain filename priority and the first
+/// bytewise match. Artwork in disc/subdirectories must not become a sidecar.
+pub fn sidecarArtwork(entries: []const Entry, directory: []const u8) ?Entry {
+    // Lower bound of the virtual directory + slash, without a temporary path.
+    var first: usize = 0;
+    var last = entries.len;
+    while (first < last) {
+        const middle = first + (last - first) / 2;
+        const path = entries[middle].path;
+        const prefix = path[0..@min(path.len, directory.len)];
+        const order = std.mem.order(u8, prefix, directory);
+        const before = order == .lt or (directory.len != 0 and order == .eq and (path.len == directory.len or path[directory.len] < '/'));
+        if (before) first = middle + 1 else last = middle;
+    }
+    const filenames = [_][]const u8{ "cover.jpg", "cover.jpeg", "cover.png", "folder.jpg", "folder.png" };
+    var selected: ?Entry = null;
+    var priority: usize = filenames.len;
+    for (entries[first..]) |entry| {
+        if (directory.len != 0 and !(std.mem.startsWith(u8, entry.path, directory) and entry.path.len > directory.len and entry.path[directory.len] == '/')) break;
+        if (entry.kind != .artwork or !std.mem.eql(u8, std.fs.path.dirname(entry.path) orelse "", directory)) continue;
+        for (filenames, 0..) |name, rank| {
+            if (rank < priority and std.ascii.eqlIgnoreCase(std.fs.path.basename(entry.path), name)) {
+                selected = entry;
+                priority = rank;
+            }
+        }
+        if (priority == 0) break;
+    }
+    return selected;
+}
+
+test "sidecar lookup preserves priority, case and exact directory boundaries" {
+    var entries = [_]Entry{
+        .{ .path = "cover.png", .kind = .artwork },
+        .{ .path = "A/CD1/cover.jpg", .kind = .artwork },
+        .{ .path = "A/COVER.JPG", .kind = .artwork },
+        .{ .path = "A/cover.jpg", .kind = .artwork },
+        .{ .path = "A/cover.jpeg", .kind = .artwork },
+        .{ .path = "A/folder.png", .kind = .artwork },
+        .{ .path = "A/folder.jpg", .kind = .audio },
+        .{ .path = "A-Other/cover.jpg", .kind = .artwork },
+        .{ .path = "AB/cover.jpg", .kind = .artwork },
+        .{ .path = "B/cover.jpeg", .kind = .artwork },
+        .{ .path = "B/cover.png", .kind = .artwork },
+        .{ .path = "C/cover.png", .kind = .audio },
+    };
+    std.mem.sort(Entry, &entries, {}, struct {
+        fn less(_: void, a: Entry, b: Entry) bool {
+            return std.mem.order(u8, a.path, b.path) == .lt;
+        }
+    }.less);
+    for ([_][]const u8{ "", "A", "A/CD1", "A-Other", "AB", "B", "C", "Missing", "Z" }) |directory| {
+        var reference: ?Entry = null;
+        for ([_][]const u8{ "cover.jpg", "cover.jpeg", "cover.png", "folder.jpg", "folder.png" }) |name| {
+            for (entries) |entry| if (entry.kind == .artwork and std.mem.eql(u8, std.fs.path.dirname(entry.path) orelse "", directory) and std.ascii.eqlIgnoreCase(std.fs.path.basename(entry.path), name)) {
+                reference = entry;
+                break;
+            };
+            if (reference != null) break;
+        }
+        const actual = sidecarArtwork(&entries, directory);
+        try std.testing.expectEqual(reference != null, actual != null);
+        if (reference) |expected| try std.testing.expectEqualStrings(expected.path, actual.?.path);
+    }
+    try std.testing.expect(sidecarArtwork(&.{}, "") == null);
+}
+
 /// Backend owns enumeration, bounded metadata, artwork and playlist I/O. Observer
 /// provides cancellation/progress. Only a complete successful pass returns a new catalogue.
 pub fn scan(allocator: A, backend: anytype, previous: *const Catalog, mode: Mode, observer: anytype) !Owned {
@@ -266,9 +334,17 @@ pub fn scanWithScratch(allocator: A, scratch: A, backend: anytype, previous: *co
     if (observer.cancelled()) return error.Cancelled;
     const same_source = previous.source == enumeration.source;
     var result = Catalog{ .source = enumeration.source, .generation = previous.generation + 1, .entries = enumeration.entries };
+    for (enumeration.entries) |entry| {
+        if (entry.kind == .audio) result.stats.candidates += 1;
+    }
     var old_paths = std.StringHashMap(usize).init(scratch);
     defer old_paths.deinit();
-    if (same_source) for (previous.tracks, 0..) |track, index| try old_paths.put(track.path, index);
+    // Reserve before insertion. A fixed scratch allocator cannot reclaim
+    // earlier bucket arrays when several growing maps interleave allocations.
+    if (same_source) {
+        try old_paths.ensureTotalCapacity(@intCast(previous.tracks.len));
+        for (previous.tracks, 0..) |track, index| try old_paths.put(track.path, index);
+    }
 
     const FileId = struct { device: u64, inode: u64 };
 
@@ -277,6 +353,14 @@ pub fn scanWithScratch(allocator: A, scratch: A, backend: anytype, previous: *co
     defer old_files.deinit();
     var reserved_ids = std.AutoHashMap(u64, void).init(scratch);
     defer reserved_ids.deinit();
+    try reserved_ids.ensureTotalCapacity(@intCast(@max(if (same_source) previous.tracks.len else 0, result.stats.candidates)));
+    if (same_source) {
+        var file_id_count: u32 = 0;
+        for (previous.tracks) |track| if (track.stamp.inode != 0) {
+            file_id_count += 1;
+        };
+        try old_files.ensureTotalCapacity(file_id_count);
+    }
     if (same_source) for (previous.tracks, 0..) |track, index| {
         try reserved_ids.put(track.id, {});
         if (track.stamp.inode != 0) {
@@ -288,9 +372,6 @@ pub fn scanWithScratch(allocator: A, scratch: A, backend: anytype, previous: *co
     const seen = try a.alloc(bool, previous.tracks.len);
     @memset(seen, false);
 
-    for (enumeration.entries) |entry| {
-        if (entry.kind == .audio) result.stats.candidates += 1;
-    }
     const track_storage = try a.alloc(Track, result.stats.candidates);
     var track_count: usize = 0;
     observer.progress("Reading tags", result.stats, 0);
@@ -432,7 +513,10 @@ pub fn scanWithScratch(allocator: A, scratch: A, backend: anytype, previous: *co
     std.mem.sort(Album, albums.items, {}, albumLess);
     var old_albums = std.StringHashMap(*const Album).init(scratch);
     defer old_albums.deinit();
-    if (same_source) for (previous.albums) |*album| try old_albums.put(album.key, album);
+    if (same_source) {
+        try old_albums.ensureTotalCapacity(@intCast(previous.albums.len));
+        for (previous.albums) |*album| try old_albums.put(album.key, album);
+    }
     for (albums.items, 0..) |*album, index| {
         if (observer.cancelled()) return error.Cancelled;
         for (album.tracks) |track| mutable_tracks[track].album_index = @intCast(index);

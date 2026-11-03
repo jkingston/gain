@@ -207,14 +207,7 @@ pub const Backend = struct {
             self.metrics.artwork_ticks += elapsed;
             self.metrics.artwork_max = @max(self.metrics.artwork_max, elapsed);
         }
-        var selected: ?core.Entry = null;
-        for ([_][]const u8{ "cover.jpg", "cover.jpeg", "cover.png", "folder.jpg", "folder.png" }) |name| {
-            for (entries) |entry| if (entry.kind == .artwork and std.mem.eql(u8, std.fs.path.dirname(entry.path) orelse "", album.directory) and std.ascii.eqlIgnoreCase(std.fs.path.basename(entry.path), name)) {
-                selected = entry;
-                break;
-            };
-            if (selected != null) break;
-        }
+        var selected = core.sidecarArtwork(entries, album.directory);
         if (selected == null) for (album.tracks) |index| {
             const track = tracks[index];
             if (track.meta.embedded_art) {
