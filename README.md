@@ -393,6 +393,43 @@ only need the pixel/input contract may import `src/simulator.zig` directly. The
 module ABI is desktop development tooling, independent of any future firmware
 extension system.
 
+The production player UI is one optional app for this host. Build it separately;
+the simulator itself has no player dependency:
+
+```sh
+mise run build-player-ui
+python3 tools/mock_sd.py /tmp/gain-sd
+GAIN_SD_ROOT=/tmp/gain-sd zig-out/bin/gain-sim \
+  --app zig-out/lib/libgain-player-ui.dylib --watch
+```
+
+Use `.so` instead of `.dylib` on Linux. `GAIN_SD_ROOT` accepts any directory,
+including a mounted SD card or a real music folder. The adapter reads it through
+the production scanner and native tag readers, publishing progressive views on
+a background worker. It does not write to the supplied root. Playback uses a
+test transport clock; this app does not produce audio or emulate device timing.
+Artwork currently uses the renderer's missing-cover fallback.
+
+The mock-card generator uses synthetic encoded audio, fictional multilingual
+tags, cover images, a playlist and preallocated firmware cache files. Generated
+cards must be outside the repo. `--mount /path/to/files` can add real files or
+folders through symlinks; the adapter still opens them read-only. No personal
+paths, collection data or generated cards are needed by repository tests.
+`GAIN_UI_CATALOG` optionally supplies external catalogue JSON when no SD root is
+set; it is a fixture input, not the normal library-discovery path.
+
+`mise run test-player-ui` tests the actual controller/app with a generated card
+and mounted synthetic files, without SDL. An optional local collection check is:
+
+```sh
+python3 tools/check_player_ui.py --app zig-out/lib/libgain-player-ui.dylib \
+  --sd-root /path/to/music
+```
+
+Start each new UI experiment from the current production player at a recorded
+commit, in a disposable checkout. Run that app in the generic host and bring
+proven changes back; a separate lab player is not a maintained reference UI.
+
 For source-triggered rebuilds, the stdlib-only Python helper runs an argument
 list without a shell and preserves the old app after build/reload failures:
 

@@ -1,0 +1,249 @@
+"""Exercise the production UI app with a synthetic card or an optional SD root.
+
+The app owns file access and its test transport clock. No SDL timing or physical
+F20 performance is inferred from these host checks.
+"""
+
+from __future__ import annotations
+
+import argparse
+import ctypes as c
+import hashlib
+import json
+import os
+from pathlib import Path
+import tempfile
+import time
+
+from mock_sd import ROOT, create, tagged_flac
+
+BUTTONS = {
+    name: index
+    for index, name in enumerate(
+        (
+            "up",
+            "down",
+            "select",
+            "back",
+            "menu",
+            "previous",
+            "next",
+            "volume_up",
+            "volume_down",
+            "power",
+        )
+    )
+}
+Pixels = c.c_uint16 * (320 * 240)
+
+
+class Event(c.Structure):
+    _fields_ = [("input", c.c_uint32), ("phase", c.c_uint32)]
+
+
+class Api(c.Structure):
+    _fields_ = [
+        (name, c.c_uint32) for name in ("version", "size", "width", "height", "format")
+    ]
+    _fields_ += [
+        ("init", c.CFUNCTYPE(None, c.c_uint64)),
+        ("input", c.CFUNCTYPE(None, Event, c.c_uint64)),
+        ("frame", c.CFUNCTYPE(c.c_bool, c.POINTER(Pixels), c.c_uint64)),
+        ("save", c.c_void_p),
+        ("restore", c.c_void_p),
+        ("deinit", c.CFUNCTYPE(None)),
+    ]
+
+
+class Status(c.Structure):
+    _fields_ = [
+        (name, c.c_uint32)
+        for name in (
+            "version",
+            "screen",
+            "selection",
+            "first",
+            "rows",
+            "tracks",
+            "albums",
+            "artists",
+            "revision",
+            "scanning",
+            "failure",
+            "scan_failure",
+            "parsed",
+            "reused",
+            "playing",
+            "held",
+        )
+    ] + [("selected_id", c.c_uint64), ("playing_id", c.c_uint64)]
+
+
+class Player:
+    def __init__(self, app, root):
+        self.module = c.CDLL(str(app))
+        self.module.gain_app_api.restype = c.POINTER(Api)
+        self.module.gain_player_ui_status.argtypes = [c.POINTER(Status)]
+        self.api = self.module.gain_app_api().contents
+        if (
+            self.api.version,
+            self.api.size,
+            self.api.width,
+            self.api.height,
+            self.api.format,
+        ) != (2, c.sizeof(Api), 320, 240, 565):
+            raise RuntimeError("Incompatible simulator app")
+        self.pixels = Pixels()
+        self.now = 0
+        self.old_root = os.environ.get("GAIN_SD_ROOT")
+        os.environ["GAIN_SD_ROOT"] = str(root)
+        self.api.init(0)
+
+    def close(self):
+        self.api.deinit()
+        if self.old_root is None:
+            os.environ.pop("GAIN_SD_ROOT", None)
+        else:
+            os.environ["GAIN_SD_ROOT"] = self.old_root
+
+    def status(self):
+        value = Status()
+        self.module.gain_player_ui_status(c.byref(value))
+        result = {name: getattr(value, name) for name, _ in Status._fields_}
+        if result["version"] != 1 or result["failure"] or result["scan_failure"]:
+            raise RuntimeError(f"Player UI failure: {result}")
+        return result
+
+    def frame(self, elapsed=17):
+        self.now += elapsed
+        self.api.frame(c.byref(self.pixels), self.now)
+        return self.status()
+
+    def edge(self, button, pressed=True, phase=None):
+        self.now += 1
+        self.api.input(
+            Event(
+                BUTTONS[button], phase if phase is not None else (0 if pressed else 1)
+            ),
+            self.now,
+        )
+
+    def tap(self, *buttons):
+        for button in buttons:
+            self.edge(button)
+            self.edge(button, False)
+        return self.frame()
+
+    def settle_scan(self):
+        deadline = time.monotonic() + 30
+        while True:
+            result = self.frame()
+            if not result["scanning"]:
+                return result
+            if time.monotonic() >= deadline:
+                raise RuntimeError("Host SD scan timed out")
+            time.sleep(0.002)
+
+
+def qualify(app, root, synthetic=False):
+    player = Player(app, root)
+    try:
+        initial = player.settle_scan()
+        if synthetic:
+            assert (initial["tracks"], initial["albums"], initial["artists"]) == (
+                192,
+                4,
+                4,
+            ), initial
+            artist = player.tap("next", "next", "select", "select", "select")
+            assert artist["rows"] == 48, artist
+            player.tap("next", "next", "next")
+            chosen = player.status()["selected_id"]
+            playing = player.tap("select")
+            assert playing["playing"] and playing["playing_id"] == chosen, playing
+            player.tap("select")
+            # Manual update uses the same scanner and reuses unchanged native tags.
+            player.tap("menu", "next", "next", "next", "next", "select", "select")
+            updated = player.settle_scan()
+            assert updated["reused"] == 192 and updated["parsed"] == 0, updated
+            changed = sorted(root.rglob("*.flac"))[0]
+            changed.write_bytes(
+                tagged_flac(
+                    changed.read_bytes(),
+                    {
+                        "TITLE": "Changed synthetic title",
+                        "ARTIST": changed.parent.parent.name,
+                        "ALBUMARTIST": changed.parent.parent.name,
+                        "ALBUM": changed.parent.name,
+                        "TRACKNUMBER": 1,
+                        "DISCNUMBER": 1,
+                    },
+                )
+            )
+            player.tap("select")
+            retagged = player.settle_scan()
+            assert retagged["reused"] == 191 and retagged["parsed"] == 1, retagged
+            changed.unlink()
+            player.tap("select")
+            removed = player.settle_scan()
+            assert removed["tracks"] == 191 and removed["reused"] == 191, removed
+            player.tap("menu", "next", "next", "next", "select")
+            start = player.status()["selection"]
+            player.edge("next")
+            assert player.frame(318)["selection"] == start + 1
+            assert player.frame(2)["selection"] == start + 2
+            fast = player.frame(1800)
+            assert fast["selection"] > start + 3, fast
+            player.edge("next", False)
+            stopped = player.frame()["selection"]
+            assert player.frame(5000)["selection"] == stopped
+            assert player.tap("previous")["selection"] == stopped - 1
+        return {
+            "passed": True,
+            "tracks": initial["tracks"],
+            "albums": initial["albums"],
+            "artists": initial["artists"],
+            "synthetic": synthetic,
+            "host_only": True,
+        }
+    finally:
+        player.close()
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--app", type=Path, required=True)
+    parser.add_argument(
+        "--sd-root", type=Path, help="Optional external root; no files are changed"
+    )
+    args = parser.parse_args()
+    app = args.app.resolve(strict=True)
+    if args.sd_root:
+        result = qualify(app, args.sd_root.resolve(strict=True))
+    else:
+        with tempfile.TemporaryDirectory(prefix="gain-ui-card-") as directory:
+            root = Path(directory) / "sd"
+            create(root, albums=4, tracks_per_album=48)
+            result = qualify(app, root, synthetic=True)
+            # Reload/deinit must join a scan even before its first publication.
+            interrupted = Player(app, root)
+            interrupted.frame()
+            interrupted.close()
+            sources = [
+                ROOT / "tests/fixtures/codecs" / name
+                for name in ("flac-16.flac", "aac44.m4a", "stereo-cbr.mp3")
+            ]
+            before = [hashlib.sha256(path.read_bytes()).digest() for path in sources]
+            mounted = Path(directory) / "mounted-sd"
+            create(mounted, albums=0, mounts=sources, caches=False)
+            checked = qualify(app, mounted)
+            assert checked["tracks"] == len(sources), checked
+            assert before == [
+                hashlib.sha256(path.read_bytes()).digest() for path in sources
+            ]
+            result["mounted_files"] = checked["tracks"]
+    print(json.dumps(result, indent=2))
+
+
+if __name__ == "__main__":
+    main()

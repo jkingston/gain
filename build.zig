@@ -164,6 +164,22 @@ pub fn build(b: *std.Build) void {
     if (b.option([]const u8, "sim-app", "Native app library to run")) |path| simulator_run.addArgs(&.{ "--app", path });
     if (b.option(bool, "sim-watch", "Reload the app when its built module changes") orelse false) simulator_run.addArg("--watch");
     b.step("sim", "Run a native app in the F20 simulator (-Dsim-app=PATH)").dependOn(&simulator_run.step);
+    const player_app_module = b.createModule(.{
+        .root_source_file = b.path("tools/player_app.zig"),
+        .target = b.graph.host,
+        .optimize = .ReleaseSafe,
+        .link_libc = true,
+    });
+    player_app_module.addImport("gain_ui", b.createModule(.{
+        .root_source_file = b.path("src/ui_api.zig"),
+        .target = b.graph.host,
+        .optimize = .ReleaseSafe,
+    }));
+    const player_app = b.addLibrary(.{ .name = "gain-player-ui", .linkage = .dynamic, .root_module = player_app_module });
+    b.step("build-player-ui", "Build the production player UI as a simulator app").dependOn(&b.addInstallArtifact(player_app, .{}).step);
+    const player_ui_check = b.addSystemCommand(&.{ "python3", "tools/check_player_ui.py", "--app" });
+    player_ui_check.addArtifactArg(player_app);
+    b.step("test-player-ui", "Qualify the production UI with a generated mock SD card").dependOn(&player_ui_check.step);
     const sim_core_module = b.createModule(.{ .root_source_file = b.path("tools/sim_core.zig"), .target = b.graph.host, .optimize = .Debug });
     sim_core_module.addImport("gain_simulator", simulator_api);
     const sim_unit_tests = b.addTest(.{ .root_module = sim_core_module });

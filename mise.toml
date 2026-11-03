@@ -50,6 +50,14 @@ run = 'zig build build-sim ${SDL_PREFIX:+-Dsdl-prefix="$SDL_PREFIX"}'
 description = "Run a native app in the F20 simulator (set GAIN_SIM_APP)"
 run = 'zig build sim -Dsim-app="${GAIN_SIM_APP:?Set GAIN_SIM_APP to a native app library}" ${SDL_PREFIX:+-Dsdl-prefix="$SDL_PREFIX"}'
 
+[tasks.build-player-ui]
+description = "Build the production player UI as an app for gain-sim"
+run = "zig build build-player-ui"
+
+[tasks.test-player-ui]
+description = "Qualify production UI navigation and scanning with a synthetic SD card"
+run = "zig build test-player-ui --summary all"
+
 [tasks.sim-check]
 description = "Run native simulator release qualification headlessly"
 run = 'zig build test-sim ${SDL_PREFIX:+-Dsdl-prefix="$SDL_PREFIX"} --summary all'
@@ -69,6 +77,7 @@ run = [
     { task = "build" },
     { task = "test" },
     { task = "test-tools" },
+    { task = "test-player-ui" },
 ]
 
 [tasks.fuzz-codecs]
