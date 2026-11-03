@@ -42,6 +42,7 @@ pub const audio_descriptors = Region{ .start = 0x230000, .bytes = 4096 };
 pub const usb_dma = Region{ .start = 0x240000, .bytes = @import("x1000_dma.zig").window_bytes };
 pub const canvas = Region{ .start = 0x300000, .bytes = 320 * 240 * 2 };
 pub const display_snapshot = Region{ .start = 0x340000, .bytes = 320 * 240 * 2 };
+pub const display_next = Region{ .start = 0x3a0000, .bytes = 320 * 240 * 2 };
 pub const display_staging = Region{ .start = 0x380000, .bytes = 320 * 42 * 2 };
 pub const flac_left = Region{ .start = 0x400000, .bytes = 65535 * 4 };
 pub const flac_right = Region{ .start = 0x440000, .bytes = 65535 * 4 };
@@ -57,12 +58,12 @@ pub const audio_buffers = Region{ .start = 0x1000000, .bytes = 4 * 512 * 1024 };
 pub const audio_buffer_capacity = 512 * 1024;
 pub const catalog_a = Region{ .start = 0x1200000, .bytes = 6 * 1024 * 1024 };
 pub const catalog_b = Region{ .start = catalog_a.end(), .bytes = 6 * 1024 * 1024 };
-pub const task_stacks = Region{ .start = 0x1f00000, .bytes = 512 * 1024 };
+pub const task_stacks = Region{ .start = 0x1f00000, .bytes = 768 * 1024 };
 pub const output_stack = Region{ .start = task_stacks.start, .bytes = 32 * 1024 };
 pub const ui_stack = Region{ .start = output_stack.end(), .bytes = 32 * 1024 };
 pub const control_stack = Region{ .start = ui_stack.end(), .bytes = 32 * 1024 };
 pub const codec_stack = Region{ .start = control_stack.end(), .bytes = 352 * 1024 };
-pub const storage_stack = Region{ .start = codec_stack.end(), .bytes = 64 * 1024 };
+pub const storage_stack = Region{ .start = codec_stack.end(), .bytes = 320 * 1024 };
 pub const storage_burst = Region{ .start = read_ahead.start, .bytes = 64 * 1024 };
 pub const decoder_cache = Region{ .start = storage_burst.end(), .bytes = 64 * 1024 };
 pub const codec_packet = Region{ .start = compressed_ring.start, .bytes = 65536 + 64 };
@@ -73,6 +74,16 @@ pub const interrupt_stack = Region{ .start = 0x1fdc000, .bytes = 8192 };
 // Keep ROM recovery state below all stacks so an overflow cannot destroy it.
 pub const rom_context = Region{ .start = 0x204000, .bytes = 4096 };
 pub const boot_stack = Region{ .start = 0x1fe0000, .bytes = 0x1f000 };
+// Concurrent scanner owns these gaps; none alias decoder or playback input.
+// Separate temporary locator maps keep the 1.5 MiB scanner workspace below
+// its measured worst case. The 128 KiB below this reservation stays available
+// to the previously qualified RAM loader.
+pub const scan_maps = Region{ .start = 0x1e20000, .bytes = 0xe0000 };
+pub const scan_scratch = Region{ .start = 0xe80000, .bytes = 0x180000 };
+pub const scan_io = Region{ .start = 0x740000, .bytes = 0x20000 };
+pub const scan_views = Region{ .start = 0x780000, .bytes = 0x80000 };
+pub const scan_artwork = Region{ .start = 0x704000, .bytes = 0x3c000 };
+pub const cover_cache = Region{ .start = 0x280000, .bytes = 0x80000 };
 pub const regions = [_]Region{
     firmware,
     lcd_descriptors,
@@ -83,6 +94,7 @@ pub const regions = [_]Region{
     usb_dma,
     canvas,
     display_snapshot,
+    display_next,
     display_staging,
     flac_left,
     flac_right,
@@ -99,6 +111,12 @@ pub const regions = [_]Region{
     interrupt_stack,
     rom_context,
     boot_stack,
+    scan_scratch,
+    scan_io,
+    scan_views,
+    scan_artwork,
+    cover_cache,
+    scan_maps,
 };
 
 comptime {

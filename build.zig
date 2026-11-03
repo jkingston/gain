@@ -420,7 +420,7 @@ pub fn build(b: *std.Build) void {
     const flac_pipeline_sim_tests = b.addTest(.{ .root_module = flac_pipeline_sim_module });
     const display_tests_step = b.step("test-ui", "Run UI and presentation regressions in Debug and ReleaseFast");
     for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |mode| {
-        for ([_][]const u8{ "src/ui.zig", "src/presentation.zig", "src/display_phase.zig", "src/player_view.zig", "src/player_presenter.zig", "tools/ui_bench_report.zig" }) |source| {
+        for ([_][]const u8{ "src/ui.zig", "src/music_ui.zig", "src/canvas.zig", "src/font_data.zig", "src/cover_cache.zig", "src/cover_flow.zig", "src/volume_transition.zig", "src/render_ahead.zig", "src/display_banks.zig", "src/display_trace.zig", "src/presentation.zig", "src/display_phase.zig", "src/player_view.zig", "src/player_presenter.zig", "tools/ui_bench_report.zig" }) |source| {
             const tests = b.addTest(.{
                 .root_module = b.createModule(.{ .root_source_file = b.path(source), .target = b.graph.host, .optimize = mode }),
             });
@@ -478,7 +478,7 @@ pub fn build(b: *std.Build) void {
     }
     const pipeline_tests_step = b.step("test-pipeline", "Run shared executive, session and PCM pipeline regressions");
     for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |mode| {
-        for ([_][]const u8{ "tools/player_check_report.zig", "tools/player_pcm_checksum.zig", "src/file_browser.zig", "src/player_screen.zig", "src/f20_player.zig", "src/buffer_regions.zig", "src/executive.zig", "src/task_context.zig", "src/task_stack.zig", "src/task_dispatch.zig", "src/byte_ring.zig", "src/input_stream.zig", "src/codec_pool.zig", "src/codec_runtime.zig", "src/media_source.zig", "src/f20_memory.zig", "src/pcm_reservoir.zig", "src/audio_output.zig" }) |source| {
+        for ([_][]const u8{ "src/sd_arming.zig", "src/deadline_timer.zig", "src/scan_admission.zig", "src/track_selection.zig", "tools/player_check_report.zig", "tools/player_pcm_checksum.zig", "src/file_browser.zig", "src/player_screen.zig", "src/f20_player.zig", "src/buffer_regions.zig", "src/executive.zig", "src/task_context.zig", "src/task_stack.zig", "src/task_dispatch.zig", "src/byte_ring.zig", "src/input_stream.zig", "src/codec_pool.zig", "src/codec_runtime.zig", "src/media_source.zig", "src/f20_memory.zig", "src/pcm_reservoir.zig", "src/audio_output.zig" }) |source| {
             const tests = b.addTest(.{
                 .root_module = b.createModule(.{ .root_source_file = b.path(source), .target = b.graph.host, .optimize = mode }),
             });
@@ -544,8 +544,9 @@ pub fn build(b: *std.Build) void {
     }
     const library_step = b.step("test-library", "Test portable catalogue reconciliation and persistence");
     for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |mode| {
-        for ([_][]const u8{ "src/catalog_codec.zig", "src/diagnostics.zig", "src/catalog_store.zig", "src/library_metadata.zig", "src/maintenance_protocol.zig", "src/f20_storage.zig" }) |path| {
+        for ([_][]const u8{ "src/progressive_view.zig", "src/f20_library.zig", "src/catalog_codec.zig", "src/diagnostics.zig", "src/catalog_store.zig", "src/library_metadata.zig", "src/maintenance_protocol.zig", "src/f20_storage.zig" }) |path| {
             const module = b.createModule(.{ .root_source_file = b.path(path), .target = b.graph.host, .optimize = mode });
+            if (std.mem.eql(u8, path, "src/f20_library.zig")) @import("build_art.zig").add(b, module, b.graph.host, mode, false);
             library_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = module })).step);
         }
         const art_tests = b.createModule(.{

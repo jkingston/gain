@@ -3,11 +3,11 @@
 const std = @import("std");
 const c = @import("c_jpeg");
 
-pub const edge = 112;
+pub const edge = @import("artwork_tile.zig").edge;
 pub const pixel_count = edge * edge;
 pub const sum_words = pixel_count * 4;
 
-pub const Tile = struct { pixels: [pixel_count]u16 = @splat(0), x: u16 = 0, y: u16 = 0, width: u16 = 0, height: u16 = 0 };
+pub const Tile = @import("artwork_tile.zig").Tile;
 
 pub fn decode(source: anytype, offset: u64, length: u32, sums: []u32, tile: *Tile, observer: anytype) !void {
     if (sums.len < sum_words or offset > source.length or length > source.length - offset) return error.InvalidArtwork;

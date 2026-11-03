@@ -42,6 +42,9 @@ pub const Runtime = struct {
     /// Called with interrupts masked; the board acknowledges its sources and
     /// notifies tasks without I2C, rendering, allocation or media decoding.
     hardware_interrupt: ?*const fn (*Runtime) void = null,
+    /// One bounded peripheral launch; never renders, allocates or waits.
+    deadline_at: ?*const fn () ?u32 = null,
+    deadline_interrupt: ?*const fn () void = null,
 
     pub fn run(self: *Runtime, specifications: [executive.task_count]Specification) void {
         std.debug.assert(active == null);
@@ -144,6 +147,7 @@ pub const Runtime = struct {
             if (cause & timer_interrupt != 0) {
                 Timer.shutdown();
                 self.scheduler.policy.wakeExpired(now_ticks);
+                if (self.deadline_interrupt) |launch| launch();
             }
             if (cause & external_interrupt != 0) if (self.hardware_interrupt) |handle| handle(self);
         } else if (code == 8 and cause & (1 << 31) == 0) {
@@ -159,7 +163,8 @@ pub const Runtime = struct {
         if (self.scheduler.running) {
             const current_ticks = self.clock.sample(x.Timer.now());
             const deadline = self.scheduler.policy.nextDeadline() orelse current_ticks + maintenance_ticks;
-            Timer.arm(@intCast(@max(1, @min(deadline - @min(current_ticks, deadline), maintenance_ticks))));
+            const peripheral = if (self.deadline_at) |get| get() else null;
+            Timer.arm(@import("deadline_timer.zig").delay(x.Timer.now(), peripheral, deadline - @min(current_ticks, deadline), maintenance_ticks));
         } else Timer.shutdown();
         const charged = self.accounting.observe(now_ticks, self.clock.sample(x.Timer.now()));
         self.metrics.task_ticks[@backingInt(interrupted)] += charged.task;

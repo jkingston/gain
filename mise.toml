@@ -94,3 +94,11 @@ run = "zig build test-usb --summary all"
 [tasks.check-usb-f20]
 description = "Qualify USB SD copy/eject on macOS (pass --output; set GAIN_USBBOOT)"
 run = "python3 tools/run_usb_checks.py"
+
+[tasks.check-music-f20]
+description = "Qualify production Cover Flow, playback and indexing over RAM-only USB"
+run = "python3 tools/run_music_checks.py"
+
+[tasks.fonts]
+description = "Regenerate pinned glyph masks (requires Pillow)"
+run = ["python3 tools/build_fonts.py", "zig fmt src/font_data.zig"]

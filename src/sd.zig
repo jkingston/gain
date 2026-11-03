@@ -342,8 +342,22 @@ pub fn Controller(comptime Board: type) type {
             x1000.Msc0.command.write(command.index);
             x1000.Msc0.argument.write(command.argument);
             x1000.Msc0.command_attributes.write(attributes);
-            x1000.Msc0.control.write(x1000.Msc0.start_operation);
-            if (command.data != null) x1000.Msc0.dma_control.write(1);
+            const Arm = struct {
+                pub fn mask(_: *@This()) u32 {
+                    return x1000.Interrupts.disableCpu();
+                }
+                pub fn restore(_: *@This(), status: u32) void {
+                    x1000.Interrupts.restoreCpu(status);
+                }
+                pub fn beginCommand(_: *@This()) void {
+                    x1000.Msc0.control.write(x1000.Msc0.start_operation);
+                }
+                pub fn dma(_: *@This()) void {
+                    x1000.Msc0.dma_control.write(1);
+                }
+            };
+            var arm: Arm = .{};
+            @import("sd_arming.zig").start(&arm, command.data != null);
 
             var completion = Completion{ .done = done, .response_pending = command.response != .none };
             const start = x1000.Timer.now();

@@ -143,14 +143,8 @@ test "catalogue codec roundtrips metadata and bounds malformed allocations" {
 test "complete catalogue roundtrip preserves references and rejects every truncation" {
     const member = [_]u32{0};
     const tracks = [_]library.Track{
-        .{
-            .id = 7,
-            .path = "Music/楽団/1.m4a",
-            .stamp = .{ .size = 12345, .modified = 13 },
-            .meta = .{ .title = "A song", .artist = "楽団", .album = "Album", .gain = .{ .track_db = -3.5 } },
-        },
+        .{ .id = 7, .path = "Music/楽団/1.m4a", .stamp = .{ .size = 12345, .modified = 13 }, .meta = .{ .title = "A song", .artist = "楽団", .album = "Album", .gain = .{ .track_db = -3.5 } } },
     };
-
     const albums = [_]library.Album{.{ .id = 11, .key = "release", .title = "Album", .artist = "楽団", .directory = "Music/楽団", .tracks = &member }};
     const value = library.Catalog{ .generation = 2, .source = 1, .tracks = &tracks, .albums = &albums, .artists = &.{
         .{ .name = "楽団", .albums = &member },

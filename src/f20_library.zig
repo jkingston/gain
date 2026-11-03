@@ -16,6 +16,8 @@ pub const Hooks = struct {
     context: *anyopaque,
     poll: *const fn (*anyopaque) bool,
     progress: *const fn (*anyopaque, []const u8, core.Stats, u32) void,
+    checkpoint: ?*const fn (*anyopaque, *const core.Catalog, []const core.Track, core.Stats) anyerror!void = null,
+    aborted: ?*const fn (*anyopaque, *const core.Catalog) void = null,
 };
 
 pub const Metrics = struct {
@@ -36,6 +38,31 @@ pub const Backend = struct {
     files: std.StringHashMap(fat.File),
     metrics: Metrics = .{},
     artpack: ?ArtPack = null,
+    concurrent: bool = false,
+
+    pub fn replaceText(_: *Backend, destination: *[]const u8, value: []const u8) void {
+        // A slice is two words on MIPS. Do not expose a torn pointer/length to
+        // the preemptive UI when final folder-context inheritance refines it.
+        const masks = x.Interrupts.disableCpu();
+        destination.* = value;
+        x.Interrupts.restoreCpu(masks);
+    }
+
+    pub fn checkpoint(self: *Backend, previous: *const core.Catalog, tracks: []const core.Track, stats: core.Stats) !void {
+        if (self.hooks.checkpoint) |callback| try callback(self.hooks.context, previous, tracks, stats);
+    }
+
+    pub fn aborted(self: *Backend, previous: *const core.Catalog) void {
+        if (self.hooks.aborted) |callback| callback(self.hooks.context, previous);
+    }
+
+    fn bounce(self: *Backend) []u8 {
+        return if (self.concurrent) memory.scan_io.uncachedSlice(u8)[0..65536] else memory.storage_burst.uncachedSlice(u8);
+    }
+
+    fn cache(self: *Backend) []u8 {
+        return if (self.concurrent) memory.scan_io.cachedSlice(u8)[65536..] else memory.decoder_cache.cachedSlice(u8);
+    }
 
     pub fn init(volume: *Volume, hooks: Hooks, allocator: A) Backend {
         return .{ .volume = volume, .hooks = hooks, .allocator = allocator, .files = std.StringHashMap(fat.File).init(allocator) };
@@ -57,6 +84,10 @@ pub const Backend = struct {
     pub fn enumerate(self: *Backend, a: A) !core.Enumeration {
         const began = x.Timer.now();
         defer self.metrics.enumeration_ticks += x.Timer.elapsed(began);
+        // Reserve locator buckets before the growing entry vector. With the
+        // fixed allocator its last allocation can then grow in place, instead
+        // of retaining interleaved old vector/map allocations during discovery.
+        try self.reserveEnumeration();
         var entries: std.ArrayList(core.Entry) = .empty;
         defer entries.deinit(self.allocator);
         try self.walk(a, self.volume.rootDirectory(), "", 0, &entries);
@@ -66,6 +97,10 @@ pub const Backend = struct {
             }
         }.less);
         return .{ .source = self.volume.serial, .entries = try a.dupe(core.Entry, entries.items) };
+    }
+
+    fn reserveEnumeration(self: *Backend) !void {
+        try self.files.ensureTotalCapacity(8192);
     }
 
     fn walk(self: *Backend, a: A, directory: fat.Directory, parent: []const u8, depth: usize, entries: *std.ArrayList(core.Entry)) anyerror!void {
@@ -112,7 +147,7 @@ pub const Backend = struct {
 
         pub fn read(self: *Reader, out: []u8) !usize {
             if (self.backend.cancelled()) return error.Cancelled;
-            var buffered = try storage.BufferedReader(Volume.Reader).init(&self.raw, memory.storage_burst.uncachedSlice(u8));
+            var buffered = try storage.BufferedReader(Volume.Reader).init(&self.raw, self.backend.bounce());
             const n = try buffered.read(out);
             self.backend.metrics.source_bytes += n;
             return n;
@@ -128,7 +163,7 @@ pub const Backend = struct {
         }
         const file = self.files.get(entry.path) orelse return error.NotFound;
         var reader = Reader{ .raw = try self.volume.reader(file), .backend = self };
-        var source = try @import("media_source.zig").Source(Reader).init(&reader, file.size, memory.decoder_cache.cachedSlice(u8));
+        var source = try @import("media_source.zig").Source(Reader).init(&reader, file.size, self.cache());
         return media.extract(a, &source, std.fs.path.extension(entry.path));
     }
 
@@ -161,6 +196,11 @@ pub const Backend = struct {
     }
 
     pub fn artwork(self: *Backend, a: A, album: core.Album, tracks: []const core.Track, entries: []const core.Entry, previous: ?core.Artwork, mode: core.Mode) !core.Artwork {
+        if (self.concurrent) {
+            // Retain a known cover or a deliberate fallback; image preparation
+            // and cache writes resume only after playback workers have joined.
+            return if (previous) |old| core.clone(a, old) else .{};
+        }
         const began = x.Timer.now();
         defer {
             const elapsed = x.Timer.elapsed(began);
@@ -197,7 +237,7 @@ pub const Backend = struct {
         const pack = &self.artpack.?;
         const file = self.files.get(chosen.path) orelse return error.NotFound;
         var reader = Reader{ .raw = try self.volume.reader(file), .backend = self };
-        var source = try @import("media_source.zig").Source(Reader).init(&reader, file.size, memory.decoder_cache.cachedSlice(u8));
+        var source = try @import("media_source.zig").Source(Reader).init(&reader, file.size, self.cache());
 
         const Range = struct { offset: u64, length: u32 };
         const range: Range = if (chosen.kind == .artwork) .{ .offset = 0, .length = file.size } else embedded: {
@@ -293,3 +333,29 @@ const ArtPack = struct {
         return slot;
     }
 };
+
+test "idle and playing discovery reserve map buckets before growing the entry vector" {
+    const Model = struct {
+        fn run(reserved: bool) !usize {
+            const bytes = try std.testing.allocator.alloc(u8, memory.scan_maps.bytes);
+            defer std.testing.allocator.free(bytes);
+            const names = try std.testing.allocator.alloc([24]u8, 5000);
+            defer std.testing.allocator.free(names);
+            var fixed = std.heap.FixedBufferAllocator.init(bytes);
+            const allocator = fixed.allocator();
+            var backend = Backend.init(undefined, undefined, allocator);
+            defer backend.deinit();
+            if (reserved) try backend.reserveEnumeration();
+            var entries: std.ArrayList(core.Entry) = .empty;
+            defer entries.deinit(allocator);
+            for (names, 0..) |*name, i| {
+                const path = try std.fmt.bufPrint(name, "music/{d:0>4}.m4a", .{i});
+                try entries.append(allocator, .{ .path = path, .kind = .audio });
+                try backend.files.put(path, .{ .first_cluster = @intCast(i + 2), .size = 4096 });
+            }
+            return fixed.end_index;
+        }
+    };
+    try std.testing.expectError(error.OutOfMemory, Model.run(false));
+    try std.testing.expect(try Model.run(true) <= memory.scan_maps.bytes);
+}

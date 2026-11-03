@@ -20,12 +20,18 @@ const stack = @import("task_stack.zig");
 const stacks = [_]memory.Region{ memory.output_stack, memory.ui_stack, memory.control_stack, memory.codec_stack, memory.storage_stack };
 const event = 1;
 const timer_hz = x.Timer.milliseconds(1000);
-const ui_ticks = timer_hz / 60;
+const ui_ticks = timer_hz / 1000;
 const control_ticks = x.Timer.milliseconds(10);
 const preroll_milliseconds = 100;
 const decoder_batch_frames = 8192;
 const startup_margin_periods = 4;
 const dma_word_bytes = @sizeOf(u32);
+
+pub const StorageService = struct {
+    context: *anyopaque,
+    // Called only between complete filesystem operations, on the storage task.
+    poll: *const fn (*anyopaque) bool,
+};
 
 pub const Config = struct {
     descriptor_count: u8 = 120,
@@ -35,6 +41,8 @@ pub const Config = struct {
     report_out: ?*Report = null,
     // Runs only in the control task, which exclusively owns I2C.
     background: ?struct { context: *anyopaque, poll: *const fn (*anyopaque) void } = null,
+
+    storage_work: ?struct { context: *anyopaque, run: *const fn (*anyopaque, StorageService) void } = null,
 
     pub fn valid(self: Config) bool {
         return (playback.Config{
@@ -172,6 +180,10 @@ fn Player(comptime Reader: type) type {
                 controller.waiter = null;
             };
             self.runtime.hardware_interrupt = interrupt;
+            self.runtime.deadline_at = @import("f20_display.zig").pendingDeadline;
+            self.runtime.deadline_interrupt = @import("f20_display.zig").launchFromInterrupt;
+            @import("f20_display.zig").useInterruptLaunch(true);
+            defer @import("f20_display.zig").useInterruptLaunch(false);
             self.runtime.run(.{
                 .{
                     .entry = outputEntry,
@@ -319,24 +331,50 @@ fn Player(comptime Reader: type) type {
             self.runtime.retire();
         }
 
+        fn fillInput(self: *Self) bool {
+            const burst_bytes = self.workspace.burst.len - dma_word_bytes;
+            if (self.cancelled() or self.codec_done.load(.acquire) or !self.input.producerReady(burst_bytes)) return false;
+            const alignment_offset = self.input.producer_position & (dma_word_bytes - 1);
+            _ = self.input.produce(self.workspace.burst[alignment_offset..][0..burst_bytes]) catch |failure| self.fail(failure);
+            self.storage_steps += 1;
+            return true;
+        }
+
+        fn scanPoll(context: *anyopaque) bool {
+            const self: *Self = @ptrCast(@alignCast(context));
+            while (self.fillInput()) {}
+            // A scan only borrows slack after the codec has a generous PCM
+            // reserve. Waiting yields to output, UI, control and codec owners.
+            while (!self.cancelled() and !self.codec_done.load(.acquire) and !@import("scan_admission.zig").admit(.{
+                .started = self.started,
+                .cancelled = self.cancelled(),
+                .sample_rate = self.information.sample_rate,
+                .pcm_frames = self.reservoir.available(),
+            })) {
+                _ = self.runtime.take(event);
+                self.runtime.wait(event, self.runtime.now() + x.Timer.milliseconds(1));
+                while (self.fillInput()) {}
+            }
+            return self.cancelled();
+        }
+
         fn storageEntry() callconv(.c) noreturn {
             const self = current();
             while (true) {
                 _ = self.runtime.take(event);
-                const burst_bytes = self.workspace.burst.len - dma_word_bytes;
-                if (!self.cancelled() and !self.codec_done.load(.acquire) and self.input.producerReady(burst_bytes)) {
-                    self.storage_idle.store(false, .release);
-                    const alignment_offset = self.input.producer_position & (dma_word_bytes - 1);
-                    _ = self.input.produce(self.workspace.burst[alignment_offset..][0..burst_bytes]) catch |failure| {
-                        self.fail(failure);
-                    };
-                    self.storage_steps += 1;
-                    self.storage_idle.store(true, .release);
-                    self.runtime.notify(.control, event);
-                    continue;
-                }
+                self.storage_idle.store(false, .release);
+                if (self.fillInput()) continue;
+                if (@import("scan_admission.zig").admit(.{
+                    .started = self.started,
+                    .cancelled = self.cancelled(),
+                    .sample_rate = if (self.header_ready.load(.acquire)) self.information.sample_rate else 0,
+                    .pcm_frames = self.reservoir.available(),
+                })) if (self.config.storage_work) |work| {
+                    work.run(work.context, .{ .context = self, .poll = scanPoll });
+                };
                 self.storage_idle.store(true, .release);
-                self.runtime.wait(event, null);
+                self.runtime.notify(.control, event);
+                self.runtime.wait(event, if (self.config.storage_work != null and !self.cancelled()) self.runtime.now() + x.Timer.milliseconds(20) else null);
             }
         }
 
@@ -532,6 +570,19 @@ fn Player(comptime Reader: type) type {
                     continue;
                 };
                 if (self.config.background) |background| background.poll(background.context);
+                const diagnostics = @import("f20_diagnostics.zig");
+                diagnostics.report.live_pcm_frames = @intCast(self.reservoir.available());
+                diagnostics.report.live_input_bytes = @intCast(self.input.ring.available());
+                diagnostics.report.live_decode_frames = @truncate(self.produced_frames);
+                diagnostics.report.codec_ticks = @truncate(self.runtime.metrics.task_ticks[3]);
+                diagnostics.report.control_ticks = @truncate(self.runtime.metrics.task_ticks[2]);
+                diagnostics.report.storage_task_ticks = @truncate(self.runtime.metrics.task_ticks[4]);
+                diagnostics.report.idle_ticks = @truncate(self.runtime.metrics.task_ticks[5]);
+                diagnostics.report.live_played_frames = if (self.state) |state| @truncate(@as(u64, state.chunks_completed) * self.plan.frames) else 0;
+                diagnostics.report.live_underruns = if (self.engine) |engine| engine.underrun_count else 0;
+                diagnostics.report.live_ui_gap = self.maximum_ui_gap_ticks;
+                diagnostics.report.live_fill = self.worst_fill_ticks;
+
                 self.runtime.wait(event, self.runtime.now() + control_ticks);
             }
         }

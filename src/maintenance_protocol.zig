@@ -2,7 +2,7 @@
 //! completed ACK publishes it to the application owner.
 const std = @import("std");
 
-pub const Action = enum(u8) { quick = 1, verify = 2, play = 3, stop = 4, reconnect = 5, rom = 6, flush = 7 };
+pub const Action = enum(u8) { quick = 1, verify = 2, play = 3, stop = 4, reconnect = 5, rom = 6, flush = 7, rebuild = 8, input = 9 };
 
 pub const Command = struct { action: Action, value: u16 = 0 };
 
@@ -17,7 +17,8 @@ pub const State = struct {
         if (self.ready != null or !player_allowed or bytes[0] != 0xc0 or std.mem.readInt(u16, bytes[4..6], .little) != 0 or std.mem.readInt(u16, bytes[6..8], .little) != 4) return null;
         const action: Action = std.enums.fromInt(Action, bytes[1] -| 0x60) orelse return null;
         const value = std.mem.readInt(u16, bytes[2..4], .little);
-        if (action != .play and value != 0) return null;
+        if (action != .play and action != .input and value != 0) return null;
+        if (action == .input and value > 6) return null;
         self.waiting = .{ .action = action, .value = value };
         return self.waiting;
     }
@@ -59,7 +60,7 @@ test "unknown requests, host ownership, OUT direction and malformed lengths cann
         var state: State = .{};
         const bytes = [_]u8{ 0xc0, @intCast(request), 0, 0, 0, 0, length, 0 };
         const proposed = state.begin(bytes, true);
-        if (proposed != null) try std.testing.expect(length == 4 and request >= 0x61 and request <= 0x67);
+        if (proposed != null) try std.testing.expect(length == 4 and request >= 0x61 and request <= 0x69);
         try std.testing.expect(state.begin(bytes, false) == null);
         state.ack(bytes);
         try std.testing.expect(state.take() == null);

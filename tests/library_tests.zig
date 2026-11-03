@@ -378,3 +378,36 @@ test "playlist paths use a virtual card root and preserve Unicode without openin
     try std.testing.expect((try core.playlistPath(a, "List.m3u", "https://example.invalid/music")) == null);
     try std.testing.expect((try core.playlistPath(a, "List.m3u", "C:\\Music\\1.wav")) == null);
 }
+
+test "cancellation withdraws borrowed previews before freeing their scan arena" {
+    const Preview = struct {
+        borrowed: ?*const core.Track = null,
+        valid_during_abort: bool = false,
+        aborted_count: u32 = 0,
+
+        pub fn cancelled(self: *@This()) bool {
+            return self.borrowed != null;
+        }
+        pub fn progress(_: *@This(), _: []const u8, _: core.Stats, _: u32) void {}
+        pub fn checkpoint(self: *@This(), _: *const core.Catalog, tracks: []const core.Track, _: core.Stats) !void {
+            self.borrowed = &tracks[0];
+        }
+        pub fn aborted(self: *@This(), _: *const core.Catalog) void {
+            if (self.borrowed) |track| self.valid_during_abort = std.mem.eql(u8, track.meta.title, "Track");
+            self.borrowed = null;
+            self.aborted_count += 1;
+        }
+    };
+    var names: [33][32]u8 = undefined;
+    var entries: [33]core.Entry = undefined;
+    for (&names, &entries, 0..) |*name, *entry, i| entry.* = .{
+        .path = try std.fmt.bufPrint(name, "Album/{d:0>2}.flac", .{i}),
+        .kind = .audio,
+    };
+    var backend = Fake{ .entries = &entries };
+    var preview: Preview = .{};
+    try std.testing.expectError(error.Cancelled, core.scan(std.testing.allocator, &backend, &.{}, .quick, &preview));
+    try std.testing.expectEqual(1, preview.aborted_count);
+    try std.testing.expect(preview.valid_during_abort);
+    try std.testing.expect(preview.borrowed == null);
+}

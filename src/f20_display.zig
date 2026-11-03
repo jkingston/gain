@@ -1,5 +1,6 @@
 //! F20 V2.7 backend. Canvas writes never touch the DMA-owned source.
 const x = @import("x1000.zig");
+const trace = @import("display_trace.zig");
 const board = @import("f20_v27.zig").display;
 const lcd_dma = @import("lcd_dma.zig");
 const phase = @import("display_phase.zig");
@@ -12,12 +13,15 @@ const descriptors: *align(32) volatile lcd_dma.Chain = @ptrFromInt(board.dma_des
 const write_command: *align(64) volatile [4]u8 = @ptrFromInt(board.dma_command_address);
 pub const framebuffer: *[board.width * board.height]u16 = @ptrFromInt(board.framebuffer_address);
 const snapshot: *[board.width * board.height]u16 = @ptrFromInt(board.dma_snapshot_address);
-const staging: *[board.dma_staging_pixel_capacity]u16 = @ptrFromInt(board.dma_staging_address);
+const next_snapshot: *[board.width * board.height]u16 = @ptrFromInt(@import("f20_memory.zig").display_next.uncached());
 var state = presentation.State{};
 const timeout_ticks = x.Timer.milliseconds(100);
 const quick_disable_done = @as(u32, 1) << 7;
 var panel_config: phase.Config = undefined;
 var launch_deadline: ?u32 = null;
+var missed_deadline: ?u32 = null;
+var launch_owner: @import("deadline_timer.zig").LaunchOwner = .poll;
+pub var last_failure: ?anyerror = null;
 var prepared_region: Region = undefined;
 var prepared_source: usize = 0;
 const fifo_underrun = @as(u32, 1) << 2;
@@ -140,17 +144,38 @@ fn prepareRect(left: u16, top: u16, width: u16, height: u16, source: usize) !voi
     prepared_region = .{ .x = left, .y = top, .width = width, .height = height };
     prepared_source = source;
     launch_deadline = null;
+    missed_deadline = null;
 }
 
-/// Copies only while idle. Full frames have their own immutable snapshot;
-/// packed regions have even row width and never share the mutable canvas.
+pub const Frozen = struct { region: Region, source: usize };
+
+/// CPU rendering and packing may overlap the previous transfer. Never choose
+/// the bank retained by the controller, including its FIFO/disable ACK phase.
+/// The caller retains at most one pending canvas until presentFrozen consumes it.
+pub fn freeze(region: Region) !Frozen {
+    const aligned = try presentation.alignedRegion(region, board.width, board.height);
+    const address = @import("display_banks.zig").inactive(prepared_source, @intFromPtr(snapshot), @intFromPtr(next_snapshot));
+    const destination: *[board.width * board.height]u16 = @ptrFromInt(address);
+    try presentation.pack(framebuffer, board.width, board.height, aligned, destination);
+    return .{ .region = aligned, .source = @intFromPtr(destination) };
+}
+
+fn prepareFrozen(frozen: Frozen) !void {
+    if (state.owned()) return error.DisplayOwned;
+    if (frozen.source != @intFromPtr(snapshot) and frozen.source != @intFromPtr(next_snapshot)) return error.DisplaySource;
+    const r = frozen.region;
+    try prepareRect(r.x, r.y, r.width, r.height, frozen.source);
+}
+
+pub fn presentFrozen(frozen: Frozen, synchronized: bool) !void {
+    const deadline = if (synchronized) try targetFor(frozen.region) else null;
+    try prepareFrozen(frozen);
+    if (deadline) |at| launch_deadline = at else try commit();
+}
+
 pub fn prepare(region: Region) !void {
     if (state.owned()) return error.DisplayOwned;
-    const aligned = try presentation.alignedRegion(region, board.width, board.height);
-    const full = aligned.x == 0 and aligned.y == 0 and aligned.width == board.width and aligned.height == board.height;
-    const destination: []u16 = if (full) snapshot else staging;
-    try presentation.pack(framebuffer, board.width, board.height, aligned, destination);
-    try prepareRect(aligned.x, aligned.y, aligned.width, aligned.height, @intFromPtr(destination.ptr));
+    try prepareFrozen(try freeze(region));
 }
 
 /// Only a bounded launch belongs in a deadline handler. Packing, GPIO reads
@@ -159,34 +184,86 @@ pub fn commit() !void {
     if (state.phase != .prepared) return error.DisplayNotPrepared;
     if (x.Lcd.mcu_state.read() & x.Lcd.mcu_busy != 0) return error.DisplayBusy;
     launch_deadline = null;
+    missed_deadline = null;
     try state.commit(x.Timer.now());
     x.Lcd.control.write(x.Lcd.burst_64_words | x.Lcd.control_enable);
+    trace.record(.commit, x.Timer.now(), @as(u32, prepared_region.width) * prepared_region.height);
 }
 
 pub fn cancel() !void {
     try state.cancel();
     launch_deadline = null;
+    missed_deadline = null;
     restoreDirect();
+}
+
+/// Prepare ahead of the measured refresh instead of beating a fixed16ms
+/// timer against this panel's approximately14.6ms scan. Three milliseconds
+/// reserve the measured partial redraw/packing work plus one UI polling tick.
+pub fn renderIntervalMs() u64 {
+    return @max(1, panel_config.period / x.Timer.milliseconds(1) -| 3);
+}
+
+pub fn useInterruptLaunch(enabled: bool) void {
+    launch_owner = if (enabled) .interrupt else .poll;
+}
+
+pub fn pendingDeadline() ?u32 {
+    return launch_deadline;
+}
+
+pub fn launchFromInterrupt() void {
+    if (state.phase != .prepared) return;
+    const deadline = launch_deadline orelse return;
+    switch (phase.launchAt(x.Timer.now(), deadline)) {
+        .wait => {},
+        .commit => commit() catch |failure| {
+            last_failure = last_failure orelse failure;
+            state.phase = .failed;
+        },
+        .retarget => {
+            launch_deadline = null;
+            missed_deadline = deadline;
+        },
+    }
+}
+
+/// Idle has no task timer. Wait only for the final sub-millisecond launch
+/// interval; playback uses the bounded interrupt callback above instead.
+pub fn idleLaunch() void {
+    const deadline = launch_deadline orelse return;
+    const remaining = @as(i32, @bitCast(deadline -% x.Timer.now()));
+    if (remaining < 0 or remaining > x.Timer.milliseconds(1)) return;
+    while (@as(i32, @bitCast(deadline -% x.Timer.now())) > 0) {}
+    launchFromInterrupt();
 }
 
 pub fn poll() Poll {
     if (state.phase == .idle) return .idle;
     if (state.phase == .prepared) {
-        if (launch_deadline) |deadline| switch (phase.launchAt(x.Timer.now(), deadline)) {
+        if (!@import("deadline_timer.zig").pollMayHandle(launch_owner, missed_deadline != null)) return .busy;
+        if (launch_deadline orelse missed_deadline) |deadline| switch (phase.launchAt(x.Timer.now(), deadline)) {
             .wait => return .busy,
-            .commit => commit() catch {
+            .commit => commit() catch |failure| {
+                last_failure = last_failure orelse failure;
                 state.phase = .failed;
                 return .failed;
             },
             .retarget => {
+                trace.record(.retarget, x.Timer.now(), x.Timer.now() -% deadline);
                 const region = prepared_region;
                 const source = prepared_source;
-                cancel() catch return .failed;
-                const next = targetFor(region) catch {
+                cancel() catch |failure| {
+                    last_failure = last_failure orelse failure;
+                    return .failed;
+                };
+                const next = targetFor(region) catch |failure| {
+                    last_failure = last_failure orelse failure;
                     state.phase = .failed;
                     return .failed;
                 };
-                prepareRect(region.x, region.y, region.width, region.height, source) catch {
+                prepareRect(region.x, region.y, region.width, region.height, source) catch |failure| {
+                    last_failure = last_failure orelse failure;
                     state.phase = .failed;
                     return .failed;
                 };
@@ -201,11 +278,15 @@ pub fn poll() Poll {
         .bus_busy = x.Lcd.mcu_state.read() & x.Lcd.mcu_busy != 0,
         .disable_done = flags & quick_disable_done != 0,
         .fault = flags & fifo_underrun != 0,
-    }) catch return .failed; // Keep ownership on fault; never silently reuse.
+    }) catch |failure| {
+        last_failure = last_failure orelse failure;
+        return .failed; // Keep ownership on fault; never silently reuse.
+    };
     switch (action) {
         .none => {},
         .disable => x.Lcd.control.write(x.Lcd.burst_64_words),
         .release => {
+            trace.record(.release, x.Timer.now(), 0);
             restoreDirect();
             board.backlight.set(true);
             return .idle;

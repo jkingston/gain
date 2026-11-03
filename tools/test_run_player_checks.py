@@ -30,6 +30,8 @@ class TransportTests(unittest.TestCase):
     def command(self, arguments, **_):
         args = list(map(str, arguments))
         self.calls.append(args)
+        if args[0] == "usbboot" and "--cpuinfo" in args:
+            return subprocess.CompletedProcess(args, 0, b"X1000_v1", b"")
         if args[0].endswith("player-reference"):
             return subprocess.CompletedProcess(args, 0, "", "0\n")
         if args[0] == "usbboot" and "--upload" in args:

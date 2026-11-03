@@ -38,7 +38,7 @@ current RAM-only build provides:
 - native FLAC decoding and bounded C backends for MP3, AAC, ALAC, Vorbis and Opus;
 - identified ES9018K2M, filters, de-emphasis, mute and output routing;
 - linked-PDMA PCM playback with source-validated buffer ownership;
-- a folder browser and now-playing screen with track and volume controls;
+- music home, album Cover Flow, album track lists, now-playing and folder browsing;
 - DAC hardware volume and bounded, priority-aware display updates;
 - a watchdog-backed panic screen.
 
@@ -78,11 +78,29 @@ at 192 kHz. A separate 30-second real-SD/UI run at 96 kHz completed 3,001 DMA
 periods and 598 volume changes without underruns. These are bounded workloads,
 not claims about every file, analogue performance or battery life.
 
-The interactive player uses a shared declarative renderer for its browser and
-now-playing views. Declarations own their copied text, use fixed command/text
-budgets, clip glyphs to their widget, and accept a theme. The desktop simulator presents the same framebuffer format and physical inputs;
-apps own their rendering and navigation. The device browser reads the actual
-FAT32 microSD.
+The music interface shares a portable controller, RGB565 rasterizer, font masks
+and Cover Flow geometry with host adapters. The F20 adapter supplies display
+presentation, library projections, artwork requests and measurements through
+compile-time interfaces. Drawing never opens files or allocates memory. Folder
+browsing retains its declarative renderer; choose Folders from Music and press
+Menu to return.
+
+Cover Flow uses seven perspective-projected covers, a 128 × 128 prepared front
+cover, restrained reflections and centred captions. Storage prepares artwork
+once into a twelve-slot column-major cache, prioritising the visible covers and
+destination. Prepared entries include artwork identity, so retagged art reloads
+without changing album selection. Bad tiles use a cached fallback and do not
+block other covers; changed art or a remount permits another load.
+Disk validation, unpacking and filtering yield in bounded chunks
+when idle; during playback the executive preempts storage work for audio/UI.
+Headers and captions retain their pixels between animation frames. The default
+projection supports 8,192 tracks and 1,024 albums; a limit failure retains the
+previous published view.
+
+The font masks retain their original coverage, advances and layout boxes while
+omitting transparent padding. Source fonts, OFL notices, rasterizer versions and
+hashes are in `assets/fonts`, including the pinned Noto fallback bitmap. `tools/build_fonts.py` regenerates the atlas with
+Pillow; normal builds use the committed masks. Unavailable glyphs use `?`.
 
 Presentation is hybrid: volume, progress and selection rows use true region
 DMA; initial presentation and screen changes use full-frame DMA. Odd dirty
@@ -103,8 +121,13 @@ DMA-source ownership remain independently tested portable policies.
 The native application scans FAT32 after mounting the card or returning from USB.
 Quick refresh compares paths, sizes and FAT modification stamps; verify rereads
 metadata and artwork. FAT timestamps are coarse: use verify for edits that keep
-both size and timestamp. A cancelled or incomplete enumeration keeps the previous
-catalogue. Per-file parse failures retain previous known tags and record the error.
+both size and timestamp. Scans publish first at 32 tracks, then in batches of 128, at most once every
+300 ms; completion publishes the final view. Selection follows stable track and
+album identities through insertions. Display track order follows disc/track tags
+and then natural filename order, independently of the path-sorted scan records.
+A cancelled or incomplete enumeration keeps the previous catalogue. Selecting music or Folders interrupts an idle scan; the scan can
+resume under storage ownership during playback. Preview and artwork references
+are withdrawn before cancelled scan memory is reclaimed. Per-file parse failures retain previous known tags and record the error.
 FAT starting clusters are mount-local locators, never persistent track identity.
 
 Library tags currently cover MP4/AAC/ALAC and FLAC. Other decoded formats use
@@ -117,9 +140,11 @@ native artwork path. Playback codec support is listed separately below.
 The catalogue has two checksummed generations, with payload committed before its
 header. A failed save leaves the previous bank selected. Artwork tiles also
 publish headers last. Cache sizes are fixed, and a missing/full cache disables
-persistence rather than creating files in firmware. Catalogue and temporary
-workspace allocation are separate and released before playback needs the
-compressed-audio workspace.
+persistence rather than creating files in firmware. During playback, catalogue generations stay pinned until workers join, and the
+scanner uses separate reserved memory. Background SD work requires at least
+500 ms of buffered PCM. Artwork changes and catalogue writes wait for idle
+storage ownership; a quick refresh then completes deferred artwork. Now Playing
+and pending selections own their metadata independently of catalogue lifetimes.
 
 To provision the files while the identified Gain SD card is mounted:
 
@@ -165,8 +190,27 @@ semantic testing after eject. Commands commit only after their USB ACK. This
 interface has no arbitrary memory write or execute operation; the normal release
 build omits it. A zero build identity means unspecified; evidence should also
 retain the image SHA-256. Experiments and captured reports belong outside this repo.
-The full player's soft ROM return is not yet reliable after indexing; a physical
-mask-ROM reset is still needed when that development command loses USB.
+The development ROM handoff resets the controller and enters the ROM afresh;
+the uploader waits for the X1000 identity and verifies every uploaded RAM byte
+before starting the player. Detailed display traces exist only in instrumented
+builds. Normal builds omit their recorder and maintenance controls.
+
+RAM-only music/UI qualification (use a catalogue track longer than the scan):
+
+```sh
+mise run check-music-f20 -- --output /path/outside/gain --track TRACK_INDEX \
+  --build-id BUILD_NUMBER --usbboot /path/to/usbboot
+```
+
+This exercises idle/playback/indexing Cover Flow, volume transitions, progressive
+scan completion, deferred artwork, folder browsing and return to Music. It saves
+image identity, exact RAM verification, frame traces, scan outcomes and pacing
+gates outside the checkout. Active-animation timing keeps real stalls visible;
+explicitly observed idle gaps are reported separately. Gates require enough
+motion samples and constrain median, 95th-percentile and worst submission gaps.
+The check may update Gain's preallocated cache/log files. It does not modify music
+or NAND. Display submissions are measured; panel scanout and acoustic quality
+still need separate observation.
 
 ## Media support
 
@@ -609,3 +653,4 @@ stage two and calls gain's handoff at `0xf4001a00`.
 
 gain is released under the [MIT License](LICENSE). Vendored code retains its
 upstream notices; pinned sources and local changes are listed in `vendor/sources.json`.
+Source fonts and compiled glyph masks retain their SIL OFL notices in `assets/fonts`.

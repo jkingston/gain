@@ -243,6 +243,18 @@ pub const Pdma = struct {
 /// CPU interrupt routing. Sources are level-triggered: mask at entry, service
 /// and acknowledge in the owning task, then unmask after the work is complete.
 pub const Interrupts = struct {
+    pub fn disableCpu() u32 {
+        if (comptime @import("builtin").cpu.arch != .mipsel) return 0;
+        return asm volatile ("di %[old];ehb"
+            : [old] "=r" (-> u32),
+            :
+            : .{ .memory = true });
+    }
+
+    pub fn restoreCpu(status: u32) void {
+        if (comptime @import("builtin").cpu.arch != .mipsel) return;
+        if (status & 1 != 0) asm volatile ("ei;ehb" ::: .{ .memory = true });
+    }
     const base = 0xb0001000;
 
     // Linked-descriptor completion has its own PDMAD source. PDMA reports

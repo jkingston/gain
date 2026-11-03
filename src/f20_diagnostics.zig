@@ -71,6 +71,53 @@ pub const Report = extern struct {
     index_io_ticks: u32 = 0,
     index_io_failures: u32 = 0,
     index_stack_used: u32 = 0,
+    scan_active: u32 = 0,
+    scan_visited: u32 = 0,
+    scan_total: u32 = 0,
+    scan_publications: u32 = 0,
+    scan_view_tracks: u32 = 0,
+    scan_view_albums: u32 = 0,
+    scan_cancelled: u32 = 0,
+    scan_scratch_peak: u32 = 0,
+    scan_worst_publication: u32 = 0,
+    scan_played_start: u32 = 0,
+    scan_played_end: u32 = 0,
+    scan_complete: u32 = 0,
+    live_played_frames: u32 = 0,
+    live_underruns: u32 = 0,
+    live_ui_gap: u32 = 0,
+    live_fill: u32 = 0,
+    live_storage_stack: u32 = 0,
+    scan_deferred_artwork: u32 = 0,
+    selected_album_low: u32 = 0,
+    selected_album_high: u32 = 0,
+    selected_album_rank: u32 = 0,
+    scan_failure: u32 = 0,
+    control_ticks: u32 = 0,
+    ui_task_ticks: u32 = 0,
+    storage_task_ticks: u32 = 0,
+    scan_maps_peak: u32 = 0,
+    build_id_low: u32 = 0,
+    build_id_high: u32 = 0,
+    ui_drawn: u32 = 0,
+    ui_draw_max: u32 = 0,
+    ui_animation_gap_max: u32 = 0,
+    ui_animation_slow: u32 = 0,
+    ui_animation_frames: u32 = 0,
+    live_pcm_frames: u32 = 0,
+    live_input_bytes: u32 = 0,
+    live_decode_frames: u32 = 0,
+    ui_trace_next: u32 = 0,
+    raw_timer: u32 = 0,
+    ui_clock_wraps: u32 = 0,
+    power_samples_dropped: u32 = 0,
+    ui_stack_used: u32 = 0,
+    cover_header_max: u32 = 0,
+    cover_scene_max: u32 = 0,
+    cover_caption_max: u32 = 0,
+    scan_last_command: u32 = 0,
+    scan_last_status: u32 = 0,
+    scan_last_flags: u32 = 0,
 };
 
 var clocks: @import("executive.zig").Clock = .{ .previous = 0 };
@@ -99,6 +146,8 @@ pub fn initialize(build_identity: u64, painted: bool) void {
     started = x.Timer.now();
     clocks = .{ .previous = started };
     build = build_identity;
+    report.build_id_low = @truncate(build_identity);
+    report.build_id_high = @truncate(build_identity >> 32);
     session = (@as(u64, started) << 32) ^ build;
     allocators[0] = std.heap.FixedBufferAllocator.init(memory.catalog_a.cachedSlice(u8));
     allocators[1] = std.heap.FixedBufferAllocator.init(memory.catalog_b.cachedSlice(u8));
@@ -288,6 +337,34 @@ pub fn scan(volume: *Volume, hooks: native.Hooks, mode: library.Mode) !void {
     if (catalog) |*previous| previous.deinit();
     catalog = next;
     current_slot = target;
+    const io = volume.device.counters;
+    report.index_read_sectors = @intCast(io.read_sectors - io_before.read_sectors);
+    report.index_written_sectors = @intCast(io.write_sectors - io_before.write_sectors);
+    report.index_io_ticks = @truncate(io.ticks - io_before.ticks);
+    report.index_io_failures = io.failures - io_before.failures;
+    recordIndex(.{
+        .stats = next.value.stats,
+        .metrics = backend.metrics,
+        .reads = io.reads - io_before.reads,
+        .writes = io.writes - io_before.writes,
+        .bus_hz = volume.device.bus_hz,
+        .scratch_bytes = @intCast(scratch.end_index),
+        .verify = mode == .verify,
+    });
+}
+
+pub const IndexSummary = struct {
+    stats: library.Stats = .{},
+    metrics: native.Metrics = .{},
+    reads: u32 = 0,
+    writes: u32 = 0,
+    bus_hz: u32 = 0,
+    scratch_bytes: u32 = 0,
+    verify: bool = false,
+};
+
+/// Emit one bounded set of summaries after storage/playback ownership joins.
+pub fn recordIndex(summary: IndexSummary) void {
     event(.library, .{
         report.index_ticks,
         report.index_tracks,
@@ -306,8 +383,8 @@ pub fn scan(volume: *Volume, hooks: native.Hooks, mode: library.Mode) !void {
         report.index_directory_ticks,
         report.index_metadata_ticks,
         report.index_artwork_ticks,
-        backend.metrics.metadata_max,
-        backend.metrics.artwork_max,
+        summary.metrics.metadata_max,
+        summary.metrics.artwork_max,
         0,
         0,
         0,
@@ -316,33 +393,28 @@ pub fn scan(volume: *Volume, hooks: native.Hooks, mode: library.Mode) !void {
         0,
         1,
     });
-    const io = volume.device.counters;
-    report.index_read_sectors = @intCast(io.read_sectors - io_before.read_sectors);
-    report.index_written_sectors = @intCast(io.write_sectors - io_before.write_sectors);
-    report.index_io_ticks = @truncate(io.ticks - io_before.ticks);
-    report.index_io_failures = io.failures - io_before.failures;
     event(.library_io, .{
         report.index_read_sectors,
         report.index_written_sectors,
-        io.reads - io_before.reads,
-        io.writes - io_before.writes,
+        summary.reads,
+        summary.writes,
         report.index_io_ticks,
         report.index_io_failures,
-        volume.device.bus_hz,
-        @intCast(scratch.end_index),
-        @intCast(allocators[target].end_index),
+        summary.bus_hz,
+        summary.scratch_bytes,
+        report.index_heap,
         report.index_stack_used,
         0,
         0,
     });
-    const changes = next.value.stats;
+    const changes = summary.stats;
     event(.library_changes, .{
         changes.added,
         changes.changed,
         changes.renamed,
         changes.removed,
         changes.errors,
-        @intFromBool(mode == .verify),
+        @intFromBool(summary.verify),
         0,
         0,
         0,
@@ -410,6 +482,11 @@ pub fn samplePower(pmic: *@import("f20_power.zig").Controller) void {
         report.power_valid = 0;
         report.coulomb_running = 0;
         previous_coulomb = null;
+        if (err == error.UnstableAdc) {
+            report.power_valid = 0;
+            report.power_samples_dropped += 1;
+            return;
+        }
         failed(4, err);
         return;
     };
@@ -468,6 +545,11 @@ pub fn samplePower(pmic: *@import("f20_power.zig").Controller) void {
 }
 
 pub fn playback(value: @import("f20_player.zig").Report) void {
+    report.ui_stack_used = value.stack_used[1];
+    report.control_ticks = @truncate(value.runtime.task_ticks[2]);
+    report.ui_task_ticks = @truncate(value.runtime.task_ticks[1]);
+    report.storage_task_ticks = @truncate(value.runtime.task_ticks[4]);
+    report.live_storage_stack = value.stack_used[4];
     report.codec_ticks = @truncate(value.runtime.task_ticks[3]);
     report.idle_ticks = @truncate(value.runtime.task_ticks[5]);
     report.played_frames = @truncate(value.played_frames);
@@ -506,4 +588,30 @@ pub fn booted() void {
     boot_recorded = true;
     report.boot_ticks = x.Timer.elapsed(started);
     event(.boot, .{ report.boot_ticks, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 });
+}
+
+// Called only after prior playback workers have joined or by its sole storage
+// owner. The live catalogue remains pinned until finishBackground runs outside
+// the executive, including the metadata used by Now Playing.
+pub fn backgroundAllocator() std.mem.Allocator {
+    const target = current_slot ^ 1;
+    allocators[target].reset();
+    return allocators[target].allocator();
+}
+
+pub fn finishBackground(next: library.Owned) void {
+    if (catalogue_file) |file| if (volume_ptr) |volume| {
+        const began = x.Timer.now();
+        if (volume.overwrite(file)) |raw| {
+            var writer = raw;
+            committed = store.save(&writer, &next.value, committed, (file.size - managed.prefix_bytes) / 2, memory.scan_io.uncachedSlice(u8)[0..65536]) catch |failure| failed_save: {
+                failed(2, failure);
+                break :failed_save committed;
+            };
+        } else |_| {}
+        report.index_save_ticks = x.Timer.elapsed(began);
+    };
+    if (catalog) |*old| old.deinit();
+    catalog = next;
+    current_slot ^= 1;
 }

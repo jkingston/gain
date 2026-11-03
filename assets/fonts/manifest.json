@@ -1,0 +1,98 @@
+{
+  "original_mask_sha256": "dbadfdf96ad8494f9a350d663a16e85821cb6bae56cd1cd33a94dbbac8780ad1",
+  "packed_mask_sha256": "78cfd1accd0deafc48c354936c362718399c1fe81e217d4aeb402a436ce7c4f2",
+  "original_bytes": 282840,
+  "packed_bytes": 117713,
+  "source_fonts": {
+    "Inter": "29160a80ff49ddcab2c97711247e08b1fab27a484a329ce8b813d820dc559031",
+    "Newsreader": "8a08d13f8a6c0d51be379a60af84f945f65369a67e509ee3c3bdcc421254d7c1"
+  },
+  "roles": {
+    "body": [
+      "Inter",
+      14,
+      450
+    ],
+    "title": [
+      "Inter",
+      19,
+      650
+    ],
+    "serif": [
+      "Newsreader",
+      27,
+      500
+    ],
+    "caption": [
+      "Inter",
+      12,
+      450
+    ],
+    "reading": [
+      "Inter",
+      16,
+      500
+    ]
+  },
+  "fallback_bitmaps": {
+    "body": {
+      "code": 173,
+      "width": 7,
+      "height": 21,
+      "advance": 6,
+      "box": [
+        1,
+        8,
+        5,
+        11
+      ],
+      "mask": "04040404ffffffff34343434"
+    },
+    "title": {
+      "code": 173,
+      "width": 8,
+      "height": 26,
+      "advance": 7,
+      "box": [
+        1,
+        11,
+        6,
+        14
+      ],
+      "mask": "2c2c2c2c2cffffffffffffffffffff"
+    },
+    "caption": {
+      "code": 173,
+      "width": 5,
+      "height": 19,
+      "advance": 4,
+      "box": [
+        0,
+        8,
+        4,
+        10
+      ],
+      "mask": "69f0f0a50e202016"
+    },
+    "reading": {
+      "code": 173,
+      "width": 7,
+      "height": 23,
+      "advance": 6,
+      "box": [
+        1,
+        10,
+        5,
+        12
+      ],
+      "mask": "84848484ffffffff"
+    }
+  },
+  "fallback_source": {
+    "NotoSansJP.ttf": "c2f3b4d463500a2ddcd3849cded1fceeb9fd6d1c32e6cbecd568453ba50fc68f"
+  },
+  "rasterizer": {
+    "Pillow": "12.3.0",
+    "FreeType": "2.14.3"
+  }
+}

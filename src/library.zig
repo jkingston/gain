@@ -255,7 +255,11 @@ pub fn scan(allocator: A, backend: anytype, previous: *const Catalog, mode: Mode
 pub fn scanWithScratch(allocator: A, scratch: A, backend: anytype, previous: *const Catalog, mode: Mode, observer: anytype) !Owned {
     if (previous.generation == std.math.maxInt(u64)) return error.CatalogueGeneration;
     var arena = std.heap.ArenaAllocator.init(allocator);
-    errdefer arena.deinit();
+    errdefer {
+        // Withdraw borrowed progressive views before their arena is reclaimed.
+        if (comptime @hasDecl(@typeInfo(@TypeOf(observer)).pointer.child, "aborted")) observer.aborted(previous);
+        arena.deinit();
+    }
     const a = arena.allocator();
     if (observer.cancelled()) return error.Cancelled;
     const enumeration = try backend.enumerate(a);
@@ -341,6 +345,10 @@ pub fn scanWithScratch(allocator: A, scratch: A, backend: anytype, previous: *co
         track_count += 1;
         result.stats.visited += 1;
         if (result.stats.visited % 32 == 0) observer.progress("Reading tags", result.stats, 0);
+        if (comptime @hasDecl(@typeInfo(@TypeOf(observer)).pointer.child, "checkpoint")) {
+            if (result.stats.visited == 32 or result.stats.visited % 128 == 0)
+                try observer.checkpoint(previous, track_storage[0..track_count], result.stats);
+        }
     }
     if (same_source) for (seen) |found| {
         if (!found) result.stats.removed += 1;
@@ -364,8 +372,12 @@ pub fn scanWithScratch(allocator: A, scratch: A, backend: anytype, previous: *co
     for (mutable_tracks) |*track| {
         if (hints.get(editionRoot(track.path))) |hint| {
             if (hint.ambiguous) continue;
-            if (track.meta.album_from_context) track.meta.album = hint.meta.album;
-            if (track.meta.album_artist_from_context and std.mem.eql(u8, track.meta.album, hint.meta.album)) track.meta.album_artist = hint.meta.album_artist;
+            if (track.meta.album_from_context) {
+                if (comptime @hasDecl(@typeInfo(@TypeOf(observer)).pointer.child, "replaceText")) observer.replaceText(&track.meta.album, hint.meta.album) else track.meta.album = hint.meta.album;
+            }
+            if (track.meta.album_artist_from_context and std.mem.eql(u8, track.meta.album, hint.meta.album)) {
+                if (comptime @hasDecl(@typeInfo(@TypeOf(observer)).pointer.child, "replaceText")) observer.replaceText(&track.meta.album_artist, hint.meta.album_artist) else track.meta.album_artist = hint.meta.album_artist;
+            }
         }
     }
     if (same_source) {
