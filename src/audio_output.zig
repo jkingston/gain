@@ -98,17 +98,67 @@ fn render(
         return error.InvalidOutputBuffer;
     }
 
-    @memset(output, 0);
     const words: [*]u32 = @ptrCast(@alignCast(output.ptr));
     var rendered: u32 = 0;
-    while (rendered < plan.frames) : (rendered += 1) {
-        const frame = reservoir.pop() orelse return .{
-            .frames = rendered,
-            .underrun = true,
-        };
-        packFrame(dither, words, rendered, frame, plan.format, gain_q24, quantizer);
+    while (rendered < plan.frames) {
+        const span = reservoir.readable(plan.frames - rendered);
+        if (span.len == 0) {
+            // Samples overwrite complete DMA words. Silence only the unfilled
+            // tail, avoiding a redundant write pass over uncached PCM output.
+            @memset(output[@as(usize, rendered) * plan.format.bytesPerFrame() ..], 0);
+            return .{ .frames = rendered, .underrun = true };
+        }
+        for (span, rendered..) |frame, at| packFrame(dither, words, @intCast(at), frame, plan.format, gain_q24, quantizer);
+        reservoir.consume(span.len);
+        rendered += @intCast(span.len);
     }
     return .{ .frames = rendered, .underrun = false };
+}
+
+test "batched output matches sample-at-a-time bytes and dither through wraps and short reads" {
+    const capacity = 2053;
+    var source: [capacity]pcm_reservoir.StereoFrame = undefined;
+    for (&source, 0..) |*frame, i| frame.* = .{
+        .left = @bitCast(@as(u32, @truncate(i *% 982451653))),
+        .right = @bitCast(@as(u32, @truncate(i *% 32452843))),
+    };
+    var actual: [1920 * 8]u8 align(4) = undefined;
+    var expected: [1920 * 8]u8 align(4) = undefined;
+    inline for ([_]pcm.OutputFormat{ .signed_16_packed, .signed_24_in_u32 }) |format| {
+        const plan = try Plan.init(192000, format);
+        for ([_]usize{ 0, 1, 13, 1900, capacity }) |available_frames| for ([_]usize{ 0, 1, 134, capacity - 1 }) |start| for ([_]u32{ 0, unity_gain_q24 / 2, unity_gain_q24 }) |gain| {
+            inline for (.{ false, true }) |dither| {
+                if (comptime dither and format == .signed_16_packed) continue;
+                var ring = try pcm_reservoir.Ring.initFilled(&source, available_frames);
+                ring.consumer_index = start;
+                ring.producer_index = (start + available_frames) % capacity;
+                ring.read_sequence.store(0xfffffff0, .monotonic);
+                ring.write_sequence.store(0xfffffff0 +% @as(u32, @intCast(available_frames)), .monotonic);
+                var reference = try pcm_reservoir.Ring.initFilled(&source, available_frames);
+                reference.consumer_index = ring.consumer_index;
+                reference.producer_index = ring.producer_index;
+                reference.read_sequence.store(0xfffffff0, .monotonic);
+                reference.write_sequence.store(ring.write_sequence.load(.monotonic), .monotonic);
+                var quantizer = pcm.Sample.Quantizer{};
+                var reference_quantizer = pcm.Sample.Quantizer{};
+                @memset(&expected, 0);
+                const expected_words: [*]u32 = @ptrCast(&expected);
+                var count: u32 = 0;
+                while (count < plan.frames) : (count += 1) {
+                    const frame = reference.pop() orelse break;
+                    packFrame(dither, expected_words, count, frame, format, gain, if (dither) &reference_quantizer else null);
+                }
+                @memset(&actual, 0xa5);
+                const got = if (dither) try renderPeriodDithered(&ring, actual[0..plan.bytes], plan, gain, &quantizer) else try renderPeriod(&ring, actual[0..plan.bytes], plan, gain);
+                try std.testing.expectEqual(count, got.frames);
+                try std.testing.expectEqual(count < plan.frames, got.underrun);
+                try std.testing.expectEqualSlices(u8, expected[0..plan.bytes], actual[0..plan.bytes]);
+                try std.testing.expectEqual(reference_quantizer.random, quantizer.random);
+                try std.testing.expectEqual(reference.consumer_index, ring.consumer_index);
+                try std.testing.expectEqual(reference.available(), ring.available());
+            }
+        };
+    }
 }
 
 fn packFrame(

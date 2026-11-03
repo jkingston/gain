@@ -86,7 +86,47 @@ pub const Ring = struct {
         self.read_sequence.store(read +% 1, .release);
         return frame;
     }
+
+    /// Borrow a contiguous published span without releasing any storage. Only
+    /// the consumer may call this; the producer cannot reuse it until consume.
+    pub fn readable(self: *const Ring, maximum: usize) []const StereoFrame {
+        const read = self.read_sequence.load(.monotonic);
+        const available_frames = self.write_sequence.load(.acquire) -% read;
+        const count = @min(maximum, available_frames, self.storage.len - self.consumer_index);
+        return self.storage[self.consumer_index..][0..count];
+    }
+
+    /// Release a prefix of the borrowed span after all sample reads complete.
+    /// One release per span replaces per-sample publication in period output.
+    pub fn consume(self: *Ring, count: usize) void {
+        std.debug.assert(count <= self.storage.len - self.consumer_index and count <= self.available());
+        const read = self.read_sequence.load(.monotonic);
+        self.consumer_index += count;
+        if (self.consumer_index == self.storage.len) self.consumer_index = 0;
+        self.read_sequence.store(read +% @as(u32, @intCast(count)), .release);
+    }
 };
+
+test "borrowed PCM remains owned until consumption and producer reuse preserves unread suffix" {
+    var storage: [5]StereoFrame = undefined;
+    var ring = try Ring.init(&storage);
+    const source = [_]StereoFrame{ .{ .left = 1, .right = 2 }, .{ .left = 3, .right = 4 }, .{ .left = 5, .right = 6 }, .{ .left = 7, .right = 8 } };
+    try std.testing.expectEqual(4, ring.write(&source));
+    const borrowed = ring.readable(4);
+    try std.testing.expectEqual(1, ring.free());
+    try std.testing.expectEqual(1, ring.write(&source));
+    try std.testing.expectEqualSlices(StereoFrame, &source, borrowed);
+    ring.consume(3);
+    try std.testing.expectEqual(3, ring.write(source[1..]));
+    try std.testing.expectEqual(7, borrowed[3].left);
+    ring.consume(1);
+    try std.testing.expectEqual(1, ring.readable(5).len);
+    try std.testing.expectEqual(1, ring.readable(5)[0].left);
+    ring.consume(1);
+    try std.testing.expectEqualSlices(StereoFrame, source[1..], ring.readable(5));
+    ring.consume(3);
+    try std.testing.expectEqual(0, ring.readable(5).len);
+}
 
 comptime {
     if (@sizeOf(StereoFrame) != 8) @compileError("stereo PCM frames must contain two i32 samples");
@@ -142,7 +182,7 @@ test "sequence wrap preserves occupancy and order" {
     try std.testing.expectEqual(@as(usize, 0), ring.available());
 }
 
-test "producer and consumer contend without loss or torn stereo frames" {
+test "producer and scalar or borrowed consumers contend without loss or torn stereo frames" {
     const frame_count = 250_000;
     var storage: [127]StereoFrame = undefined;
     var ring = try Ring.init(&storage);
@@ -166,7 +206,18 @@ test "producer and consumer contend without loss or torn stereo frames" {
     const producer = try std.Thread.spawn(.{}, Producer.run, .{&ring});
     var expected: u32 = 0;
     while (expected < frame_count) {
-        if (ring.pop()) |frame| {
+        if (expected % 2 == 0) {
+            const span = ring.readable(33);
+            // Let the producer run while these samples are still borrowed.
+            std.Thread.yield() catch {};
+            for (span) |frame| {
+                const value: i32 = @intCast(expected);
+                try std.testing.expectEqual(value, frame.left);
+                try std.testing.expectEqual(~value, frame.right);
+                expected += 1;
+            }
+            ring.consume(span.len);
+        } else if (ring.pop()) |frame| {
             const value: i32 = @intCast(expected);
             try std.testing.expectEqual(value, frame.left);
             try std.testing.expectEqual(~value, frame.right);
