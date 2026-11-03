@@ -419,8 +419,13 @@ pub fn build(b: *std.Build) void {
     flac_pipeline_sim_module.addImport("f20", f20_module);
     const flac_pipeline_sim_tests = b.addTest(.{ .root_module = flac_pipeline_sim_module });
     const display_tests_step = b.step("test-ui", "Run UI and presentation regressions in Debug and ReleaseFast");
+    const input_fuzz = b.addTest(.{
+        .root_module = b.createModule(.{ .root_source_file = b.path("src/input_capture.zig"), .target = b.graph.host, .optimize = .ReleaseSafe }),
+        .filters = &.{"captured edge streams"},
+    });
+    b.step("fuzz-input", "Fuzz captured wheel/button edges, overflow and recovery").dependOn(&b.addRunArtifact(input_fuzz).step);
     for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |mode| {
-        for ([_][]const u8{ "src/ui.zig", "src/music_ui.zig", "src/canvas.zig", "src/font_data.zig", "src/cover_cache.zig", "src/cover_flow.zig", "src/volume_transition.zig", "src/render_ahead.zig", "src/display_banks.zig", "src/display_trace.zig", "src/presentation.zig", "src/display_phase.zig", "src/player_view.zig", "src/player_presenter.zig", "tools/ui_bench_report.zig" }) |source| {
+        for ([_][]const u8{ "src/input_capture.zig", "src/navigation.zig", "src/ui.zig", "src/music_ui.zig", "src/canvas.zig", "src/font_data.zig", "src/cover_cache.zig", "src/cover_flow.zig", "src/volume_transition.zig", "src/render_ahead.zig", "src/display_banks.zig", "src/display_trace.zig", "src/presentation.zig", "src/display_phase.zig", "src/player_view.zig", "src/player_presenter.zig", "tools/ui_bench_report.zig" }) |source| {
             const tests = b.addTest(.{
                 .root_module = b.createModule(.{ .root_source_file = b.path(source), .target = b.graph.host, .optimize = mode }),
             });

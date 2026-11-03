@@ -38,6 +38,10 @@ run = "zig build test-ui --summary all"
 description = "Fuzz display packing and bounds with 100,000 cases"
 run = "zig build fuzz-ui --fuzz=100K --summary all"
 
+[tasks.fuzz-input]
+description = "Fuzz timestamped physical input and overflow recovery with 100,000 cases"
+run = "zig build fuzz-input --fuzz=100K --summary all"
+
 [tasks.build-sim]
 description = "Build the generic F20 simulator (SDL3 required)"
 run = 'zig build build-sim ${SDL_PREFIX:+-Dsdl-prefix="$SDL_PREFIX"}'

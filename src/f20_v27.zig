@@ -206,20 +206,7 @@ pub const storage = struct {
     pub const high_speed_bus_hz: u32 = 50_000_000;
 };
 
-pub const ButtonId = enum(u3) {
-    play,
-    volume_up,
-    volume_down,
-    menu,
-    previous,
-    next,
-    back,
-    power,
-
-    pub fn mask(self: ButtonId) u8 {
-        return @as(u8, 1) << @backingInt(self);
-    }
-};
+pub const ButtonId = @import("input_capture.zig").Button;
 
 pub const Button = struct {
     id: ButtonId,
