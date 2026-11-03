@@ -1,3 +1,7 @@
+const std = @import("std");
+const options = @import("firmware_options");
+const diag = @import("f20_diagnostics.zig");
+const maintenance = @import("maintenance.zig");
 const x1000 = @import("x1000.zig");
 const board = @import("f20_v27.zig");
 const storage = @import("f20_storage.zig");
@@ -98,6 +102,9 @@ fn rawPanicBlink() noreturn {
 }
 
 fn showPanic(cause: u32, epc: u32, status: u32) noreturn {
+    const capsule: *volatile [4]u32 = @ptrFromInt(memory.fault_capsule.uncached());
+    capsule.* = .{ 0x47464155, cause, epc, status };
+    if (options.maintenance) maintenance.returnRom();
     if (!display_ready) rawPanicBlink();
     var cause_text: [8]u8 = undefined;
     var epc_text: [8]u8 = undefined;
@@ -215,6 +222,7 @@ const PlaybackUi = struct {
     browser: *const Browser,
     entry: *const fat32.DirectoryEntry,
     battery_mv: u32,
+    indexed: ?@import("library.zig").Metadata = null,
     screen: @import("player_screen.zig").State,
 };
 
@@ -229,7 +237,7 @@ fn buttonState() u8 {
 fn playbackPoll(context: *anyopaque, status: media.PlaybackStatus) media.PlaybackCommand {
     Watchdog.kick();
     usb.poll();
-    if (usb.needsHandoff()) return .stop;
+    if (usb.needsHandoff() or (options.maintenance and maintenance.pending())) return .stop;
     const state: *PlaybackUi = @ptrCast(@alignCast(context));
     return state.screen.poll(LcdDma, buttonState(), playbackTrack(state), state.battery_mv, view_theme, status);
 }
@@ -265,6 +273,7 @@ fn browserViewState(browser: *const Browser, attenuation: u8) player_view.Browse
 }
 
 fn playbackTrack(state: *const PlaybackUi) player_view.Track {
+    if (state.indexed) |meta| return .{ .name = meta.title, .artist = meta.artist, .album = meta.album };
     const artist_depth = if (state.browser.depth > 1) state.browser.depth - 1 else state.browser.depth;
     const artist = state.browser.titles[artist_depth][0..state.browser.title_lengths[artist_depth]];
     return .{
@@ -311,11 +320,16 @@ fn waitForErrorDismiss(input: *Input) void {
         Watchdog.kick();
         usb.poll();
         if (usb.needsHandoff()) return;
+        if (options.maintenance and maintenance.pending()) return;
         if (input.poll()) |event| {
             if (event == .back or event == .select or event == .home) return;
         }
         Timer.delayMicroseconds(1_000);
     }
+}
+
+fn playbackPower(context: *anyopaque) void {
+    diag.samplePower(@ptrCast(@alignCast(context)));
 }
 
 fn playEntry(
@@ -324,6 +338,7 @@ fn playEntry(
     entry: fat32.DirectoryEntry,
     battery_mv: u32,
     attenuation: u8,
+    pmic: *@import("f20_power.zig").Controller,
 ) !media.Result {
     var file_reader = try volume.reader(try entry.file());
     var playback_ui = PlaybackUi{
@@ -332,14 +347,46 @@ fn playEntry(
         .battery_mv = battery_mv,
         .screen = @import("player_screen.zig").State.init(attenuation),
     };
+    if (diag.catalog) |*catalogue| {
+        var buffer: [4096]u8 = undefined;
+        var path: std.Io.Writer = .fixed(&buffer);
+        for (1..browser.depth + 1) |depth| {
+            path.print("{s}/", .{browser.titles[depth][0..browser.title_lengths[depth]]}) catch break;
+        }
+        path.writeAll(entry.name()) catch {};
+        for (catalogue.value.tracks) |track| if (std.mem.eql(u8, track.path, path.buffered())) {
+            playback_ui.indexed = track.meta;
+            break;
+        };
+    }
     defer _ = LcdDma.resetForDirect();
-    const result = try player.playFile(
+    volume.device.keep_alive = null;
+    diag.report.failure = 0;
+    diag.report.stage = 2;
+    var measured = player.Report.empty();
+    defer {
+        volume.device.keep_alive = keepAlive;
+        diag.report.stage = 0;
+        diag.playback(measured);
+        diag.flush();
+    }
+    const result = player.playFile(
         &file_reader,
         entry.size,
         volume.device,
-        .{ .descriptor_count = 120, .buffer_count = 3, .attenuation = attenuation },
+        .{
+            .descriptor_count = 120,
+            .buffer_count = 3,
+            .attenuation = attenuation,
+            .report_out = &measured,
+            .background = .{ .context = pmic, .poll = playbackPower },
+        },
         .{ .context = &playback_ui, .poll = playbackPoll },
-    );
+    ) catch |failure| {
+        diag.failed(1, failure);
+        return failure;
+    };
+
     if (playback_ui.screen.failed) return error.DisplayFailure;
     return result.playback;
 }
@@ -350,10 +397,11 @@ fn playSelection(
     first_entry: fat32.DirectoryEntry,
     battery_mv: u32,
     attenuation: *u8,
+    pmic: *@import("f20_power.zig").Controller,
 ) !void {
     var entry = first_entry;
     while (true) {
-        const result = try playEntry(volume, browser, entry, battery_mv, attenuation.*);
+        const result = try playEntry(volume, browser, entry, battery_mv, attenuation.*, pmic);
         attenuation.* = result.attenuation;
         if (usb.needsHandoff()) return;
         const direction: i2 = switch (result.exit) {
@@ -366,6 +414,10 @@ fn playSelection(
 }
 
 export fn gain_main() callconv(.c) noreturn {
+    if (options.maintenance) maintenance.saveRom();
+    // SPL (or the warm RAM monitor) already runs OST2. Resetting it here
+    // races the first measurement against the hardware counter clear.
+    diag.initialize(options.build_id, options.maintenance);
     if (!Display.init()) rawPanicBlink();
     display_ready = true;
     Watchdog.start(.external, .by_1024, board.watchdog_timeout_ticks);
@@ -374,6 +426,8 @@ export fn gain_main() callconv(.c) noreturn {
     var input = Input.init();
     var pmic = @import("f20_power.zig").initialize() catch |failure| fatalError("POWER", failure);
     // A failed/disabled ADC is unknown, never a fabricated empty battery.
+    pmic.enableTelemetry() catch |failure| diag.failed(4, failure);
+    pmic.enableCoulombCounting() catch |failure| diag.failed(4, failure);
     const telemetry = pmic.telemetry() catch null;
     const battery_mv: u32 = if (telemetry) |value| value.battery_mv orelse 0 else 0;
 
@@ -392,6 +446,9 @@ export fn gain_main() callconv(.c) noreturn {
     var attenuation: u8 = 64;
     var bookmark: ?Browser.Bookmark = null;
     while (true) {
+        if (options.maintenance) if (maintenance.peek()) |command| {
+            if (command.action == .rom) maintenance.returnRom();
+        };
         // Recreate the controller, FAT cache and browser after every ownership
         // change. Host edits may have replaced directories and cluster chains.
         card = storage.Controller.initialize(resources) catch |failure| {
@@ -399,21 +456,27 @@ export fn gain_main() callconv(.c) noreturn {
             if (usb.needsRemount()) usb.remounted();
             _ = showError("SD CARD", failure);
             waitForErrorDismiss(&input);
-            if (usb.needsHandoff()) runUsbMode();
+            if (usb.needsHandoff()) runUsbMode(&pmic);
             continue;
         };
+        card.keep_alive = keepAlive;
         if (usb.needsRemount()) usb.remounted();
         var volume = Volume.mount(&card, sd_scratch) catch |failure| {
             _ = showError("FILESYSTEM", failure);
             waitForErrorDismiss(&input);
-            if (usb.needsHandoff()) runUsbMode();
+            if (usb.needsHandoff()) runUsbMode(&pmic);
             continue;
+        };
+        diag.attach(&volume);
+        _ = diag.load(&volume) catch |failure| failed_load: {
+            diag.failed(2, failure);
+            break :failed_load false;
         };
 
         var browser = Browser.init(&volume) catch |failure| {
             _ = showError("DIRECTORY", failure);
             waitForErrorDismiss(&input);
-            if (usb.needsHandoff()) runUsbMode();
+            if (usb.needsHandoff()) runUsbMode(&pmic);
             continue;
         };
         if (bookmark) |saved| browser.restore(&volume, saved) catch {};
@@ -424,20 +487,29 @@ export fn gain_main() callconv(.c) noreturn {
         // playFile has joined every task before browse returns. No decoder,
         // SD prefetch, FAT reader or audio callback can now touch the card.
         bookmark = browser.bookmark(&volume) catch null;
-        if (usb.needsHandoff()) runUsbMode();
+        diag.flush();
+        diag.detached();
+        if (usb.needsHandoff()) runUsbMode(&pmic);
         input.resync();
     }
 }
 
-fn runUsbMode() void {
+fn runUsbMode(pmic: *@import("f20_power.zig").Controller) void {
+    diag.flush();
+    diag.event(.usb, .{ 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 });
     Display.clear(Display.black);
     Display.text(32, 68, "USB CONNECTED", Display.white, 3);
     Display.text(32, 124, "EJECT ON COMPUTER TO RETURN", Display.cyan, 1);
     _ = Display.present();
+    var last_health = Timer.now();
     while (true) {
         Watchdog.kick();
         // Service completions continuously while the host owns SD.
         usb.poll();
+        if (Timer.elapsed(last_health) >= Timer.milliseconds(1000)) {
+            last_health = Timer.now();
+            diag.samplePower(pmic);
+        }
         switch (usb.session().state) {
             .quiescing => usb.grantHost() catch {},
             .host, .ejecting => {},
@@ -450,11 +522,52 @@ fn browse(volume: *Volume, browser: *Browser, battery_mv: u32, attenuation_ptr: 
     var attenuation = attenuation_ptr.*;
     defer attenuation_ptr.* = attenuation;
     var power_started: ?u32 = null;
+    var needs_scan = true;
+    var last_flush = Timer.now();
+    diag.booted();
     if (!(drawBrowser(volume, browser, battery_mv, attenuation, null) catch |failure| return failure)) return error.DisplayFailure;
     while (true) {
         Watchdog.kick();
         usb.poll();
         if (usb.needsHandoff()) return;
+        diag.samplePower(pmic);
+        if (Timer.elapsed(last_flush) >= Timer.milliseconds(60_000)) {
+            last_flush = Timer.now();
+            diag.flush();
+        }
+        if (options.maintenance) if (maintenance.take()) |command| {
+            switch (command.action) {
+                .quick, .verify => {
+                    runIndex(volume, pmic, input, if (command.action == .verify) .verify else .quick);
+                    needs_scan = false;
+                },
+                .play => {
+                    if (diag.catalog) |*catalogue| if (command.value < catalogue.value.tracks.len) {
+                        const path = catalogue.value.tracks[command.value].path;
+                        if (selectPath(volume, browser, path)) |entry| {
+                            playSelection(volume, browser, entry, battery_mv, &attenuation, pmic) catch |failure| diag.failed(1, failure);
+                        } else |failure| diag.failed(1, failure);
+                    };
+                },
+                .stop => {},
+                .reconnect => {
+                    diag.flush();
+                    usb.reconnect();
+                },
+                .rom => {
+                    diag.flush();
+                    maintenance.returnRom();
+                },
+                .flush => diag.flush(),
+            }
+            if (!(try drawBrowser(volume, browser, battery_mv, attenuation, null))) return error.DisplayFailure;
+        };
+        if (needs_scan) {
+            needs_scan = false;
+            runIndex(volume, pmic, input, .quick);
+            if (usb.needsHandoff()) return;
+            if (!(try drawBrowser(volume, browser, battery_mv, attenuation, null))) return error.DisplayFailure;
+        }
         if (input.poll()) |event| {
             var previous: ?player_view.BrowserState = browserViewState(browser, attenuation);
             switch (event) {
@@ -482,7 +595,7 @@ fn browse(volume: *Volume, browser: *Browser, battery_mv: u32, attenuation_ptr: 
                                 waitForErrorDismiss(input);
                             };
                         } else {
-                            playSelection(volume, browser, entry, battery_mv, &attenuation) catch |failure| {
+                            playSelection(volume, browser, entry, battery_mv, &attenuation, pmic) catch |failure| {
                                 _ = showError("PLAYBACK", failure);
                                 waitForErrorDismiss(input);
                             };
@@ -503,4 +616,81 @@ fn browse(volume: *Volume, browser: *Browser, battery_mv: u32, attenuation_ptr: 
         } else power_started = null;
         Timer.delayMicroseconds(1_000);
     }
+}
+
+fn keepAlive() void {
+    Watchdog.kick();
+}
+
+const ScanUi = struct {
+    pmic: *@import("f20_power.zig").Controller,
+    last_draw: u32 = 0,
+    input: *Input,
+    last_input: u32 = 0,
+    cancelled: bool = false,
+
+    fn poll(context: *anyopaque) bool {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        if (self.cancelled) return true;
+        Watchdog.kick();
+        usb.poll();
+        diag.samplePower(self.pmic);
+        if (Timer.elapsed(self.last_input) >= Timer.milliseconds(1)) {
+            self.last_input = Timer.now();
+            if (self.input.poll()) |action| if (action == .back or action == .home) {
+                self.cancelled = true;
+                return true;
+            };
+        }
+        return usb.needsHandoff() or (options.maintenance and maintenance.pending());
+    }
+
+    fn progress(context: *anyopaque, phase: []const u8, stats: @import("library.zig").Stats, covers: u32) void {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        diag.report.index_parsed = stats.parsed;
+        diag.report.index_reused = stats.reused;
+        diag.report.index_errors = stats.errors;
+        if (Timer.elapsed(self.last_draw) < Timer.milliseconds(100)) return;
+        self.last_draw = Timer.now();
+        Display.clear(Display.black);
+        Display.text(24, 64, "LIBRARY", Display.white, 3);
+        Display.text(24, 116, phase, Display.cyan, 1);
+        var value: [48]u8 = undefined;
+        const text = std.fmt.bufPrint(&value, "{d} TRACKS  {d} COVERS", .{ stats.visited, covers }) catch return;
+        Display.text(24, 148, text, Display.white, 1);
+        _ = Display.present();
+    }
+};
+
+fn runIndex(volume: *Volume, pmic: *@import("f20_power.zig").Controller, input: *Input, mode: @import("library.zig").Mode) void {
+    var observer = ScanUi{ .pmic = pmic, .input = input };
+    ScanUi.progress(&observer, "Finding music", .{}, 0);
+    diag.scan(volume, .{ .context = &observer, .poll = ScanUi.poll, .progress = ScanUi.progress }, mode) catch |failure| {
+        if (failure != error.Cancelled) diag.failed(2, failure);
+    };
+    diag.flush();
+}
+
+fn selectPath(volume: *Volume, browser: *Browser, path: []const u8) !fat32.DirectoryEntry {
+    browser.home();
+    var parts = std.mem.tokenizeScalar(u8, path, '/');
+    while (parts.next()) |part| {
+        var found: ?fat32.DirectoryEntry = null;
+        for (0..browser.counts[browser.depth]) |_| {
+            const entry = (try browser.selectedEntry(volume)) orelse break;
+            if (std.mem.eql(u8, entry.name(), part)) {
+                found = entry;
+                break;
+            }
+            browser.move(1);
+        }
+        const entry = found orelse return error.NotFound;
+        if (parts.peek() == null) return entry;
+        try browser.enter(volume, entry);
+    }
+    return error.NotFound;
+}
+
+export fn tud_vendor_control_xfer_cb(port: u8, stage: u8, request: ?*const @import("c_usb").tusb_control_request_t) bool {
+    return if (options.maintenance) maintenance.control(port, stage, request) else false;
 }

@@ -32,6 +32,9 @@ pub const Config = struct {
     buffer_count: u8 = 3,
     attenuation: u8 = 64,
     measure_stacks: bool = false,
+    report_out: ?*Report = null,
+    // Runs only in the control task, which exclusively owns I2C.
+    background: ?struct { context: *anyopaque, poll: *const fn (*anyopaque) void } = null,
 
     pub fn valid(self: Config) bool {
         return (playback.Config{
@@ -82,6 +85,23 @@ pub const Report = struct {
     maximum_ui_ticks: u32,
     maximum_ui_gap_ticks: u32,
     stack_used: [stacks.len]u32,
+    played_frames: u64 = 0,
+
+    pub fn empty() Report {
+        return .{
+            .playback = .{ .sample_rate = 0, .output_format = .signed_24_in_u32, .frames = 0, .chunks = 0, .underruns = 0, .minimum_fifo_level = 0 },
+            .runtime = .{},
+            .heap_peak = 0,
+            .periods = 0,
+            .storage_steps = 0,
+            .ui_polls = 0,
+            .worst_fill_ticks = 0,
+            .startup_ticks = 0,
+            .maximum_ui_ticks = 0,
+            .maximum_ui_gap_ticks = 0,
+            .stack_used = @splat(0),
+        };
+    }
 };
 
 fn Player(comptime Reader: type) type {
@@ -134,6 +154,9 @@ fn Player(comptime Reader: type) type {
             if (active != null or self.workspace.burst.len < storage.fat32.sector_bytes + dma_word_bytes - 1) return error.InvalidWorkspace;
             self.started_tick = x.Timer.now();
             for (stacks) |region| stack.prepare(region.cachedSlice(u8), self.config.measure_stacks);
+            defer if (self.config.report_out) |out| {
+                out.* = self.snapshot();
+            };
             self.input = try Input.init(self.reader, self.length, self.workspace.input, self);
             self.reservoir = try pcm.Ring.init(self.workspace.pcm);
             self.attenuation = @min(128, @max(16, self.config.attenuation));
@@ -185,6 +208,14 @@ fn Player(comptime Reader: type) type {
             if (self.workspace.decoder.packet.pool.statistics.live != 0) return error.DecoderLeak;
             const code = self.error_code.load(.acquire);
             if (code != 0) return @errorFromInt(@as(u16, @intCast(code)));
+            return self.snapshot();
+        }
+
+        fn snapshot(self: *Self) Report {
+            var stack_used: [stacks.len]u32 = @splat(0);
+            if (self.config.measure_stacks) for (stacks, 0..) |region, index| {
+                stack_used[index] = @intCast(stack.used(region.cachedSlice(u8)));
+            };
             return .{
                 .playback = .{
                     .sample_rate = if (self.header_ready.load(.acquire)) self.information.sample_rate else 0,
@@ -207,6 +238,7 @@ fn Player(comptime Reader: type) type {
                 .maximum_ui_ticks = self.maximum_ui_ticks,
                 .maximum_ui_gap_ticks = self.maximum_ui_gap_ticks,
                 .stack_used = stack_used,
+                .played_frames = if (self.state) |state| @as(u64, state.chunks_completed) * self.plan.frames else 0,
             };
         }
 
@@ -499,6 +531,7 @@ fn Player(comptime Reader: type) type {
                     self.fail(failure);
                     continue;
                 };
+                if (self.config.background) |background| background.poll(background.context);
                 self.runtime.wait(event, self.runtime.now() + control_ticks);
             }
         }

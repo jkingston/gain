@@ -47,6 +47,7 @@ pub const flac_left = Region{ .start = 0x400000, .bytes = 65535 * 4 };
 pub const flac_right = Region{ .start = 0x440000, .bytes = 65535 * 4 };
 pub const flac_compressed = Region{ .start = 0x480000, .bytes = 256 * 1024 };
 pub const decoder_arena = Region{ .start = 0x500000, .bytes = 2 * 1024 * 1024 };
+pub const fault_capsule = Region{ .start = 0x700000, .bytes = 4096 };
 pub const compressed_ring = Region{ .start = 0x800000, .bytes = 4 * 1024 * 1024 };
 pub const pcm_reservoir = Region{ .start = 0xc00000, .bytes = 192000 * 8 };
 pub const decoded_frames = Region{ .start = 0xe00000, .bytes = 65535 * 8 };
@@ -54,6 +55,8 @@ pub const decoded_frames = Region{ .start = 0xe00000, .bytes = 65535 * 8 };
 // output uses only Plan.bytes at the start of each buffer.
 pub const audio_buffers = Region{ .start = 0x1000000, .bytes = 4 * 512 * 1024 };
 pub const audio_buffer_capacity = 512 * 1024;
+pub const catalog_a = Region{ .start = 0x1200000, .bytes = 6 * 1024 * 1024 };
+pub const catalog_b = Region{ .start = catalog_a.end(), .bytes = 6 * 1024 * 1024 };
 pub const task_stacks = Region{ .start = 0x1f00000, .bytes = 512 * 1024 };
 pub const output_stack = Region{ .start = task_stacks.start, .bytes = 32 * 1024 };
 pub const ui_stack = Region{ .start = output_stack.end(), .bytes = 32 * 1024 };
@@ -85,10 +88,13 @@ pub const regions = [_]Region{
     flac_right,
     flac_compressed,
     decoder_arena,
+    fault_capsule,
     compressed_ring,
     pcm_reservoir,
     decoded_frames,
     audio_buffers,
+    catalog_a,
+    catalog_b,
     task_stacks,
     interrupt_stack,
     rom_context,

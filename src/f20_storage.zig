@@ -209,6 +209,35 @@ test "read-ahead rejects overlapping buffers" {
     );
 }
 
+test "catalogue scalar reads require bulk IO rather than one transaction per field" {
+    const std = @import("std");
+
+    const Source = struct {
+        position: usize = 0,
+        reads: usize = 0,
+
+        pub fn read(self: *@This(), output: []u8) !usize {
+            self.reads += 1;
+            const count = @min(output.len, 1024 * 1024 - self.position);
+            for (output[0..count], self.position..) |*byte, index| byte.* = @truncate(index);
+            self.position += count;
+            return count;
+        }
+    };
+
+    var source: Source = .{};
+    var first: [32 * 1024]u8 align(4) = undefined;
+    var second: [32 * 1024]u8 align(4) = undefined;
+    var reader = try ReadAheadReader(Source).init(&source, .{ &first, &second });
+    var scalar: [4]u8 = undefined;
+    for (0..1024 * 1024 / scalar.len) |index| {
+        try std.testing.expectEqual(scalar.len, try reader.read(&scalar));
+        for (scalar, 0..) |byte, offset| try std.testing.expectEqual(@as(u8, @truncate(index * scalar.len + offset)), byte);
+    }
+    try std.testing.expectEqual(32, source.reads);
+    try std.testing.expectEqual(0, try reader.read(&scalar));
+}
+
 test "read-ahead seeking flushes stale prefetched bytes and reopens EOF" {
     const std = @import("std");
 

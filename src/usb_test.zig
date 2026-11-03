@@ -271,4 +271,5 @@ test "32 KiB MSC batches preserve data across command and partial block boundari
 test {
     std.testing.refAllDecls(@import("x1000_dma.zig"));
     std.testing.refAllDecls(@import("usb_core_reset.zig"));
+    std.testing.refAllDecls(@import("usb_rom.zig"));
 }

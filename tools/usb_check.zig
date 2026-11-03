@@ -39,28 +39,7 @@ const Report = extern struct {
 
 var response: Report = .{};
 const usb_base: usize = 0xb3500000;
-const saved_offsets = [_]u16{
-    0x00,
-    0x08,
-    0x0c,
-    0x18,
-    0x24,
-    0x28,
-    0x800,
-    0x804,
-    0x810,
-    0x814,
-    0x81c,
-    0x834,
-    0x900,
-    0x910,
-    0x914,
-    0xb00,
-    0xb10,
-    0xb14,
-};
-
-var saved: [saved_offsets.len]u32 = undefined;
+var saved: gain.usb_rom.Snapshot = undefined;
 var saved_valid = false;
 var pending: u8 = 0;
 var ready: u8 = 0;
@@ -103,13 +82,9 @@ fn returnRom() noreturn {
             x.Watchdog.start(.external, .by_1024, 1024);
             while (true) asm volatile ("nop");
         };
-        for (saved_offsets, saved) |offset, value| if (offset != 0x804 and offset != 8) {
-            x.write32(usb_base + offset, value);
-        };
-        x.write32(usb_base + 0x14, 0xffffffff);
+        saved.restoreQuiesced();
         x.Timer.delayMicroseconds(250_000);
-        x.write32(usb_base + 8, saved[1]);
-        x.write32(usb_base + 0x804, saved[7] & ~@as(u32, 2));
+        saved.reconnect();
         asm volatile ("sync" ::: .{ .memory = true });
     }
     rom_return();
@@ -165,7 +140,7 @@ export fn tud_vendor_control_xfer_cb(rhport: u8, stage: u8, request: ?*const c.t
 export fn player_check_main() callconv(.c) void {
     report.* = .{};
     x.Timer.initialize();
-    for (saved_offsets, 0..) |offset, i| saved[i] = x.read32(usb_base + offset);
+    saved = gain.usb_rom.Snapshot.capture();
     saved_valid = true;
     watchdog(20);
     report.stage = 1;

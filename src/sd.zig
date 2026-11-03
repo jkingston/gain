@@ -73,6 +73,15 @@ pub const Waiter = struct {
     wait: *const fn (*anyopaque, u32) void,
 };
 
+pub const Counters = struct {
+    read_sectors: u64 = 0,
+    write_sectors: u64 = 0,
+    reads: u32 = 0,
+    writes: u32 = 0,
+    failures: u32 = 0,
+    ticks: u64 = 0,
+};
+
 /// Native SD block controller. Board supplies compile-time wiring and
 /// clocks; the caller supplies uncached DMA storage so no cache maintenance is
 /// needed in the playback path.
@@ -99,6 +108,7 @@ pub fn Controller(comptime Board: type) type {
         last_command: u8 = 0,
         last_status: u32 = 0,
         last_flags: u32 = 0,
+        counters: Counters = .{},
 
         pub fn initialize(resources: Resources) Error!Self {
             if (!dmaAddress(@intFromPtr(resources.descriptor)) or
@@ -137,14 +147,24 @@ pub fn Controller(comptime Board: type) type {
         }
 
         pub fn readBlocks(self: *Self, first_lba: u32, output: []u8) Error!void {
-            return self.transferBlocks(first_lba, output, false);
+            const began = x1000.Timer.now();
+            defer self.counters.ticks +|= x1000.Timer.elapsed(began);
+            self.counters.reads +|= 1;
+            errdefer self.counters.failures +|= 1;
+            try self.transferBlocks(first_lba, output, false);
+            self.counters.read_sectors +|= output.len / sector_bytes;
         }
 
         /// Return only after the controller's programming completion and CMD13
         /// confirm the card is ready. USB must never acknowledge DMA-only writes.
         pub fn writeBlocks(self: *Self, first_lba: u32, input: []const u8) Error!void {
+            const began = x1000.Timer.now();
+            defer self.counters.ticks +|= x1000.Timer.elapsed(began);
+            self.counters.writes +|= 1;
+            errdefer self.counters.failures +|= 1;
             try self.transferBlocks(first_lba, @constCast(input), true);
             try self.sync();
+            self.counters.write_sectors +|= input.len / sector_bytes;
         }
 
         pub fn present(_: *const Self) bool {

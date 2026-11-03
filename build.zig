@@ -37,6 +37,11 @@ pub fn build(b: *std.Build) void {
         .optimize = .ReleaseFast,
         .strip = true,
     });
+    const firmware_options = b.addOptions();
+    firmware_options.addOption(bool, "maintenance", false);
+    const build_identity = b.option(u64, "build-id", "Content/revision identity included in diagnostics") orelse 0;
+    firmware_options.addOption(u64, "build_id", build_identity);
+    stage2_module.addOptions("firmware_options", firmware_options);
     stage2_module.addAssemblyFile(b.path("src/start.S"));
     stage2_module.addAssemblyFile(b.path("src/x1000_context.S"));
     @import("build_codecs.zig").add(b, stage2_module, target, .ReleaseFast, true);
@@ -53,6 +58,23 @@ pub fn build(b: *std.Build) void {
     b.getInstallStep().dependOn(&b.addInstallFileWithDir(spl_image, .bin, "gain-spl.bin").step);
     b.getInstallStep().dependOn(&b.addInstallFileWithDir(stage2_raw.getOutput(), .bin, "gain-stage2.bin").step);
 
+    const instrumented_module = b.createModule(.{ .root_source_file = b.path("src/main.zig"), .target = target, .optimize = .ReleaseFast });
+    instrumented_module.addAssemblyFile(b.path("src/recovery_start.S"));
+    instrumented_module.addAssemblyFile(b.path("src/x1000_context.S"));
+    @import("build_codecs.zig").add(b, instrumented_module, target, .ReleaseFast, true);
+    _ = @import("build_usb.zig").add(b, instrumented_module, target, .ReleaseFast, true);
+    @import("build_art.zig").add(b, instrumented_module, target, .ReleaseFast, true);
+    const maintenance_options = b.addOptions();
+    maintenance_options.addOption(bool, "maintenance", true);
+    maintenance_options.addOption(u64, "build_id", build_identity);
+    instrumented_module.addOptions("firmware_options", maintenance_options);
+    const instrumented = b.addExecutable(.{ .name = "gain-instrumented.elf", .root_module = instrumented_module });
+    instrumented.entry = .disabled;
+    instrumented.setLinkerScript(b.path("stage2.ld"));
+    const instrumented_raw = instrumented.addObjCopy(.{ .format = .binary, .basename = "gain-instrumented.bin" });
+    const instrumented_step = b.step("instrumented", "Build the complete player with RAM-only maintenance controls");
+    instrumented_step.dependOn(&b.addInstallArtifact(instrumented, .{}).step);
+    instrumented_step.dependOn(&b.addInstallFileWithDir(instrumented_raw.getOutput(), .bin, "gain-instrumented.bin").step);
     const player_check_api = b.createModule(.{ .root_source_file = b.path("src/f20.zig"), .target = target, .optimize = .ReleaseFast });
     @import("build_codecs.zig").add(b, player_check_api, target, .ReleaseFast, true);
     const player_check_module = b.createModule(.{ .root_source_file = b.path("tools/player_check.zig"), .target = target, .optimize = .ReleaseFast });
@@ -522,7 +544,7 @@ pub fn build(b: *std.Build) void {
     }
     const library_step = b.step("test-library", "Test portable catalogue reconciliation and persistence");
     for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |mode| {
-        for ([_][]const u8{ "src/catalog_codec.zig", "src/catalog_store.zig", "src/library_metadata.zig" }) |path| {
+        for ([_][]const u8{ "src/catalog_codec.zig", "src/diagnostics.zig", "src/catalog_store.zig", "src/library_metadata.zig", "src/maintenance_protocol.zig", "src/f20_storage.zig" }) |path| {
             const module = b.createModule(.{ .root_source_file = b.path(path), .target = b.graph.host, .optimize = mode });
             library_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = module })).step);
         }

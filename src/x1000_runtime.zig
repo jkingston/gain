@@ -24,12 +24,20 @@ extern fn gain_task_trap(u32, u32, u32, u32) callconv(.c) void;
 extern var _gp: u8;
 var active: ?*Runtime = null;
 
-pub const Metrics = struct { interrupts: u32 = 0, switches: u32 = 0, idle_dispatches: u32 = 0, maximum_handler_ticks: u32 = 0 };
+pub const Metrics = struct {
+    interrupts: u32 = 0,
+    switches: u32 = 0,
+    idle_dispatches: u32 = 0,
+    maximum_handler_ticks: u32 = 0,
+    task_ticks: [6]u64 = @splat(0),
+    handler_ticks: u64 = 0,
+};
 
 pub const Runtime = struct {
     scheduler: dispatch_state.Scheduler = .{},
     clock: executive.Clock = .{ .previous = 0 },
     metrics: Metrics = .{},
+    accounting: executive.TimeAccountant = .{},
     stacks: [executive.task_count]@import("task_stack.zig").Bounds = @splat(.{}),
     /// Called with interrupts masked; the board acknowledges its sources and
     /// notifies tasks without I2C, rendering, allocation or media decoding.
@@ -53,6 +61,7 @@ pub const Runtime = struct {
             self.scheduler.policy.start(@fromBackingInt(@intCast(index)));
         }
         self.metrics = .{};
+        self.accounting = .{};
         self.scheduler.running = true;
         active = self;
         Timer.initialize();
@@ -127,6 +136,7 @@ pub const Runtime = struct {
 
     fn interrupt(self: *Runtime, frame: *Context, entry: u32, cause: u32) *Context {
         const started = x.Timer.now();
+        const interrupted = self.scheduler.current;
         const now_ticks = self.clock.sample(entry);
         const code = (cause >> 2) & 31;
         if (code == 0) {
@@ -151,6 +161,9 @@ pub const Runtime = struct {
             const deadline = self.scheduler.policy.nextDeadline() orelse current_ticks + maintenance_ticks;
             Timer.arm(@intCast(@max(1, @min(deadline - @min(current_ticks, deadline), maintenance_ticks))));
         } else Timer.shutdown();
+        const charged = self.accounting.observe(now_ticks, self.clock.sample(x.Timer.now()));
+        self.metrics.task_ticks[@backingInt(interrupted)] += charged.task;
+        self.metrics.handler_ticks += charged.handler;
         self.metrics.maximum_handler_ticks = @max(self.metrics.maximum_handler_ticks, x.Timer.elapsed(started));
         return selected_frame;
     }

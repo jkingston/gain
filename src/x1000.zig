@@ -504,6 +504,10 @@ pub const Watchdog = struct {
         enable.write(1);
     }
 
+    pub fn stop() void {
+        enable.write(0);
+    }
+
     pub inline fn kick() void {
         count.write(0);
     }

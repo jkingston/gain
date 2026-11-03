@@ -194,3 +194,28 @@ test "retired workers discard latched events deadlines and late completions" {
     executive.start(.codec);
     try std.testing.expectEqual(Task.codec, executive.select());
 }
+
+/// Attribute wall-clock intervals once: execution between dispatches belongs to
+/// the interrupted task; entry-to-return time belongs to the dispatcher.
+pub const TimeAccountant = struct {
+    last: u64 = 0,
+
+    pub const Charge = struct { task: u64, handler: u64 };
+
+    pub fn observe(self: *TimeAccountant, entry: u64, ended: u64) Charge {
+        const result: Charge = .{ .task = entry -| self.last, .handler = ended -| entry };
+        self.last = ended;
+        return result;
+    }
+};
+
+test "task time and dispatcher time sum without double counting" {
+    var accountant: TimeAccountant = .{};
+    const a = accountant.observe(100, 110);
+    const b = accountant.observe(200, 205);
+    const c = accountant.observe(230, 240);
+    try std.testing.expectEqual(100, a.task);
+    try std.testing.expectEqual(90, b.task);
+    try std.testing.expectEqual(25, c.task);
+    try std.testing.expectEqual(240, a.task + b.task + c.task + a.handler + b.handler + c.handler);
+}

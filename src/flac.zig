@@ -526,7 +526,8 @@ fn readBe64(input: *const [8]u8) u64 {
     return value;
 }
 
-fn parseStreamInfoBlock(block: *const [stream_info_bytes]u8) Error!StreamInfo {
+/// Parses one 34-byte STREAMINFO payload, without a file signature or header.
+pub fn parseStreamInfoBlock(block: *const [stream_info_bytes]u8) Error!StreamInfo {
     const minimum_block_size = readBe16(block[0..2]);
     const maximum_block_size = readBe16(block[2..4]);
     if (minimum_block_size < 16 or maximum_block_size < minimum_block_size) {

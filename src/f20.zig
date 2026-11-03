@@ -39,3 +39,5 @@ pub const executive = @import("executive.zig");
 pub const playback_controls = @import("playback_controls.zig");
 
 pub const usb = @import("f20_usb.zig");
+
+pub const usb_rom = @import("usb_rom.zig");

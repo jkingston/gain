@@ -45,8 +45,10 @@ current RAM-only build provides:
 The player uses separate preemptive output, UI, control, codec and storage tasks.
 Compressed input arrives in SD bursts, decoding publishes canonical Q1.31 PCM,
 and output fills fixed-duration DMA periods. Only control performs DAC I2C.
-Only storage reads the card. The firmware has no NAND write path. Player filesystem access is read-only;
-USB mode grants the computer exclusive raw SD access.
+Only the storage task reads the card during playback. The firmware has no NAND write path.
+When audio is stopped, the application can overwrite existing, host-provisioned
+cache/log allocations; it cannot allocate clusters, resize files or change FAT
+directories. USB mode grants the computer exclusive raw SD access.
 
 The PCM clock and DMA path is verified at 8, 11.025, 12, 16, 22.05, 24,
 32, 44.1, 48, 64, 88.2, 96, 176.4 and 192 kHz. All fourteen rates hold DAC
@@ -95,6 +97,76 @@ slides, region updates, odd geometry and canvas mutation after snapshot
 preparation. The player uses screen cuts and prepares its initial full snapshot
 before audio starts. UI work is preemptible by the output task. Rendering and
 DMA-source ownership remain independently tested portable policies.
+
+## Library and diagnostics
+
+The native application scans FAT32 after mounting the card or returning from USB.
+Quick refresh compares paths, sizes and FAT modification stamps; verify rereads
+metadata and artwork. FAT timestamps are coarse: use verify for edits that keep
+both size and timestamp. A cancelled or incomplete enumeration keeps the previous
+catalogue. Per-file parse failures retain previous known tags and record the error.
+FAT starting clusters are mount-local locators, never persistent track identity.
+
+Library tags currently cover MP4/AAC/ALAC and FLAC. Other decoded formats use
+filename/folder fallbacks. Album grouping uses album artist, release identity and
+edition folders; multi-disc folders share an album. Sidecar/embedded baseline
+JPEG covers are streamed to bounded 112 × 112 RGB565 tiles. Progressive JPEG,
+PNG, EXIF orientation and colour-profile conversion are not implemented by the
+native artwork path. Playback codec support is listed separately below.
+
+The catalogue has two checksummed generations, with payload committed before its
+header. A failed save leaves the previous bank selected. Artwork tiles also
+publish headers last. Cache sizes are fixed, and a missing/full cache disables
+persistence rather than creating files in firmware. Catalogue and temporary
+workspace allocation are separate and released before playback needs the
+compressed-audio workspace.
+
+To provision the files while the identified Gain SD card is mounted:
+
+```sh
+python3 tools/gain_metrics.py provision --sectors CARD_SECTOR_COUNT
+```
+
+This creates `.gain/catalog.bin` (12 MiB plus a 4 KiB prefix), `artwork.bin`
+(16 MiB plus prefix) and `diagnostics.bin` (8 MiB plus prefix). Existing unknown
+files and incomplete allocations are refused. It never formats or deletes music.
+
+Diagnostics use a fixed 32 KiB RAM ring and 4 KiB checksummed binary pages.
+Playback, indexing and USB transitions emit summaries. Power is sampled every
+10 seconds and summarized once per minute; voltage/current validity is explicit.
+Hardware coulomb deltas require unchanged ADC configuration and plausible counts.
+Measurement enables battery/VBUS voltage and current ADC channels, preserving
+the ADC rate, charging settings and rail voltages.
+Repeated faults are coalesced, with at most 16 distinct fault records per boot.
+The page header carries repeated/dropped counts. Logging stops for that mount on
+write failure; decoder, interrupt and rendering paths never write log records.
+
+Log writes occur after playback workers have joined, on idle checkpoints, or
+before handing SD to USB. They never run while the host owns the card. The ring
+uses alternating cursor sectors; its provisioning header is immutable. Inspect
+valid pages even if the latest cursor update was interrupted:
+
+```sh
+python3 tools/gain_metrics.py logs /path/to/diagnostics.bin
+```
+
+Records contain a build identity, boot session, monotonic 6 MHz timestamps and
+bounded numeric fields. Index summaries include track/album counts, parsed/reused
+records, phase durations, physical SD reads/writes, I/O time, allocator usage,
+cache preparation/reuse and changes. Playback summaries include startup, fill/UI/
+interrupt maxima, FIFO minimum, underruns, heap peak and time attributed to each
+task. PMIC current/coulomb measurements need hardware qualification; they are not
+calibrated battery-life or instantaneous CPU power measurements.
+
+`zig build instrumented -Dbuild-id=NUMBER` builds the same player with optional
+RAM-development controls. `tools/gain_metrics.py status`, `quick`, `verify`,
+`play --value TRACK_INDEX`, `stop`, `flush`, `reconnect` and `rom` allow bounded
+semantic testing after eject. Commands commit only after their USB ACK. This
+interface has no arbitrary memory write or execute operation; the normal release
+build omits it. A zero build identity means unspecified; evidence should also
+retain the image SHA-256. Experiments and captured reports belong outside this repo.
+The full player's soft ROM return is not yet reliable after indexing; a physical
+mask-ROM reset is still needed when that development command loses USB.
 
 ## Media support
 
@@ -438,8 +510,6 @@ The source keeps SoC and board knowledge separate without a runtime HAL:
 | `src/f20_v27.zig` | F20 V2.7 wiring, panel data and verified LPDDR profile |
 | `src/f20.zig` | Compile-time F20 device facade used by product code |
 | `src/sd.zig` | Native X1000 SD controller |
-| `src/x1000_dma.zig` | Reserved uncached identity mapping with saved/restored CPU state |
-| `src/usb_core_reset.zig` | Bounded USB DMA reset policy with deterministic driver tests |
 | `src/fat32.zig` | Portable allocation-free FAT32 reader |
 | `src/wav.zig` | Portable bounded RIFF/WAVE parser |
 | `src/pcm.zig` | Portable allocation-free WAV PCM to DMA frame conversion |
@@ -458,6 +528,8 @@ The source keeps SoC and board knowledge separate without a runtime HAL:
 | `src/ui.zig` | Bounded declarations, text ownership, clipping, themes and live slide rendering |
 | `src/player_view.zig` | Portable browser/player views and hybrid browser damage |
 | `src/player_presenter.zig` | Portable initial preparation and asynchronous playback update coordination |
+| `src/x1000_dma.zig` | Reserved uncached identity mapping with saved/restored CPU state |
+| `src/usb_core_reset.zig` | Bounded USB DMA reset policy with deterministic driver tests |
 | `src/presentation.zig` | Portable DMA source ownership, geometry expansion and snapshot packing |
 | `src/display_phase.zig` | Tested scanline projection and conservative F20 region windows |
 | `src/f20_display.zig` | F20 panel I/O, calibration and LCD DMA adapter |

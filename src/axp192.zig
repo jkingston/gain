@@ -9,10 +9,17 @@ pub const Register = enum(u8) {
     shutdown = 0x32,
     charge_control = 0x33,
     usb_voltage_high = 0x5a,
+    usb_current_high = 0x5c,
+    die_temperature_high = 0x5e,
     battery_voltage_high = 0x78,
     charge_current_high = 0x7a,
     discharge_current_high = 0x7c,
     adc_enable = 0x82,
+    adc_enable_second = 0x83,
+    adc_rate = 0x84,
+    coulomb_charge = 0xb0,
+    coulomb_discharge = 0xb4,
+    coulomb_control = 0xb8,
     gpio0_function = 0x90,
     gpio1_function = 0x92,
     gpio_state = 0x94,
@@ -51,12 +58,31 @@ pub const Telemetry = struct {
     status: PowerStatus,
     battery_mv: ?u16 = null,
     usb_mv: ?u16 = null,
+    usb_microamps: ?u32 = null,
+    die_millicelsius: ?i32 = null,
     charge_microamps: ?u32 = null,
     discharge_microamps: ?u32 = null,
     jacks: Jacks,
 };
 
 pub const Error = error{ UnsupportedDevice, UnstableAdc, VerificationMismatch, JackInputsNotConfigured };
+
+pub const Coulomb = struct {
+    charge: u32,
+    discharge: u32,
+    rate_hz: u16,
+    running: bool,
+
+    pub fn deltaMicroampHours(self: Coulomb, previous: Coulomb) ?struct { charge: u64, discharge: u64 } {
+        if (!self.running or !previous.running or self.rate_hz != previous.rate_hz or self.rate_hz == 0) return null;
+        const denominator = @as(u64, 3600) * self.rate_hz;
+        return .{
+            .charge = @as(u64, self.charge -% previous.charge) * 65536 * 500 / denominator,
+            .discharge = @as(u64, self.discharge -% previous.discharge) * 65536 * 500 / denominator,
+        };
+    }
+};
+
 const charge_currents_ma = [_]u16{ 100, 190, 280, 360, 450, 550, 630, 700, 780, 880, 960, 1000, 1080, 1160, 1240, 1320 };
 
 pub fn Device(comptime Bus: type) type {
@@ -96,11 +122,49 @@ pub fn Device(comptime Bus: type) type {
             var result = Telemetry{ .status = try self.powerStatus(), .jacks = try self.jacks() };
             if (enabled & 0x80 != 0) result.battery_mv = @intCast((@as(u32, try self.adc(.battery_voltage_high, 4)) * 11 + 5) / 10);
             if (enabled & 0x08 != 0) result.usb_mv = @intCast((@as(u32, try self.adc(.usb_voltage_high, 4)) * 17 + 5) / 10);
+            if (enabled & 0x04 != 0) result.usb_microamps = @as(u32, try self.adc(.usb_current_high, 4)) * 375;
+            if (try self.read(.adc_enable_second) & 0x80 != 0) result.die_millicelsius = @as(i32, try self.adc(.die_temperature_high, 4)) * 100 - 144700;
             if (enabled & 0x40 != 0) {
                 result.charge_microamps = @as(u32, try self.adc(.charge_current_high, 5)) * 500;
                 result.discharge_microamps = @as(u32, try self.adc(.discharge_current_high, 5)) * 500;
             }
             return result;
+        }
+
+        pub fn enableTelemetry(self: *Self) !void {
+            // Battery voltage/current and VBUS voltage/current ADC channels.
+            // Preserve ADC rate, other channels, rails and charging controls.
+            try self.modify(.adc_enable, 0xcc, 0xcc);
+        }
+
+        pub fn enableCoulombCounting(self: *Self) !void {
+            // Enable accumulation, clear pause, never assert the clear pulse.
+            // Charging current, voltage and rail controls are untouched.
+            const old = try self.read(.coulomb_control);
+            try self.write(.coulomb_control, (old & 0x1f) | 0x80);
+        }
+
+        pub fn coulomb(self: *Self) !Coulomb {
+            const control = try self.read(.coulomb_control);
+            return .{
+                .charge = try self.counter(.coulomb_charge),
+                .discharge = try self.counter(.coulomb_discharge),
+                .rate_hz = @as(u16, 25) << @as(u2, @truncate((try self.read(.adc_rate)) >> 6)),
+                .running = control & 0xc0 == 0x80 and try self.read(.adc_enable) & 0x40 != 0,
+            };
+        }
+
+        fn counter(self: *Self, register: Register) !u32 {
+            const base = @backingInt(register);
+            for (0..4) |_| {
+                var high: u32 = 0;
+                for (0..3) |i| high = (high << 8) | try self.bus.readRegister(self.address, base + @as(u8, @intCast(i)));
+                const low = try self.bus.readRegister(self.address, base + 3);
+                var check: u32 = 0;
+                for (0..3) |i| check = (check << 8) | try self.bus.readRegister(self.address, base + @as(u8, @intCast(i)));
+                if (high == check) return (high << 8) | low;
+            }
+            return error.UnstableAdc;
         }
 
         /// Can only lower the existing current setting. Charging enable,
@@ -266,4 +330,63 @@ test "charge limiter preserves voltage, termination and enable and never raises 
         if (limit < 100) try std.testing.expect(next & 0x80 == 0) else try std.testing.expectEqual(@as(u8, @intCast(value)) & 0x80, next & 0x80);
         try std.testing.expectEqual(@as(usize, if (next == value) 0 else 1), bus.writes);
     };
+}
+
+test "coulomb deltas handle wrap and reject changed ADC configuration" {
+    const before = Coulomb{ .charge = 0xfffffffe, .discharge = 10, .rate_hz = 25, .running = true };
+    var after = before;
+    after.charge = 1;
+    after.discharge = 12;
+    const delta = after.deltaMicroampHours(before).?;
+    try std.testing.expectEqual(@as(u64, 3) * 65536 * 500 / (3600 * 25), delta.charge);
+    after.rate_hz = 50;
+    try std.testing.expect(after.deltaMicroampHours(before) == null);
+    after = before;
+    after.running = false;
+    try std.testing.expect(after.deltaMicroampHours(before) == null);
+}
+
+test "coulomb enable preserves reserved bits without clearing counters or changing rails" {
+    for (0..256) |old| {
+        var bus = Fake{};
+        bus.registers[0xb8] = @intCast(old);
+        bus.registers[0x33] = 0xc4;
+        var device = Device(*Fake).init(&bus, 0x34);
+        try device.enableCoulombCounting();
+        try std.testing.expectEqual(@as(u8, @intCast(old)) & 31 | 128, bus.registers[0xb8]);
+        try std.testing.expectEqual(0xc4, bus.registers[0x33]);
+    }
+    var bus = Fake{};
+    bus.registers[0x82] = 0x44;
+    bus.registers[0x83] = 0x80;
+    bus.registers[0x84] = 0x80;
+    bus.registers[0xb8] = 0x80;
+    bus.registers[0xb0] = 0x12;
+    bus.registers[0xb3] = 0x34;
+    bus.registers[0x5c] = 2;
+    bus.registers[0x5d] = 0x1f;
+    bus.registers[0x5e] = 100;
+    var device = Device(*Fake).init(&bus, 0x34);
+    try device.configureJackInputs();
+    const count = try device.coulomb();
+    try std.testing.expectEqual(100, count.rate_hz);
+    try std.testing.expect(count.running);
+    try std.testing.expectEqual(0x12000034, count.charge);
+    const telemetry = try device.telemetry();
+    try std.testing.expectEqual(@as(?u32, 47 * 375), telemetry.usb_microamps);
+    try std.testing.expectEqual(@as(?i32, 15300), telemetry.die_millicelsius);
+}
+
+test "telemetry enables only the requested ADC channels" {
+    for (0..256) |old| {
+        var bus = Fake{};
+        bus.registers[0x82] = @intCast(old);
+        bus.registers[0x84] = 0xa5;
+        bus.registers[0x33] = 0xc4;
+        var device = Device(*Fake).init(&bus, 0x34);
+        try device.enableTelemetry();
+        try std.testing.expectEqual(@as(u8, @intCast(old)) | 0xcc, bus.registers[0x82]);
+        try std.testing.expectEqual(0xa5, bus.registers[0x84]);
+        try std.testing.expectEqual(0xc4, bus.registers[0x33]);
+    }
 }

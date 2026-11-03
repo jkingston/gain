@@ -65,7 +65,8 @@ pub fn extract(a: A, source: anytype, extension: []const u8) !catalog.Metadata {
                     if (size != 34) return error.BadStreamInfo;
                     var info: [34]u8 = undefined;
                     try source.read(at, &info);
-                    const stream = try @import("flac.zig").parseStreamInfo(&info);
+                    const stream = try @import("flac.zig").parseStreamInfoBlock(&info);
+                    if (stream.sample_rate == 0) return error.BadStreamInfo;
                     result.sample_rate = stream.sample_rate;
                     result.channels = stream.channels;
                     result.bits = stream.bits_per_sample;
@@ -231,6 +232,28 @@ const TestSource = struct {
         return std.mem.readInt(T, &out, endian);
     }
 };
+
+test "FLAC library metadata parses the STREAMINFO payload rather than a file" {
+    var bytes: [42]u8 = @splat(0);
+    @memcpy(bytes[0..4], "fLaC");
+    bytes[4] = 0x80;
+    bytes[7] = 34;
+    std.mem.writeInt(u16, bytes[8..10], 4096, .big);
+    std.mem.writeInt(u16, bytes[10..12], 4096, .big);
+    const fields: u64 = (@as(u64, 44100) << 44) | (@as(u64, 1) << 41) | (@as(u64, 23) << 36) | 88200;
+    std.mem.writeInt(u64, bytes[18..26], fields, .big);
+    var source = TestSource{ .bytes = &bytes, .length = bytes.len };
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const metadata = try extract(arena.allocator(), &source, ".flac");
+    try std.testing.expectEqualStrings("flac", metadata.codec);
+    try std.testing.expectEqual(44100, metadata.sample_rate);
+    try std.testing.expectEqual(2, metadata.channels);
+    try std.testing.expectEqual(24, metadata.bits);
+    try std.testing.expectEqual(2000, metadata.duration_ms);
+    std.mem.writeInt(u64, bytes[18..26], fields & ((@as(u64, 1) << 44) - 1), .big);
+    try std.testing.expectError(error.BadStreamInfo, extract(arena.allocator(), &source, ".flac"));
+}
 
 test "FLAC picture ranges are bounded and do not include picture metadata" {
     var bytes: [43]u8 = @splat(0);
