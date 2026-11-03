@@ -38,6 +38,7 @@ var scan_finished: std.atomic.Value(bool) = .init(true);
 var stopping: std.atomic.Value(bool) = .init(false);
 var scan_mode: core.Mode = .quick;
 var scan_failure: u32 = 0;
+var publication_cadence: gain.progressive_view.PublicationCadence = .{};
 
 fn lock() void {
     mutex.lockUncancelable(host_io.io());
@@ -71,7 +72,10 @@ fn publish(previous: *const core.Catalog, tracks: []const core.Track, source: u6
 
 fn scanCheckpoint(_: *anyopaque, previous: *const core.Catalog, tracks: []const core.Track, _: core.Stats) !void {
     if (stopping.load(.acquire)) return error.Cancelled;
+    const at: u32 = @truncate(@as(u64, @intCast(@divTrunc(std.Io.Clock.awake.now(host_io.io()).nanoseconds, std.time.ns_per_ms))));
+    if (!publication_cadence.due(at, 300)) return;
     try publish(previous, tracks, core.hash(sd_root.?), false);
+    publication_cadence.published(at);
 }
 
 fn scanAborted(_: *anyopaque, previous: *const core.Catalog) void {
@@ -115,6 +119,7 @@ fn scanEntry() void {
     lock();
     Platform.Diagnostics.report.scan_active = 1;
     scan_failure = 0;
+    publication_cadence = .{};
     index.phase = "Finding music";
     unlock();
     scan() catch |failure| {
@@ -136,8 +141,12 @@ fn startScan() void {
     index.requested = false;
     scan_mode = if (index.verify) .verify else .quick;
     scan_finished.store(false, .release);
+    // Publish activity before spawning: the next callback must not mistake
+    // a worker that has not been scheduled yet for a completed scan.
+    Platform.Diagnostics.report.scan_active = 1;
     scan_thread = std.Thread.spawn(.{}, scanEntry, .{}) catch |failure| {
         scan_finished.store(true, .release);
+        Platform.Diagnostics.report.scan_active = 0;
         index.phase = "Scan unavailable";
         std.debug.print("Player UI SD scan: {s}\n", .{@errorName(failure)});
         return;
@@ -187,7 +196,7 @@ const Platform = struct {
     };
 
     pub const Display = struct {
-        pub const Frozen = struct {};
+        pub const Frozen = gain.presentation.Region;
         var pixels: api.Pixels = undefined;
         var frozen: api.Pixels = undefined;
         var presented: api.Pixels = undefined;
@@ -203,13 +212,19 @@ const Platform = struct {
             return .idle;
         }
 
-        pub fn freeze(_: gain.presentation.Region) !Frozen {
-            frozen = pixels;
-            return .{};
+        pub fn freeze(region: gain.presentation.Region) !Frozen {
+            for (0..region.height) |row| {
+                const offset = (@as(usize, region.y) + row) * api.width + region.x;
+                @memcpy(frozen[offset..][0..region.width], pixels[offset..][0..region.width]);
+            }
+            return region;
         }
 
-        pub fn presentFrozen(_: Frozen, _: bool) !void {
-            presented = frozen;
+        pub fn presentFrozen(region: Frozen, _: bool) !void {
+            for (0..region.height) |row| {
+                const offset = (@as(usize, region.y) + row) * api.width + region.x;
+                @memcpy(presented[offset..][0..region.width], frozen[offset..][0..region.width]);
+            }
             revision +%= 1;
         }
     };

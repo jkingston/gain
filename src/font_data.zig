@@ -1027,6 +1027,9 @@ pub fn glyph(role: Role, code: u21) Glyph {
         .reading => &reading,
     };
 
+    // The pinned tables begin with contiguous printable ASCII. Common UI
+    // labels and western metadata need no binary search for each glyph.
+    if (code >= 32 and code <= 126) return table[code - 32];
     var lo: usize = 0;
     var hi: usize = table.len;
     while (lo < hi) {
@@ -1062,4 +1065,21 @@ test "packed glyph masks reconstruct the original atlas exactly" {
     var expected: [32]u8 = undefined;
     _ = try std.fmt.hexToBytes(&expected, "dbadfdf96ad8494f9a350d663a16e85821cb6bae56cd1cd33a94dbbac8780ad1");
     try std.testing.expectEqualSlices(u8, &expected, &actual);
+}
+
+test "direct ASCII and sparse Unicode lookup match the pinned glyph tables" {
+    const std = @import("std");
+    inline for (.{ Role.body, Role.title, Role.serif, Role.caption, Role.reading }, .{ body, title, serif, caption, reading }) |role, table| {
+        for (table[0..95], 0..) |g, index| try std.testing.expectEqual(@as(u21, @intCast(index + 32)), g.code);
+        for (table) |g| try std.testing.expectEqualDeep(g, glyph(role, g.code));
+        for (0..512) |code| {
+            var expected = table['?' - 32];
+            for (table) |g| if (g.code == code) {
+                expected = g;
+                break;
+            };
+            try std.testing.expectEqualDeep(expected, glyph(role, @intCast(code)));
+        }
+        try std.testing.expectEqualDeep(table['?' - 32], glyph(role, 0x10ffff));
+    }
 }

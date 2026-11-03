@@ -47,18 +47,33 @@ pub const Canvas = struct {
 
     pub fn text(self: Canvas, x: i32, y: i32, max_width: u16, value: []const u8, role: fonts.Role, color: Color) void {
         var clipped = self;
-        clipped.surface.clip = ui.intersection(self.surface.clip, .{ .x = x, .y = y, .width = max_width, .height = 48 });
+        const screen_clip = ui.intersection(self.surface.clip, .{ .x = 0, .y = 0, .width = ui.screen_width, .height = ui.screen_height });
+        clipped.surface.clip = ui.intersection(screen_clip, .{ .x = x, .y = y, .width = max_width, .height = 48 });
         var iter = std.unicode.Utf8View.init(value) catch return;
         var it = iter.iterator();
         var cursor = x;
         while (it.nextCodepoint()) |code| {
             const g = fonts.glyph(role, code);
             if (cursor >= x + max_width) break;
-            var yy: u16 = 0;
-            while (yy < g.ink_height) : (yy += 1) {
-                var xx: u16 = 0;
-                while (xx < g.ink_width) : (xx += 1) {
-                    clipped.blendPixel(cursor + g.ink_x + xx, y + g.ink_y + yy, color, fonts.masks[g.offset + @as(usize, yy) * g.ink_width + xx]);
+            const ink_x = cursor + g.ink_x;
+            const ink_y = y + g.ink_y;
+            const bounds = ui.intersection(clipped.surface.clip, .{ .x = ink_x, .y = ink_y, .width = g.ink_width, .height = g.ink_height });
+            if (bounds.width > 0 and bounds.height > 0) {
+                // Clip once per glyph. Interior mask samples already have valid
+                // canvas/clip coordinates, so no per-pixel rectangle tests recur.
+                const width: usize = @intCast(bounds.width);
+                const left: usize = @intCast(bounds.x - ink_x);
+                var mask_at = @as(usize, g.offset) + @as(usize, @intCast(bounds.y - ink_y)) * g.ink_width + left;
+                var destination: usize = @intCast(bounds.y * ui.screen_width + bounds.x);
+                for (0..@intCast(bounds.height)) |_| {
+                    const masks = fonts.masks[mask_at..][0..width];
+                    const row = clipped.surface.pixels[destination..][0..width];
+                    for (masks, row) |alpha, *destination_pixel| {
+                        if (alpha == 0) continue;
+                        destination_pixel.* = if (alpha == 255) color else blend(destination_pixel.*, color, alpha);
+                    }
+                    mask_at += g.ink_width;
+                    destination += ui.screen_width;
                 }
             }
             cursor += g.advance;
@@ -121,6 +136,41 @@ pub fn blend(a: Color, b: Color, alpha: u8) Color {
     const g = (((@as(u32, a) >> 5) & 63) * inv + ((@as(u32, b) >> 5) & 63) * t + 127) / 255;
     const blue = ((@as(u32, a) & 31) * inv + (@as(u32, b) & 31) * t + 127) / 255;
     return @intCast((r << 11) | (g << 5) | blue);
+}
+
+test "glyph row clipping matches the pixel reference for roles, edge clips and backgrounds" {
+    var expected: [ui.pixel_count]u16 = undefined;
+    var actual: [ui.pixel_count]u16 = undefined;
+    var random = std.Random.DefaultPrng.init(0x4741494e);
+    const rng = random.random();
+    const values = [_][]const u8{ "A clipped synthetic title — Café", "á…artist’s song", "Mixed 0123456789", "", "架空楽団" };
+    for (0..500) |i| {
+        const x = rng.intRangeAtMost(i32, -120, 350);
+        const y = rng.intRangeAtMost(i32, -60, 270);
+        const width = rng.uintLessThan(u16, 400);
+        const color = rng.int(u16);
+        const background = rng.int(u16);
+        const role = std.enums.values(fonts.Role)[i % std.enums.values(fonts.Role).len];
+        const value = values[i % values.len];
+        @memset(&actual, background);
+        @memset(&expected, background);
+        var canvas = Canvas.init(&actual);
+        canvas.surface.clip = if (i % 2 == 0) .{ .x = 3, .y = 7, .width = 310, .height = 220 } else .{ .x = -30, .y = -10, .width = 400, .height = 270 };
+        canvas.text(x, y, width, value, role, color);
+        var reference = Canvas.init(&expected);
+        reference.surface.clip = ui.intersection(canvas.surface.clip, .{ .x = x, .y = y, .width = width, .height = 48 });
+        var iterator = (try std.unicode.Utf8View.init(value)).iterator();
+        var cursor = x;
+        while (iterator.nextCodepoint()) |code| {
+            if (cursor >= x + width) break;
+            const glyph = fonts.glyph(role, code);
+            for (0..glyph.ink_height) |yy| for (0..glyph.ink_width) |xx| {
+                reference.blendPixel(cursor + glyph.ink_x + @as(i32, @intCast(xx)), y + glyph.ink_y + @as(i32, @intCast(yy)), color, fonts.masks[glyph.offset + yy * glyph.ink_width + xx]);
+            };
+            cursor += glyph.advance;
+        }
+        try std.testing.expectEqualSlices(u16, &expected, &actual);
+    }
 }
 
 pub fn textWidth(value: []const u8, role: fonts.Role) u16 {
