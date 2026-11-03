@@ -3,6 +3,7 @@
 /// `playback`, `fat32`, `wav`, and `pcm`.
 pub const i2c = @import("i2c.zig");
 pub const ui = @import("ui.zig");
+pub const ui_api = @import("ui_api.zig");
 pub const player_presenter = @import("player_presenter.zig");
 pub const player_view = @import("player_view.zig");
 pub const display = @import("f20_display.zig");

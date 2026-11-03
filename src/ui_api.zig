@@ -13,3 +13,4 @@ pub const media = @import("f20_media.zig");
 pub const navigation = @import("navigation.zig");
 pub const library_metadata = @import("library_metadata.zig");
 pub const media_source = @import("media_source.zig");
+pub const catalog_codec = @import("catalog_codec.zig");

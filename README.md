@@ -489,6 +489,19 @@ full-frame DMA at most 18 ms. These are isolated-job ceilings, not an end-to-end
 animation or concurrent audio guarantee. The runner writes no persistent
 storage and leaves ROM USB untouched during the bounded campaign.
 
+`mise run bench-firmware` measures production library projection, cold/warm
+in-memory scans, catalogue persistence, artwork lookup/preparation, text,
+Cover Flow, display packing, PCM output and all 32 codec fixtures. It emits
+newline-delimited JSON with nine trials per timing case, a warm-up, batched
+repetitions and checksums. Scratch high-water measurements use a fixed allocator;
+catalogue memory reports arena capacity. Inputs are synthetic and no SD root is
+read or changed. This optional target does not enter the firmware build.
+
+Run timing measurements alone on an idle host. Compile first with
+`zig build build-bench-firmware`, then run `zig-out/bin/bench-firmware` separately. Compare repeated runs on the same machine/build mode; there are no
+machine-dependent nanosecond thresholds in unit tests. These host numbers do not
+establish F20 frame rates, SD/USB throughput, audio deadlines or battery use.
+
 `mise run bench` measures FLAC decoding, PCM packing and LPC reconstruction on
 the host. `mise run bench-f20` runs the corresponding benchmarks and the
 physical SD read-ahead path on a connected F20 in the mask-ROM USB loop. Device

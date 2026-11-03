@@ -26,6 +26,10 @@ run = "zig build test --fuzz=100K --summary all"
 description = "Run host-side FLAC performance benchmarks"
 run = "zig build bench --summary all"
 
+[tasks.bench-firmware]
+description = "Benchmark production library, rendering, artwork and audio algorithms on the host"
+run = "zig build bench-firmware --summary all"
+
 [tasks.bench-f20]
 description = "Run RAM-only FLAC benchmarks on a mask-ROM F20"
 run = "tools/run_f20_bench.sh"

@@ -247,6 +247,17 @@ pub fn build(b: *std.Build) void {
     });
     const benchmark_step = b.step("bench", "Run host-side FLAC performance benchmarks");
     benchmark_step.dependOn(&b.addRunArtifact(benchmark_flac).step);
+    const firmware_bench_module = b.createModule(.{ .root_source_file = b.path("tools/bench_firmware.zig"), .target = b.graph.host, .optimize = .ReleaseFast, .link_libc = true });
+    const firmware_bench_gain = b.createModule(.{ .root_source_file = b.path("src/f20.zig"), .target = b.graph.host, .optimize = .ReleaseFast, .link_libc = true });
+    @import("build_codecs.zig").add(b, firmware_bench_gain, b.graph.host, .ReleaseFast, false);
+    firmware_bench_module.addImport("gain", firmware_bench_gain);
+    firmware_bench_module.addImport("fixtures", b.createModule(.{ .root_source_file = b.path("tests/codec_fixtures.zig"), .target = b.graph.host, .optimize = .ReleaseFast }));
+    const firmware_bench = b.addExecutable(.{ .name = "bench-firmware", .root_module = firmware_bench_module });
+    const firmware_bench_step = b.step("bench-firmware", "Benchmark production library, UI, artwork and audio algorithms on the host");
+    firmware_bench_step.dependOn(&b.addRunArtifact(firmware_bench).step);
+    const firmware_bench_install = b.addInstallArtifact(firmware_bench, .{});
+    firmware_bench_step.dependOn(&firmware_bench_install.step);
+    b.step("build-bench-firmware", "Build host benchmarks without running timing measurements").dependOn(&firmware_bench_install.step);
 
     const f20_benchmark_module = b.createModule(.{
         .root_source_file = b.path("tools/bench_f20.zig"),
