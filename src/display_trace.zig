@@ -2,7 +2,7 @@
 //! Writes are four integers; the host reads the ring after each animation.
 const std = @import("std");
 pub const capacity = 2048;
-pub const Kind = enum(u32) { render = 1, commit = 2, release = 3, retarget = 4, model = 5, motion = 6 };
+pub const Kind = enum(u32) { render = 1, commit = 2, release = 3, retarget = 4, model = 5, motion = 6, flow = 7 };
 pub const Entry = extern struct { sequence: u32, at: u32, kind: Kind, value: u32 };
 pub const Ring = struct {
     entries: [capacity]Entry = @splat(.{ .sequence = 0, .at = 0, .kind = .render, .value = 0 }),

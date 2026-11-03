@@ -324,6 +324,38 @@ def check_album_return(monitor, output):
     )
 
 
+def check_spaced_taps(monitor, output):
+    inputs(monitor, ["home", "down", "select"], None)
+    for name, button in [("forward", "down"), ("backward", "up")]:
+        time.sleep(1.5)
+        before = monitor.status()["ui_trace_next"]
+        remote(monitor, button)
+        time.sleep(0.6)
+        after = monitor.status()["ui_trace_next"]
+        trace = read_trace(monitor, before, after)
+        positions = [
+            struct.unpack("<f", struct.pack("<I", entry["value"]))[0]
+            for entry in trace
+            if entry["kind"] == 7
+        ]
+        intermediate = {
+            round(position, 4) for position in positions if 0.005 < position < 0.995
+        }
+        target = 1 if name == "forward" else 0
+        if (
+            len(intermediate) < 5
+            or not positions
+            or abs(positions[-1] - target) > 0.005
+        ):
+            raise RuntimeError(
+                f"Spaced {name} button skipped its transition: {positions}"
+            )
+        (output / f"spaced-tap-{name}.json").write_text(
+            json.dumps(dict(passed=True, positions=positions, trace=trace), indent=2)
+            + "\n"
+        )
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, required=True)
@@ -445,6 +477,7 @@ def main():
         time.sleep(0.5)
         screen(monitor, out, "albums")
         check_album_return(monitor, out)
+        check_spaced_taps(monitor, out)
         (out / "summary.json").write_text(
             json.dumps(
                 dict(

@@ -38,6 +38,7 @@ pub fn Controller(comptime Platform: type) type {
         selected_id: u64 = 0,
         selected_track_anchor: u64 = 0,
         flow: f32 = 0,
+        flow_at: u64 = 0,
         revision: u32 = 0,
         cover_revision: u32 = 0,
         track_store: @import("track_selection.zig").Store,
@@ -167,6 +168,7 @@ pub fn Controller(comptime Platform: type) type {
                 },
                 .up, .down => {
                     if (self.screen == .player and playing) return if (event == .up) .previous else .next;
+                    if (self.screen == .albums) self.advanceFlow(now);
                     const count = self.rows();
                     if (count > 0) self.selection = if (event == .up) self.selection -| 1 else @min(count - 1, self.selection + 1);
                     if (self.selection < self.first) self.first = self.selection;
@@ -260,6 +262,15 @@ pub fn Controller(comptime Platform: type) type {
             }
         }
 
+        fn advanceFlow(self: *State, now: u64) void {
+            // A retarget first advances the old destination to the event time.
+            // Idle time never becomes time spent moving towards a new album.
+            const elapsed: f32 = @floatFromInt(@min(1000, now -| self.flow_at));
+            const target: f32 = @floatFromInt(self.selection);
+            if (self.flow != target) self.flow += (target - self.flow) * (1 - @exp(-elapsed / 55));
+            self.flow_at = now;
+        }
+
         pub fn isAnimating(self: *const State, now: u64) bool {
             return (self.screen == .albums and @abs(self.flow - @as(f32, @floatFromInt(self.selection))) > 0.005) or self.animation.isAnimating(now);
         }
@@ -328,13 +339,10 @@ pub fn Controller(comptime Platform: type) type {
                 submitted = true;
             }
             if (!self.pending_frame.dueAt(now, self.dirty, lcd.renderIntervalMs())) return;
-            if (moving) {
-                const elapsed: f32 = @floatFromInt(@min(1000, now - self.pending_frame.last_render));
-                const fraction = 1 - @exp(-elapsed / 55);
-                self.flow += (@as(f32, @floatFromInt(self.selection)) - self.flow) * fraction;
-            }
+            if (moving) self.advanceFlow(now);
             const draw_started = Platform.now();
             Platform.trace(.model, draw_started, (@as(u32, @intFromBool(moving)) << 31) | (@as(u32, @intFromBool(volume_moving)) << 30) | (@as(u32, @backingInt(self.screen)) << 27) | (@as(u32, @intCast(self.selection)) << 11) | @as(u32, @intCast(@min(2047, self.rows()))));
+            Platform.trace(.flow, draw_started, @bitCast(self.flow));
             if (!self.major and self.screen == .player) self.renderTimelineInto(lcd.framebuffer, now) else self.render(now);
             const draw_ticks = Platform.now() -% draw_started;
             Platform.trace(.render, Platform.now(), draw_ticks);
@@ -687,6 +695,7 @@ const TestPlatform = struct {
         }
         fn reset() void {
             busy_until = 0;
+            latency = 19;
             active = 0;
             submissions = 0;
             corrupted = false;
@@ -955,4 +964,39 @@ test "Back from tracks restores the selected album without sweeping from the fir
     try std.testing.expectEqual(id, state.selected_id);
     try std.testing.expectEqual(1, state.selection);
     try std.testing.expectEqual(@as(f32, 1), state.flow);
+}
+
+test "spaced previous and next presses begin animation at the input time after idle" {
+    var fixture: Fixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const tracks = [_]core.Track{
+        .{ .id = 1, .path = "A/1", .stamp = .{}, .meta = .{ .album = "First" } },
+        .{ .id = 2, .path = "B/1", .stamp = .{}, .meta = .{ .album = "Second" } },
+    };
+    try fixture.pair.publish(&.{}, &tracks, 42, true);
+    for ([_]u64{ 500, 2000, 60000 }) |idle_ms| {
+        TestPlatform.Display.reset();
+        var state = fixture.state();
+        state.navigate(.albums);
+        TestPlatform.milliseconds = 100;
+        state.frame(100);
+        const pressed_at = 100 + idle_ms;
+        _ = state.handle(.down, pressed_at, false);
+        TestPlatform.milliseconds = pressed_at;
+        state.frame(pressed_at);
+        try std.testing.expectEqual(@as(f32, 0), state.flow);
+        TestPlatform.milliseconds = pressed_at + 20;
+        state.frame(pressed_at + 20);
+        try std.testing.expect(state.flow > 0 and state.flow < 0.5);
+        TestPlatform.milliseconds = pressed_at + 1000;
+        state.frame(pressed_at + 1000);
+        _ = state.handle(.up, pressed_at + 2000, false);
+        TestPlatform.milliseconds = pressed_at + 2000;
+        state.frame(pressed_at + 2000);
+        try std.testing.expect(state.flow > 0.99);
+        TestPlatform.milliseconds += 20;
+        state.frame(TestPlatform.milliseconds);
+        try std.testing.expect(state.flow > 0.5 and state.flow < 0.99);
+    }
 }
