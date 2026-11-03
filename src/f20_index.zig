@@ -29,7 +29,7 @@ pub const State = struct {
 
     pub fn init(volume: *native.Volume) !State {
         comptime {
-            if (@sizeOf(views.Pair) > memory.scan_views.bytes) @compileError("progressive views exceed reserved memory");
+            if (@sizeOf(views.Pair) > memory.scan_views.bytes) @compileError(std.fmt.comptimePrint("progressive views need {d} bytes; reservation is {d}", .{ @sizeOf(views.Pair), memory.scan_views.bytes }));
         }
         const pair: *views.Pair = @ptrFromInt(memory.scan_views.cached());
         pair.* = .{};

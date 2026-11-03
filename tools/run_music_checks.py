@@ -470,7 +470,7 @@ def main():
             raise RuntimeError(f"UI pacing regression: {gate['failures']}")
         final = check_idle_selection(monitor, out, args.track)
         # Exercise the retained folder browser and return via Menu.
-        inputs(monitor, ["home", "down", "down", "down", "select"], None)
+        inputs(monitor, ["home"] + ["down"] * 5 + ["select"], None)
         time.sleep(0.5)
         screen(monitor, out, "folders")
         inputs(monitor, ["home", "down", "select"], None)
