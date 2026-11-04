@@ -1078,6 +1078,59 @@ const Fixture = struct {
     }
 };
 
+test "device samples drive accelerated lists and release cancels repeats" {
+    var fixture: Fixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const tracks = try std.testing.allocator.alloc(core.Track, 4096);
+    defer std.testing.allocator.free(tracks);
+    for (tracks, 0..) |*track, i| track.* = .{ .id = i + 1, .path = "Synthetic/track.flac", .stamp = .{}, .meta = .{ .title = "Synthetic", .album = "Album", .track = @intCast(i + 1) } };
+    try fixture.pair.publish(&.{}, tracks, 1, true);
+    var state = fixture.state();
+    state.navigate(.tracks);
+    state.track_scope = .all;
+    const capture = @import("input_capture.zig");
+    var stream = @import("music_input.zig").Stream.init(.{ .at = 0, .buttons = 0, .wheel = 0 }, 6);
+    stream.observe(.{ .at = 10, .buttons = capture.Button.next.mask(), .wheel = 0 });
+    _ = stream.dispatch(&state, 16, 16, 1, false);
+    try std.testing.expectEqual(1, state.selection);
+    for (17..6000) |now| _ = stream.dispatch(&state, @intCast(now), now, 1, false);
+    try std.testing.expectEqual(tracks.len - 1, state.selection);
+    stream.observe(.{ .at = 6000, .buttons = 0, .wheel = 0 });
+    _ = stream.dispatch(&state, 6000, 6000, 1, false);
+    _ = stream.dispatch(&state, 6006, 6006, 1, false);
+    _ = stream.dispatch(&state, 16006, 16006, 1, false);
+    try std.testing.expectEqual(tracks.len - 1, state.selection);
+    stream.observe(.{ .at = 16007, .buttons = capture.Button.previous.mask(), .wheel = 0 });
+    _ = stream.dispatch(&state, 16013, 16013, 1, false);
+    try std.testing.expectEqual(tracks.len - 2, state.selection);
+}
+
+test "device wheel capture accelerates through the controller without button repeats" {
+    var fixture: Fixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const tracks = try std.testing.allocator.alloc(core.Track, 100);
+    defer std.testing.allocator.free(tracks);
+    for (tracks, 0..) |*track, i| track.* = .{ .id = i + 1, .path = "Synthetic/track.flac", .stamp = .{}, .meta = .{ .title = "Synthetic", .album = "Album", .track = @intCast(i + 1) } };
+    try fixture.pair.publish(&.{}, tracks, 1, true);
+    var state = fixture.state();
+    state.navigate(.tracks);
+    state.track_scope = .all;
+    var stream = @import("music_input.zig").Stream.init(.{ .at = 0, .buttons = 0, .wheel = 0 }, 6);
+    for (0..12) |detent| {
+        for ([_]u2{ 2, 3, 1, 0 }, 0..) |phase, edge| {
+            const now: u32 = @intCast(1 + detent * 20 + edge * 5);
+            stream.observe(.{ .at = now, .buttons = 0, .wheel = phase });
+            _ = stream.dispatch(&state, now, now, 1, false);
+        }
+    }
+    try std.testing.expect(state.selection > 12);
+    const stopped = state.selection;
+    _ = stream.dispatch(&state, 10000, 10000, 1, false);
+    try std.testing.expectEqual(stopped, state.selection);
+}
+
 test "native album focus and fractional animation phase survive progressive insertions" {
     var fixture: Fixture = undefined;
     try fixture.init();

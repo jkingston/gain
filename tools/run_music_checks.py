@@ -356,6 +356,90 @@ def check_spaced_taps(monitor, output):
         )
 
 
+def check_raw_navigation(monitor, output):
+    """Use raw levels so a semantic-tap adapter cannot hide missing device wiring."""
+    status = monitor.status()
+    if status["index_tracks"] < 100 or status["index_albums"] < 40:
+        (output / "raw-navigation.json").write_text(
+            json.dumps(
+                dict(skipped="Needs 100 tracks and 40 albums to measure acceleration")
+            )
+            + "\n"
+        )
+        return
+
+    def sample(value):
+        data = ctypes.create_string_buffer(4)
+        count = monitor.lib.libusb_control_transfer(
+            monitor.handle, 0xC0, 0x6A, value, 0, data, 4, 3000
+        )
+        if count != 4 or data.raw != struct.pack("<I", 0x4741494E):
+            raise RuntimeError("Raw input sample was not acknowledged")
+
+    def selections(trace, screen_id):
+        return [
+            (event["value"] >> 11) & 0xFFFF
+            for event in trace
+            if event["kind"] == 5 and (event["value"] >> 27) & 7 == screen_id
+        ]
+
+    def enter(menu_row):
+        inputs(monitor, ["home"] + ["down"] * menu_row + ["select"], None)
+        time.sleep(0.3)
+
+    results = {}
+    try:
+        # These are raw button/wheel levels, including releases, rather than
+        # the semantic Up/Down commands used by the animation profiles.
+        for name, menu_row, screen_id in [("tracks", 3, 2), ("covers", 1, 1)]:
+            enter(menu_row)
+            before = monitor.status()["ui_trace_next"]
+            sample(1 << 5)
+            time.sleep(1.3)
+            sample(0)
+            time.sleep(0.12)
+            after = monitor.status()["ui_trace_next"]
+            trace = read_trace(monitor, before, after)
+            positions = selections(trace, screen_id)
+            if not positions or positions[-1] <= 10:
+                raise RuntimeError(f"{name}: physical hold did not repeat/accelerate")
+            time.sleep(0.4)
+            end = monitor.status()["ui_trace_next"]
+            released = read_trace(monitor, after, end)
+            if any(
+                value != positions[-1] for value in selections(released, screen_id)
+            ):
+                raise RuntimeError(f"{name}: repeat continued after release")
+            results[name] = dict(
+                selection=positions[-1], trace=trace, released=released
+            )
+
+        enter(3)
+        before = monitor.status()["ui_trace_next"]
+        # One control transfer per edge preserves velocity. A status read for
+        # every edge would slow the injected gesture below its fast threshold.
+        for _ in range(12):
+            for phase in (2, 3, 1, 0):
+                sample(phase << 8)
+                time.sleep(0.001)
+        sample(0)
+        time.sleep(0.15)
+        trace = read_trace(monitor, before, monitor.status()["ui_trace_next"])
+        positions = selections(trace, 2)
+        if not positions or positions[-1] <= 12:
+            raise RuntimeError("Raw wheel input did not accelerate")
+        results["wheel"] = dict(detents=12, selection=positions[-1], trace=trace)
+        results["passed"] = True
+        (output / "raw-navigation.json").write_text(json.dumps(results, indent=2) + "\n")
+    finally:
+        try:
+            sample(0)
+            time.sleep(0.02)
+            sample(0xFFFF)
+        finally:
+            remote(monitor, "home")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, required=True)
@@ -478,6 +562,7 @@ def main():
         screen(monitor, out, "albums")
         check_album_return(monitor, out)
         check_spaced_taps(monitor, out)
+        check_raw_navigation(monitor, out)
         (out / "summary.json").write_text(
             json.dumps(
                 dict(

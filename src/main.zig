@@ -148,6 +148,9 @@ const Browser = @import("file_browser.zig").Browser(Volume);
 const UiEvent = @import("music_ui.zig").Input;
 
 const Input = struct {
+    music: @import("music_input.zig").Stream,
+    generation: u32 = 1,
+    injected: ?u16 = null,
     raw_buttons: u8 = 0,
     stable_buttons: u8 = 0,
     stable_samples: u3 = 0,
@@ -158,7 +161,8 @@ const Input = struct {
         for (board.buttons) |button| button.pin.input();
         board.wheel.phase_a.input();
         board.wheel.phase_b.input();
-        return .{ .old_wheel = wheelState() };
+        const wheel = wheelState();
+        return .{ .old_wheel = wheel, .music = .init(.{ .at = Timer.now(), .buttons = buttonState(), .wheel = wheel }, Timer.milliseconds(6)) };
     }
 
     fn poll(self: *Input) ?UiEvent {
@@ -209,6 +213,8 @@ const Input = struct {
         self.stable_samples = 0;
         self.old_wheel = wheelState();
         self.wheel_accumulator = 0;
+        self.music.reset(.{ .at = Timer.now(), .buttons = buttons, .wheel = self.old_wheel });
+        self.generation +%= 1;
     }
 };
 
@@ -566,6 +572,7 @@ fn browse(volume: *Volume, browser: *Browser, battery_mv: u32, attenuation_ptr: 
                 },
                 .stop => {},
                 .input => remote = @fromBackingInt(@intCast(command.value)),
+                .input_sample => input.injected = null,
                 .reconnect => {
                     diag.flush();
                     usb.reconnect();
@@ -724,6 +731,7 @@ const MusicSession = struct {
     reconnect_pending: bool = false,
     power_started: ?u64 = null,
     power_off: bool = false,
+    input_generation: u32 = 0,
     clock: @import("executive.zig").Clock = .{ .previous = 0 },
 
     fn now(self: *@This()) u64 {
@@ -753,6 +761,7 @@ const MusicSession = struct {
                 }
             },
             .input => remote = @fromBackingInt(@intCast(command.value)),
+            .input_sample => self.input.injected = if (command.value == 0xffff) null else command.value,
             .reconnect => {
                 self.reconnect_pending = true;
                 return .stop;
@@ -760,9 +769,17 @@ const MusicSession = struct {
             .flush => self.flush_pending = true,
         };
         self.state.status = status;
-        var result: media.PlaybackCommand = .none;
-        const physical = self.input.poll();
         const now_ms = self.now();
+        const at = Timer.now();
+        const sample = self.input.injected;
+        self.input.music.observe(.{ .at = at, .buttons = if (sample) |value| @truncate(value) else buttonState(), .wheel = if (sample) |value| @truncate(value >> 8) else wheelState() });
+        if (self.input_generation != self.input.generation) {
+            self.input_generation = self.input.generation;
+            self.state.cancelInput(0);
+        }
+        var result: media.PlaybackCommand = if (remote) |event| self.state.handle(event, now_ms, self.playing) else .none;
+        if (std.meta.activeTag(result) == .none) result = self.input.music.dispatch(self.state, at, now_ms, Timer.milliseconds(1), self.playing);
+        self.input.stable_buttons = self.input.music.decoder.stable;
         const power_down = self.input.stable_buttons & board.ButtonId.power.mask() != 0;
         if (power_down) {
             if (self.power_started == null) self.power_started = now_ms;
@@ -772,7 +789,6 @@ const MusicSession = struct {
             }
         } else self.power_started = null;
         self.state.refreshBattery(diag.report.battery_mv, now_ms);
-        if (remote orelse physical) |event| result = self.state.handle(event, self.now(), self.playing);
         self.state.frame(self.now());
         if (self.state.failure) return .stop;
         return result;
