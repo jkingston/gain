@@ -36,6 +36,37 @@ const home_items = [_]HomeItem{
 };
 const visible_rows = 5;
 
+const Layout = struct {
+    const left = 16;
+    const right = 304;
+    const width = right - left;
+    const row_top = 64;
+    const row_height = 32;
+    const footer_top = 216;
+    const timeline_top = 192;
+    const header_center = 25;
+    const battery_top = header_center - 5;
+
+    // The atlas includes transparent line padding. Align visible capitals,
+    // rather than centring those differently sized bitmap containers.
+    fn capTop(top: i32, role: draw.fonts.Role) i32 {
+        return top - draw.fonts.glyph(role, 'H').ink_y;
+    }
+
+    fn capBottom(bottom: i32, role: draw.fonts.Role) i32 {
+        const glyph = draw.fonts.glyph(role, 'H');
+        return bottom - glyph.ink_y - glyph.ink_height;
+    }
+
+    fn headerText(role: draw.fonts.Role) i32 {
+        return capTop(header_center - @divTrunc(@as(i32, draw.fonts.glyph(role, 'H').ink_height), 2), role);
+    }
+
+    fn rowText(top: i32, role: draw.fonts.Role) i32 {
+        return capTop(top + @divTrunc(row_height - @as(i32, draw.fonts.glyph(role, 'H').ink_height), 2), role);
+    }
+};
+
 const CoverModel = struct {
     id: u64,
     texture: ?*const flow_scene.Prepared,
@@ -205,11 +236,11 @@ pub fn Controller(comptime Platform: type) type {
             };
         }
 
-        fn visibleRows(self: *const State) usize {
+        fn visibleRows(_: *const State) usize {
             // Reserve the scan footer before laying out full-height rows.
             // Retain this iteration's five-row maximum and large headings.
-            const bottom: usize = if (diag.report.scan_active != 0) 213 else 240;
-            return @min(visible_rows, if (self.screen == .home) (bottom - 64) / 34 else (bottom - 61) / 29);
+            const bottom: usize = if (diag.report.scan_active != 0) Layout.footer_top else 240;
+            return @min(visible_rows, (bottom - Layout.row_top) / Layout.row_height);
         }
 
         fn ensureVisible(self: *State) void {
@@ -629,13 +660,25 @@ pub fn Controller(comptime Platform: type) type {
         }
 
         fn header(self: *State, c: C, title: []const u8, detail: []const u8) void {
-            label(c, 16, 11, 198, title, .serif, ink);
-            c.right(265, 25, detail, .caption, muted);
-            c.fill(16, 54, 288, 1, line);
-            c.fill(282, 18, 21, 10, muted);
-            c.fill(283, 19, 19, 8, paper);
-            c.fill(304, 21, 2, 4, muted);
-            if (self.battery_mv > 0) c.fill(284, 20, @intCast(@min(17, (self.battery_mv -| 3300) * 17 / 900)), 6, accent);
+            const detail_right = Layout.right - 36;
+            const title_right: i32 = if (detail.len == 0) detail_right else detail_right - @as(i32, draw.textWidth(detail, .caption)) - 12;
+            label(c, Layout.left, Layout.headerText(.serif), @intCast(@max(0, title_right - Layout.left)), title, .serif, ink);
+            c.right(detail_right, Layout.headerText(.caption), detail, .caption, muted);
+            c.fill(Layout.left, 54, Layout.width, 1, line);
+            self.battery(c);
+        }
+
+        fn battery(self: *State, c: C) void {
+            const left = Layout.right - 24;
+            const top = Layout.battery_top;
+            c.fill(left, top, 21, 10, muted);
+            c.fill(left + 1, top + 1, 19, 8, paper);
+            c.fill(Layout.right - 2, top + 3, 2, 4, muted);
+            if (self.battery_mv > 0) c.fill(left + 2, top + 2, @intCast(@min(17, (self.battery_mv -| 3300) * 17 / 900)), 6, accent);
+        }
+
+        fn highlightRow(c: C, top: i32) void {
+            c.rounded(Layout.left - 8, top, Layout.width + 16, Layout.row_height, 4, selected);
         }
 
         fn image(self: *State, c: C, album: views.Album, x: i32, y: i32, w: u16, h: u16, lean: i32) void {
@@ -682,17 +725,18 @@ pub fn Controller(comptime Platform: type) type {
             const volume_width: u16 = @intFromFloat(std.math.clamp(self.animation.value(now) / 100, 0, 1) * 288);
             const progress_width: u16 = @intCast(if (self.status.total_frames > 0) @min(288, self.status.played_frames * 288 / self.status.total_frames) else 0);
             const opacity: u8 = @intFromFloat(mix * 255);
-            c.rounded(16, 190, 288, 12, 3, line);
-            if (volume_width > 0) c.rounded(16, 190, volume_width, 12, 3, draw.blend(line, accent, opacity));
-            if (progress_width > 0) c.rounded(16, 190, progress_width, 12, 3, draw.blend(line, accent, 255 - opacity));
+            c.rounded(Layout.left, Layout.timeline_top, Layout.width, 12, 3, line);
+            if (volume_width > 0) c.rounded(Layout.left, Layout.timeline_top, volume_width, 12, 3, draw.blend(line, accent, opacity));
+            if (progress_width > 0) c.rounded(Layout.left, Layout.timeline_top, progress_width, 12, 3, draw.blend(line, accent, 255 - opacity));
             const overlap = @min(volume_width, progress_width);
-            if (overlap > 0) c.rounded(16, 190, overlap, 12, 3, accent);
+            if (overlap > 0) c.rounded(Layout.left, Layout.timeline_top, overlap, 12, 3, accent);
+            const caption_top = Layout.capTop(212, .caption);
             if (mix < 0.5) {
-                label(c, 16, 208, 80, clock(&buf, self.status.played_frames / @max(1, self.status.sample_rate)), .caption, draw.blend(muted, paper, @intFromFloat(mix * 2 * 255)));
-                c.right(304, 208, clock(&buf, self.status.total_frames / @max(1, self.status.sample_rate)), .caption, muted);
+                label(c, Layout.left, caption_top, 80, clock(&buf, self.status.played_frames / @max(1, self.status.sample_rate)), .caption, draw.blend(muted, paper, @intFromFloat(mix * 2 * 255)));
+                c.right(Layout.right, caption_top, clock(&buf, self.status.total_frames / @max(1, self.status.sample_rate)), .caption, muted);
             } else {
-                label(c, 16, 208, 80, "Volume", .caption, draw.blend(paper, muted, @intFromFloat((mix - 0.5) * 2 * 255)));
-                c.right(304, 208, std.fmt.bufPrint(&buf, "{d}", .{@as(u32, 128 - self.attenuation) * 100 / 112}) catch "", .caption, muted);
+                label(c, Layout.left, caption_top, 80, "Volume", .caption, draw.blend(paper, muted, @intFromFloat((mix - 0.5) * 2 * 255)));
+                c.right(Layout.right, caption_top, std.fmt.bufPrint(&buf, "{d}", .{@as(u32, 128 - self.attenuation) * 100 / 112}) catch "", .caption, muted);
             }
         }
 
@@ -709,7 +753,7 @@ pub fn Controller(comptime Platform: type) type {
         }
 
         fn albumProgressWidth() u16 {
-            return if (diag.report.scan_active != 0 and diag.report.scan_total > 0) @intCast(@min(296, @as(u64, diag.report.scan_visited) * 296 / diag.report.scan_total)) else 0;
+            return if (diag.report.scan_active != 0 and diag.report.scan_total > 0) @intCast(@min(Layout.width, @as(u64, diag.report.scan_visited) * Layout.width / diag.report.scan_total)) else 0;
         }
 
         pub fn renderInto(self: *State, pixels: *[320 * 240]u16, now: u64) void {
@@ -746,7 +790,7 @@ pub fn Controller(comptime Platform: type) type {
             }
             const header_changed = !retained or self.rendered_selection != self.selection or self.rendered_count != view.album_count or self.rendered_battery != self.battery_mv or self.rendered_scan_active != diag.report.scan_active or self.rendered_scan_width != scan_width;
             const caption_changed = !retained or self.rendered_selection != self.selection or self.rendered_revision != view.revision;
-            if (!retained) c.clear(paper) else if (scene_changed) c.fill(0, 32, 320, 161, paper);
+            if (!retained) c.clear(paper) else if (scene_changed) c.fill(0, Layout.row_top, 320, 193 - Layout.row_top, paper);
             var buf: [96]u8 = undefined;
             for (&self.covers.requested) |*request| request.* = .{};
             switch (self.screen) {
@@ -754,32 +798,26 @@ pub fn Controller(comptime Platform: type) type {
                     self.header(c, "Music", std.fmt.bufPrint(&buf, "{d} tracks", .{view.track_count}) catch "");
                     for (self.first..@min(home_items.len, self.first + self.visibleRows())) |i| {
                         const name = home_items[i].name;
-                        const y: i32 = 64 + @as(i32, @intCast(i - self.first)) * 34;
-                        if (i == self.selection) c.rounded(12, y, 296, 32, 4, selected);
-                        label(c, 20, y + 3, 260, name, .reading, if (i == self.selection) accent else ink);
-                        c.chevron(294, y + 11, muted);
+                        const y: i32 = Layout.row_top + @as(i32, @intCast(i - self.first)) * Layout.row_height;
+                        if (i == self.selection) highlightRow(c, y);
+                        label(c, Layout.left, Layout.rowText(y, .reading), 268, name, .reading, if (i == self.selection) accent else ink);
+                        c.chevron(Layout.right - 6, y + 12, muted);
                     }
                 },
                 .library => {
                     self.header(c, "Library", std.fmt.bufPrint(&buf, "{d} albums", .{view.album_count}) catch "");
-                    label(c, 16, 63, 288, self.index.phase, .reading, ink);
+                    label(c, Layout.left, Layout.rowText(Layout.row_top, .reading), Layout.width, self.index.phase, .reading, ink);
                     for ([_][]const u8{ "Update library", "Verify library" }, 0..) |name, i| {
-                        const y: i32 = 121 + @as(i32, @intCast(i)) * 32;
-                        if (i == self.selection) c.rounded(12, y, 296, 30, 4, selected);
-                        label(c, 20, y + 2, 280, name, .body, ink);
+                        const y: i32 = 112 + @as(i32, @intCast(i)) * Layout.row_height;
+                        if (i == self.selection) highlightRow(c, y);
+                        label(c, Layout.left, Layout.rowText(y, .body), Layout.width, name, .body, ink);
                     }
                 },
                 .albums => {
                     const header_started = benchmarkClock();
                     if (header_changed) {
-                        c.fill(0, 0, 320, 32, paper);
-                        label(c, 12, 3, 180, "Albums", .body, ink);
-                        c.right(274, 8, std.fmt.bufPrint(&buf, "{d} / {d}", .{ if (view.album_count > 0) self.selection + 1 else 0, view.album_count }) catch "", .caption, muted);
-                        c.fill(286, 11, 20, 9, muted);
-                        c.fill(287, 12, 18, 7, paper);
-                        c.fill(307, 14, 2, 3, muted);
-                        if (self.battery_mv > 0) c.fill(288, 13, @intCast(@min(16, (self.battery_mv -| 3300) * 16 / 900)), 5, accent);
-                        c.fill(12, 30, 296, 1, line);
+                        c.fill(0, 0, 320, Layout.row_top, paper);
+                        self.header(c, "Albums", std.fmt.bufPrint(&buf, "{d} / {d}", .{ if (view.album_count > 0) self.selection + 1 else 0, view.album_count }) catch "");
                     }
                     const scene_started = benchmarkClock();
                     diag.report.cover_header_max = @max(diag.report.cover_header_max, scene_started -% header_started);
@@ -804,7 +842,7 @@ pub fn Controller(comptime Platform: type) type {
                     if (scene_changed) {
                         var cards: [7]flow_scene.Card = undefined;
                         for (visible[0..visible_count], cards[0..visible_count]) |model, *card| card.* = .{ .texture = model.texture, .quad = flow_scene.project(model.distance) };
-                        flow_scene.paintScene(.{ .pixels = pixels }, cards[0..visible_count]);
+                        flow_scene.paintScene(.{ .pixels = pixels[Layout.row_top * 320 .. 193 * 320], .height = 193 - Layout.row_top, .origin_y = Layout.row_top }, cards[0..visible_count]);
                     }
                     if (inspect_scene) {
                         @memcpy(self.rendered_covers[0..visible_count], visible[0..visible_count]);
@@ -816,15 +854,15 @@ pub fn Controller(comptime Platform: type) type {
                         c.fill(0, 193, 320, 47, paper);
                         if (view.album_count > 0) {
                             const album = view.albums[self.selection];
-                            centered(c, 193, 296, album.title, .reading, ink);
-                            centered(c, 215, 296, album.artist, .caption, muted);
+                            centered(c, Layout.capTop(200, .reading), Layout.width, album.title, .reading, ink);
+                            centered(c, Layout.capBottom(224, .caption), Layout.width, album.artist, .caption, muted);
                         }
                     }
                     if (view.album_count == 0) centered(c, 105, 288, "No albums yet", .reading, muted);
                     diag.report.cover_caption_max = @max(diag.report.cover_caption_max, benchmarkClock() -% caption_started);
                     if (diag.report.scan_active != 0) {
-                        c.rounded(80, 12, 3, 3, 1, accent);
-                        if (scan_width > 0) c.fill(12, 30, scan_width, 1, accent);
+                        c.rounded(273, Layout.header_center - 1, 3, 3, 1, accent);
+                        if (scan_width > 0) c.fill(Layout.left, 54, scan_width, 1, accent);
                     }
                 },
                 .artists, .artist, .tracks => {
@@ -848,9 +886,9 @@ pub fn Controller(comptime Platform: type) type {
                             .tracks => (self.trackAt(i) orelse break).meta.title,
                             else => unreachable,
                         };
-                        const y: i32 = 61 + @as(i32, @intCast(i - self.first)) * 29;
-                        if (i == self.selection) c.rounded(12, y, 296, 29, 4, selected);
-                        label(c, 20, y + 1, 280, name, .reading, if (i == self.selection) accent else ink);
+                        const y: i32 = Layout.row_top + @as(i32, @intCast(i - self.first)) * Layout.row_height;
+                        if (i == self.selection) highlightRow(c, y);
+                        label(c, Layout.left, Layout.rowText(y, .reading), Layout.width, name, .reading, if (i == self.selection) accent else ink);
                     }
                 },
                 .player => {
@@ -872,21 +910,21 @@ pub fn Controller(comptime Platform: type) type {
                             }
                         };
                         self.covers.request(0, album.id, album.art);
-                        self.image(c, album, 16, 65, 112, 112, 0);
-                        label(c, 144, 64, 160, track.meta.title, .title, ink);
-                        label(c, 144, 104, 160, track.meta.artist, .body, ink);
-                        label(c, 144, 130, 160, track.meta.album, .caption, muted);
-                        label(c, 144, 163, 160, track.meta.codec, .caption, muted);
+                        self.image(c, album, Layout.left, Layout.row_top, 112, 112, 0);
+                        label(c, 144, Layout.capTop(Layout.row_top, .title), 160, track.meta.title, .title, ink);
+                        label(c, 144, Layout.capTop(100, .body), 160, track.meta.artist, .body, ink);
+                        label(c, 144, Layout.capTop(124, .caption), 160, track.meta.album, .caption, muted);
+                        label(c, 144, Layout.capBottom(176, .caption), 160, track.meta.codec, .caption, muted);
                         self.timeline(c, now);
                     } else label(c, 16, 100, 288, "Choose a track", .title, ink);
                 },
             }
             if (self.screen != .player and self.screen != .albums and diag.report.scan_active != 0) {
-                c.fill(0, 213, 320, 27, paper);
-                c.fill(16, 213, 288, 1, line);
-                label(c, 16, 218, 175, self.index.phase, .caption, muted);
-                c.right(304, 218, std.fmt.bufPrint(&buf, "{d} / {d}", .{ diag.report.scan_visited, diag.report.scan_total }) catch "", .caption, muted);
-                if (diag.report.scan_total > 0) c.fill(16, 237, @intCast(@min(288, @as(u64, diag.report.scan_visited) * 288 / diag.report.scan_total)), 2, accent);
+                c.fill(0, Layout.footer_top, 320, 240 - Layout.footer_top, paper);
+                c.fill(Layout.left, Layout.footer_top, Layout.width, 1, line);
+                label(c, Layout.left, Layout.capTop(224, .caption), 175, self.index.phase, .caption, muted);
+                c.right(Layout.right, Layout.capTop(224, .caption), std.fmt.bufPrint(&buf, "{d} / {d}", .{ diag.report.scan_visited, diag.report.scan_total }) catch "", .caption, muted);
+                if (diag.report.scan_total > 0) c.fill(Layout.left, 238, @intCast(@min(Layout.width, @as(u64, diag.report.scan_visited) * Layout.width / diag.report.scan_total)), 2, accent);
             }
             if (self.screen == .player and diag.report.scan_active != 0) c.rounded(266, 22, 4, 4, 2, accent);
             if (self.jump_position) |position| {
@@ -1432,7 +1470,7 @@ test "scan counters schedule frames only for visible changes and phase transitio
         test_diag.report.scan_visited = @intCast((now - 1001) % 20);
         state.frame(now);
     }
-    // Fewer than 28 tracks never advances the 296-pixel rule at this size.
+    // These small count changes never advance the one-pixel progress rule.
     try std.testing.expectEqual(3, TestPlatform.Display.submissions);
     state.navigate(.library);
     TestPlatform.milliseconds = 1500;

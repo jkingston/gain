@@ -120,13 +120,13 @@ pub fn project(distance: f32) Quad {
     const turn = @min(1, magnitude);
     const stack = @max(0, magnitude - 1);
     const direction: f32 = if (distance < 0) -1 else 1;
-    const size: f32 = 128;
+    const size: f32 = 112;
     // Side sleeves have a tall outer edge and a receding inner edge. Their
     // screen-space translation stays independent of the local perspective.
     const yaw = -direction * turn * (68.0 * std.math.pi / 180.0);
     const depth = turn * 60 + stack * 12;
-    const center_x = 160 + direction * (turn * 84 + stack * 28);
-    const center_y: f32 = 102;
+    const center_x = 160 + direction * (turn * 74 + stack * 24);
+    const center_y: f32 = 120;
     const focal: f32 = 380;
     const half_width = size / 2 * @cos(yaw);
     const half_depth = size / 2 * @sin(yaw);
@@ -141,7 +141,7 @@ pub fn project(distance: f32) Quad {
         .bottom_right = center_y + size / 2 * right_scale,
         .reciprocal_left = left_scale,
         .reciprocal_right = right_scale,
-        .reflection = 22,
+        .reflection = 16,
     };
 }
 
@@ -383,19 +383,21 @@ fn paintReference(surface: Surface, texture: ?*const Prepared, quad: Quad, occlu
     }
 }
 
-test "classic geometry mirrors, remains finite and fits above the caption" {
+test "classic geometry mirrors, remains finite and stays within the display" {
     for (0..701) |i| {
         const distance = @as(f32, @floatFromInt(i)) / 100 - 3.5;
         const q = project(distance);
         const opposite = project(-distance);
         try std.testing.expect(q.right > q.left);
-        try std.testing.expect(q.top_left >= 32 and q.top_right >= 32);
-        try std.testing.expect(q.bottom_left + q.reflection + 2 < 194 and q.bottom_right + q.reflection + 2 < 194);
+        try std.testing.expect(q.top_left >= 0 and q.top_right >= 0);
+        try std.testing.expect(q.bottom_left + q.reflection + 2 < 240 and q.bottom_right + q.reflection + 2 < 240);
         try std.testing.expectApproxEqAbs(320 - q.left, opposite.right, 0.001);
         try std.testing.expectApproxEqAbs(q.top_left, opposite.top_right, 0.001);
     }
     const center = project(0);
-    try std.testing.expectEqual(@as(f32, 128), center.right - center.left);
+    try std.testing.expectApproxEqAbs(center.right - center.left, center.bottom_left - center.top_left, 0.001);
+    try std.testing.expectEqual(center.top_left, center.top_right);
+    try std.testing.expectEqual(center.bottom_left, center.bottom_right);
     const side = project(-1);
     try std.testing.expect(side.bottom_left - side.top_left > side.bottom_right - side.top_right);
 }
@@ -438,7 +440,17 @@ test "prepared columns preserve artwork orientation and paint pixel-exactly at r
     try std.testing.expectEqual(rgb(255, 0, 0), tile.pixels[(texture_edge - 1) * texture_edge]);
     try std.testing.expectEqual(rgb(0, 255, 0), tile.pixels[texture_edge - 1]);
     var canvas: [320 * 240]u16 = @splat(background);
-    paint(.{ .pixels = &canvas }, &tile, project(0));
+    // Exercise one source texel per destination pixel independently of the
+    // current theme's projected cover size and placement.
+    const one_to_one = Quad{
+        .left = 96,
+        .right = 96 + texture_edge,
+        .top_left = 38,
+        .top_right = 38,
+        .bottom_left = 38 + texture_edge,
+        .bottom_right = 38 + texture_edge,
+    };
+    paint(.{ .pixels = &canvas }, &tile, one_to_one);
     for (0..texture_edge) |y| for (0..texture_edge) |x| try std.testing.expectEqual(tile.pixels[x * texture_edge + y], canvas[(y + 38) * 320 + x + 96]);
 }
 
