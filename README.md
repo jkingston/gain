@@ -499,7 +499,10 @@ read or changed. This optional target does not enter the firmware build.
 
 Run timing measurements alone on an idle host. Compile first with
 `zig build build-bench-firmware`, then run `zig-out/bin/bench-firmware` separately. Compare repeated runs on the same machine/build mode; there are no
-machine-dependent nanosecond thresholds in unit tests. These host numbers do not
+machine-dependent nanosecond thresholds in unit tests. Resident-cover player
+rendering, scan-only header updates, satisfied cover-queue polls and cooperative
+projection builds have separate cases. Batched times retain fractional nanoseconds
+for very small steady-state operations. These host numbers do not
 establish F20 frame rates, SD/USB throughput, audio deadlines or battery use.
 
 `mise run bench` measures FLAC decoding, PCM packing and LPC reconstruction on
@@ -678,6 +681,14 @@ codec fixtures and SD/UI concurrency also have RAM-only hardware qualification.
 Host simulations control event order; they do not emulate CPU instruction timing
 or establish battery consumption. Longer field use and power measurements remain
 separate qualification work.
+
+Interactive library rebuilding services storage/UI between track batches and
+sort comparisons. The published view remains immutable while the other slot is
+prepared; cancellation never commits a partial sort. The native adapter can keep
+compressed input supplied and service idle UI work at those points. Ordinary
+non-cooperative builds erase the observer. Work-unit intervals are not a device
+wall-clock guarantee; elapsed publication metrics include time spent servicing
+other work.
 
 The tests do not emulate the X1000. MMIO sequencing is checked by compiling
 the concrete F20 specializations and by RAM-only tests on the physical device.

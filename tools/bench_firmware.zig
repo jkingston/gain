@@ -11,9 +11,9 @@ const Result = struct {
     name: []const u8,
     items: usize,
     repetitions: usize,
-    p50_ns: u64,
-    p95_ns: u64,
-    min_ns: u64,
+    p50_ns: f64,
+    p95_ns: f64,
+    min_ns: f64,
     checksum: u64,
 };
 
@@ -36,9 +36,9 @@ fn measure(io: std.Io, writer: *std.Io.Writer, name: []const u8, items: usize, r
         .name = name,
         .items = items,
         .repetitions = repetitions,
-        .p50_ns = samples[trials / 2] / repetitions,
-        .p95_ns = samples[trials - 1] / repetitions,
-        .min_ns = samples[0] / repetitions,
+        .p50_ns = @as(f64, @floatFromInt(samples[trials / 2])) / @as(f64, @floatFromInt(repetitions)),
+        .p95_ns = @as(f64, @floatFromInt(samples[trials - 1])) / @as(f64, @floatFromInt(repetitions)),
+        .min_ns = @as(f64, @floatFromInt(samples[0])) / @as(f64, @floatFromInt(repetitions)),
         .checksum = checksum,
     }, .{}, writer);
     try writer.writeByte('\n');
@@ -128,6 +128,20 @@ const Observer = struct {
 fn projection(fixture: *Fixture, iteration: usize) !u64 {
     try fixture.view.build(&fixture.baseline.value, fixture.baseline.value.tracks, 1, true, @intCast(iteration));
     std.mem.doNotOptimizeAway(fixture.view);
+    return fixture.view.tracks[fixture.view.artist_track_order[fixture.tracks.len - 1]].id;
+}
+
+fn cooperativeProjection(fixture: *Fixture, iteration: usize) !u64 {
+    const YieldObserver = struct {
+        calls: usize = 0,
+        pub fn cancelled(self: *@This()) bool {
+            self.calls += 1;
+            return false;
+        }
+    };
+    var observer = YieldObserver{};
+    try fixture.view.buildCooperative(&fixture.baseline.value, fixture.baseline.value.tracks, 1, true, @intCast(iteration), &observer);
+    std.mem.doNotOptimizeAway(observer.calls);
     return fixture.view.tracks[fixture.view.artist_track_order[fixture.tracks.len - 1]].id;
 }
 
@@ -342,6 +356,7 @@ pub fn main(init: std.process.Init) !void {
         var fixture = try Fixture.init(count, 16);
         defer fixture.deinit();
         try measure(init.io, writer, "projection", count, 3, &fixture, projection);
+        try measure(init.io, writer, "projection_cooperative", count, 3, &fixture, cooperativeProjection);
         try measure(init.io, writer, "scan_cold_memory", count, 2, &fixture, coldScan);
         try measure(init.io, writer, "scan_warm_memory", count, 2, &fixture, warmScan);
         try resourceUse(writer, &fixture, false);
@@ -370,6 +385,15 @@ pub fn main(init: std.process.Init) !void {
     _ = try prepare({}, 0);
     try measure(init.io, writer, "text_six_rows", 6, 500, {}, text);
     try measure(init.io, writer, "cover_flow_seven_textures", 7, 200, {}, flow);
+    var ui_fixture = try Fixture.init(128, 16);
+    defer ui_fixture.deinit();
+    const music = @import("bench_music_ui.zig");
+    const scene = try host_allocator.create(music.Scene);
+    defer host_allocator.destroy(scene);
+    try scene.init(&ui_fixture.baseline.value, &prepared);
+    try measure(init.io, writer, "cover_flow_resident_ui", 7, 200, scene, music.Scene.moving);
+    try measure(init.io, writer, "cover_flow_scan_progress_ui", 8192, 200, scene, music.Scene.scanProgress);
+    try measure(init.io, writer, "cover_cache_completed_poll", 7, 10000, scene, music.Scene.cachePoll);
     try measure(init.io, writer, "artwork_prepare", 112 * 112, 100, {}, prepare);
     try measure(init.io, writer, "pack_full_frame", pixels.len, 1000, {}, pack);
     try measure(init.io, writer, "pcm_192k_period", 1920, 1000, false, output);
