@@ -53,6 +53,45 @@ pub fn prepareCooperative(texture: Texture, output: *Prepared, observer: anytype
     const end_y = (texture.y + texture.height) * texture_edge / source_edge;
     output.width = end_x - output.x;
     output.height = end_y - output.y;
+    // The vertical coordinates are independent of the output column. Keep a
+    // compact map in storage-task scratch instead of recomputing it per pixel.
+    comptime std.debug.assert(source_edge * source_edge <= std.math.maxInt(u16));
+    const Row = struct { first: u16, next: u16, weight: u8 };
+    var rows: [texture_edge]Row = undefined;
+    for (output.y..end_y) |y| {
+        const fy: u32 = @intCast(@max(0, @as(i32, @intCast((y * 2 + 1) * source_edge * 32768 / texture_edge)) - 32768));
+        const sy: usize = std.math.clamp(fy >> 16, texture.y, texture.y + texture.height - 1);
+        const ny = @min(sy + 1, texture.y + texture.height - 1);
+        rows[y] = .{ .first = @intCast(sy * source_edge), .next = @intCast(ny * source_edge), .weight = @intCast((fy >> 11) & 31) };
+    }
+    for (output.x..end_x) |x| {
+        if ((x - output.x) % 4 == 0 and observer.cancelled()) {
+            output.width = 0;
+            output.height = 0;
+            return false;
+        }
+        const fx: u32 = @intCast(@max(0, @as(i32, @intCast((x * 2 + 1) * source_edge * 32768 / texture_edge)) - 32768));
+        const sx: usize = std.math.clamp(fx >> 16, texture.x, texture.x + texture.width - 1);
+        const nx = @min(sx + 1, texture.x + texture.width - 1);
+        for (rows[output.y..end_y], output.y..) |row, y| {
+            const a = mix(texture.pixels[row.first + sx], texture.pixels[row.first + nx], (fx >> 11) & 31);
+            const b = mix(texture.pixels[row.next + sx], texture.pixels[row.next + nx], (fx >> 11) & 31);
+            output.pixels[x * texture_edge + y] = mix(a, b, row.weight);
+        }
+    }
+    return true;
+}
+
+// Frozen scalar resampler used only by pixel-equivalence tests.
+fn prepareReference(texture: Texture, output: *Prepared, observer: anytype) bool {
+    output.* = .{};
+    if (texture.pixels.len < source_edge * source_edge or texture.width == 0 or texture.height == 0 or texture.x >= source_edge or texture.y >= source_edge or texture.width > source_edge - texture.x or texture.height > source_edge - texture.y) return true;
+    output.x = (texture.x * texture_edge + source_edge - 1) / source_edge;
+    output.y = (texture.y * texture_edge + source_edge - 1) / source_edge;
+    const end_x = (texture.x + texture.width) * texture_edge / source_edge;
+    const end_y = (texture.y + texture.height) * texture_edge / source_edge;
+    output.width = end_x - output.x;
+    output.height = end_y - output.y;
     for (output.x..end_x) |x| {
         if ((x - output.x) % 4 == 0 and observer.cancelled()) {
             output.width = 0;
@@ -153,6 +192,120 @@ pub fn paint(surface: Surface, texture: ?*const Prepared, quad: Quad) void {
 }
 
 fn paintColumns(surface: Surface, texture: ?*const Prepared, quad: Quad, occluders: []const Card) void {
+    std.debug.assert(surface.pixels.len == surface.width * surface.height);
+    const left: usize = @intFromFloat(std.math.clamp(@floor(quad.left), @as(f32, @floatFromInt(surface.origin_x)), @as(f32, @floatFromInt(surface.origin_x + surface.width))));
+    const right: usize = @intFromFloat(std.math.clamp(@ceil(quad.right), @as(f32, @floatFromInt(surface.origin_x)), @as(f32, @floatFromInt(surface.origin_x + surface.width))));
+    if (right <= left or quad.right <= quad.left) return;
+    const candidate = texture orelse &missing;
+    const tile = if (candidate.width > 0 and candidate.height > 0 and candidate.x < texture_edge and candidate.y < texture_edge and candidate.width <= texture_edge - candidate.x and candidate.height <= texture_edge - candidate.y) candidate else &missing;
+    var reflection_opacity: [256]u8 = undefined;
+    var reflection_rows: usize = 0;
+    if (quad.reflection > 0) for (0..quad.reflection) |row| {
+        const remaining: u32 = quad.reflection - @as(u32, @intCast(row));
+        const opacity = remaining * remaining * 8 / (@as(u32, quad.reflection) * quad.reflection);
+        // Opacity decreases monotonically. The rest of this reflection cannot
+        // change a pixel once integer blending has reached zero.
+        if (opacity == 0) break;
+        reflection_opacity[row] = @intCast(opacity);
+        reflection_rows += 1;
+    };
+    for (left..right) |x| {
+        const t = std.math.clamp((@as(f32, @floatFromInt(x)) + 0.5 - quad.left) / (quad.right - quad.left), 0, 1);
+        const reciprocal = quad.reciprocal_left * (1 - t) + quad.reciprocal_right * t;
+        const u = t * quad.reciprocal_right / reciprocal;
+        const source_x: u32 = @intFromFloat(std.math.clamp(u * texture_edge - 0.5, 0, texture_edge - 1) * 65536);
+        const sx: usize = source_x >> 16;
+        if (sx < tile.x or sx >= tile.x + tile.width) continue;
+        const source_first = tile.y;
+        const source_end = tile.y + tile.height;
+        const x_coverage: u32 = @intFromFloat(std.math.clamp(@min(@as(f32, @floatFromInt(x + 1)) - quad.left, quad.right - @as(f32, @floatFromInt(x))), 0, 1) * 32);
+        const top = quad.top_left + (quad.top_right - quad.top_left) * t;
+        const bottom = quad.bottom_left + (quad.bottom_right - quad.bottom_left) * t;
+        const height = bottom - top;
+        if (height <= 0) continue;
+        const first: usize = @intFromFloat(std.math.clamp(@floor(top), @as(f32, @floatFromInt(surface.origin_y)), @as(f32, @floatFromInt(surface.origin_y + surface.height))));
+        const end: usize = @intFromFloat(std.math.clamp(@ceil(bottom), @as(f32, @floatFromInt(surface.origin_y)), @as(f32, @floatFromInt(surface.origin_y + surface.height))));
+        const step: u32 = @intFromFloat(texture_edge * 65536 / height);
+        const sy_fixed: u32 = @intFromFloat(@max(0, (@as(f32, @floatFromInt(first)) + 0.5 - top) * texture_edge / height - 0.5) * 65536);
+        var hidden = false;
+        // Only fully opaque bodies can hide a column, including both AA
+        // boundary pixels. Rectangular artwork conservatively skips culling.
+        for (occluders) |near| {
+            if (near.texture) |art| if (art.width > 0 and (art.x != 0 or art.y != 0 or art.width != texture_edge or art.height != texture_edge)) continue;
+            const q = near.quad;
+            const screen_x: f32 = @floatFromInt(x);
+            if (q.left > screen_x or q.right < screen_x + 1) continue;
+            const across = (screen_x + 0.5 - q.left) / (q.right - q.left);
+            const near_top = q.top_left + (q.top_right - q.top_left) * across;
+            const near_bottom = q.bottom_left + (q.bottom_right - q.bottom_left) * across;
+            if (near_top <= @floor(top) and near_bottom >= @ceil(bottom)) {
+                hidden = true;
+                break;
+            }
+        }
+        if (!hidden) {
+            var column = Column{ .pixels = tile.pixels[sx * texture_edge ..][0..texture_edge], .fixed = sy_fixed, .step = step, .first = source_first, .end = source_end };
+            if (source_first == 0 and source_end == texture_edge) paintBody(true, surface, &column, x, first, end, top, bottom, x_coverage) else paintBody(false, surface, &column, x, first, end, top, bottom, x_coverage);
+        }
+        const reflection_top: usize = @intFromFloat(@max(0, @ceil(bottom) + 1));
+        var reflection_source: u32 = (texture_edge - 1) << 16;
+        for (0..reflection_rows) |row| {
+            const y = reflection_top + row;
+            if (y >= surface.origin_y + surface.height) break;
+            const sy: usize = reflection_source >> 16;
+            reflection_source -|= step;
+            if (sy < source_first or sy >= source_end) continue;
+            const opacity: u32 = reflection_opacity[row];
+            pixel(surface, x, y, tile.pixels[sx * texture_edge + sy], opacity * x_coverage / 32);
+        }
+    }
+}
+
+const Column = struct {
+    pixels: []const u16,
+    fixed: u32,
+    step: u32,
+    first: usize,
+    end: usize,
+
+    inline fn sample(self: *Column, comptime full_height: bool) ?u16 {
+        const sy: usize = @min(texture_edge - 1, self.fixed >> 16);
+        const weight = (self.fixed >> 11) & 31;
+        self.fixed +|= self.step;
+        if (!full_height and (sy < self.first or sy >= self.end)) return null;
+        const first_color = self.pixels[sy];
+        return if (weight == 0) first_color else mix(first_color, self.pixels[@min(sy + 1, if (full_height) texture_edge - 1 else self.end - 1)], weight);
+    }
+};
+
+fn paintBody(comptime full_height: bool, surface: Surface, column: *Column, x: usize, first: usize, end: usize, top: f32, bottom: f32, opacity: u32) void {
+    if (end <= first) return;
+    if (column.sample(full_height)) |color| paintEdge(surface, x, first, color, top, bottom, opacity);
+    if (end == first + 1) return;
+    var destination = (first + 1 - surface.origin_y) * surface.width + x - surface.origin_x;
+    // Interior pixels need neither edge tests nor surface clipping. Keep the
+    // full-opacity path free of destination reads and rectangle checks.
+    if (opacity == 32) {
+        for (first + 1..end - 1) |_| {
+            if (column.sample(full_height)) |color| surface.pixels[destination] = color;
+            destination += surface.width;
+        }
+    } else {
+        for (first + 1..end - 1) |_| {
+            if (column.sample(full_height)) |color| surface.pixels[destination] = mix(surface.pixels[destination], color, opacity);
+            destination += surface.width;
+        }
+    }
+    if (column.sample(full_height)) |color| paintEdge(surface, x, end - 1, color, top, bottom, opacity);
+}
+
+fn paintEdge(surface: Surface, x: usize, y: usize, color: u16, top: f32, bottom: f32, opacity: u32) void {
+    const edge = std.math.clamp(@min(@as(f32, @floatFromInt(y + 1)) - top, bottom - @as(f32, @floatFromInt(y))), 0, 1);
+    pixel(surface, x, y, color, @intFromFloat(edge * @as(f32, @floatFromInt(opacity))));
+}
+
+// Frozen scalar renderer used only by pixel-equivalence tests.
+fn paintReference(surface: Surface, texture: ?*const Prepared, quad: Quad, occluders: []const Card) void {
     std.debug.assert(surface.pixels.len == surface.width * surface.height);
     const left: usize = @intFromFloat(std.math.clamp(@floor(quad.left), @as(f32, @floatFromInt(surface.origin_x)), @as(f32, @floatFromInt(surface.origin_x + surface.width))));
     const right: usize = @intFromFloat(std.math.clamp(@ceil(quad.right), @as(f32, @floatFromInt(surface.origin_x)), @as(f32, @floatFromInt(surface.origin_x + surface.width))));
@@ -351,4 +504,55 @@ test "cooperative preparation has identical pixels and invalidates a cancelled p
     try std.testing.expect(!prepareCooperative(.{ .pixels = &source }, &actual, &observer));
     try std.testing.expectEqual(0, actual.width);
     try std.testing.expectEqual(0, actual.height);
+}
+
+test "specialized columns match the frozen renderer through clipping, padding and reflection" {
+    var source: [source_edge * source_edge]u16 = undefined;
+    for (&source, 0..) |*color, i| color.* = @truncate(i * 31337 + i / source_edge);
+    var full: Prepared = undefined;
+    var rectangular: Prepared = undefined;
+    prepare(.{ .pixels = &source }, &full);
+    prepare(.{ .pixels = &source, .x = 11, .width = 80, .y = 17, .height = 61 }, &rectangular);
+    var reference: [320 * 240]u16 = undefined;
+    var actual: [320 * 240]u16 = undefined;
+    var random = std.Random.DefaultPrng.init(0x4741494e);
+    const rng = random.random();
+    for (0..160) |phase| {
+        @memset(&reference, @truncate(phase * 197));
+        @memset(&actual, @truncate(phase * 197));
+        const width = rng.intRangeAtMost(usize, 1, 320);
+        const height = rng.intRangeAtMost(usize, 1, 240);
+        const origin_x = rng.uintLessThan(usize, 320 - width + 1);
+        const origin_y = rng.uintLessThan(usize, 240 - height + 1);
+        const expected = Surface{ .pixels = reference[0 .. width * height], .width = width, .height = height, .origin_x = origin_x, .origin_y = origin_y };
+        const output = Surface{ .pixels = actual[0 .. width * height], .width = width, .height = height, .origin_x = origin_x, .origin_y = origin_y };
+        var cards: [7]Card = undefined;
+        for ([_]i32{ -3, 3, -2, 2, -1, 1, 0 }, &cards, 0..) |offset, *card, index| {
+            var quad = project(@as(f32, @floatFromInt(offset)) - @as(f32, @floatFromInt(phase)) / 159);
+            quad.reflection = @intCast(phase % 40);
+            card.* = .{ .quad = quad, .texture = if (index == 0) null else if (index % 3 == 0) &rectangular else &full };
+            paintReference(expected, card.texture, card.quad, &.{});
+        }
+        paintScene(output, &cards);
+        try std.testing.expectEqualSlices(u16, &reference, &actual);
+    }
+}
+
+test "prepared coordinate maps preserve every pixel and rectangular padding" {
+    var source: [source_edge * source_edge]u16 = undefined;
+    for (&source, 0..) |*color, i| color.* = @truncate(i * 31337 + i / source_edge);
+    var expected: Prepared = undefined;
+    var actual: Prepared = undefined;
+    var random = std.Random.DefaultPrng.init(0x4741494e);
+    const rng = random.random();
+    for (0..48) |iteration| {
+        const x = if (iteration == 0) 0 else rng.uintLessThan(usize, source_edge);
+        const y = if (iteration == 0) 0 else rng.uintLessThan(usize, source_edge);
+        const width = if (iteration == 0) source_edge else rng.intRangeAtMost(usize, 1, source_edge - x);
+        const height = if (iteration == 0) source_edge else rng.intRangeAtMost(usize, 1, source_edge - y);
+        const texture = Texture{ .pixels = &source, .x = x, .y = y, .width = width, .height = height };
+        try std.testing.expect(prepareReference(texture, &expected, Uninterrupted{}));
+        try std.testing.expect(prepareCooperative(texture, &actual, Uninterrupted{}));
+        try std.testing.expectEqualDeep(expected, actual);
+    }
 }
