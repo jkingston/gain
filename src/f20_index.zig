@@ -13,6 +13,7 @@ pub const State = struct {
     volume: *native.Volume,
     projection: *views.Pair,
     covers: ?*@import("f20_covers.zig").Loader = null,
+    text: ?*@import("f20_text.zig").Loader = null,
     requested: bool = false,
     queued: ?bool = null,
     cold: bool = false,
@@ -52,11 +53,16 @@ pub const State = struct {
 
     pub fn run(context: *anyopaque, service: player.StorageService) void {
         const self: *State = @ptrCast(@alignCast(context));
+        self.service = service;
+        defer self.service = null;
+        if (self.text) |loader| {
+            loader.yield = .{ .context = service.context, .poll = service.poll };
+            loader.service();
+            loader.yield = null;
+        }
         if (self.covers) |cache| cache.service(self.volume);
         if (!self.requested) return;
         self.requested = false;
-        self.service = service;
-        defer self.service = null;
         self.scan() catch |failure| {
             if (failure == error.Cancelled) {
                 diag.report.scan_cancelled += 1;
@@ -77,6 +83,12 @@ pub const State = struct {
         x.Watchdog.kick();
         if (self.service.?.poll(self.service.?.context)) return true;
         if (self.covers) |cache| cache.service(self.volume);
+        if (self.text) |loader| {
+            const service = self.service.?;
+            loader.yield = .{ .context = service.context, .poll = service.poll };
+            loader.service();
+            loader.yield = null;
+        }
         return false;
     }
 

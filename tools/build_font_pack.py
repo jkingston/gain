@@ -145,7 +145,15 @@ def ranges(mapping):
     return output
 
 
-def build(records, destination, cache, download=False, test_subset=False, jobs=2):
+def build(
+    records,
+    destination,
+    cache,
+    download=False,
+    test_subset=False,
+    jobs=2,
+    retain_full=(),
+):
     if fonttools_version != "4.61.1":
         raise ValueError(f"Expected fonttools 4.61.1, got {fonttools_version}")
     cache.mkdir(parents=True, exist_ok=True)
@@ -163,9 +171,20 @@ def build(records, destination, cache, download=False, test_subset=False, jobs=2
     with concurrent.futures.ProcessPoolExecutor(max_workers=jobs) as executor:
         prepared = list(
             executor.map(
-                prepare, [(record, cache, download, points) for record in records]
+                prepare,
+                [
+                    (
+                        record,
+                        cache,
+                        download,
+                        None if record["family"] in retain_full else points,
+                    )
+                    for record in records
+                ],
             )
         )
+    if len({name for name, _, _ in prepared}) != len(prepared):
+        raise ValueError("Duplicate font family in source manifest")
     if len(prepared) > 256:
         raise ValueError("Too many font families")
     mapping = {}
@@ -222,6 +241,7 @@ def build(records, destination, cache, download=False, test_subset=False, jobs=2
     report = {
         "version": 1,
         "test_subset": test_subset,
+        "retained_full_families": sorted(retain_full),
         "sha256": digest(output),
         "bytes": len(output),
         "codepoints": len(mapping),
@@ -261,12 +281,26 @@ def main():
     parser.add_argument("--output", type=pathlib.Path, required=True)
     parser.add_argument("--download", action="store_true")
     parser.add_argument("--test-subset", action="store_true")
+    parser.add_argument(
+        "--retain-full",
+        action="append",
+        default=[],
+        help="Retain an entire family in a small test fixture",
+    )
     parser.add_argument("--jobs", type=int, default=2)
     args = parser.parse_args()
     if not 1 <= args.jobs <= 16:
         parser.error("--jobs must be between 1 and 16")
     records = json.loads(MANIFEST.read_text())["fonts"]
-    build(records, args.output, args.cache, args.download, args.test_subset, args.jobs)
+    build(
+        records,
+        args.output,
+        args.cache,
+        args.download,
+        args.test_subset,
+        args.jobs,
+        args.retain_full,
+    )
 
 
 if __name__ == "__main__":

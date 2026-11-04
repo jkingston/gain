@@ -309,15 +309,6 @@
     },
     {
       "family": "NotoSansDuployan",
-      "path": "ofl/notosansduployan/NotoSansDuployan-Bold.ttf",
-      "url": "https://raw.githubusercontent.com/google/fonts/2fe1e8c6b137fb13041a7cfca6fdcd8a910ea4dc/ofl/notosansduployan/NotoSansDuployan-Bold.ttf",
-      "sha256": "f7766eabbec7c00e50b0e64bf130805f03da77474c203809ceedf1ae96a521db",
-      "license": "OFL-1.1",
-      "license_file": "licenses/NotoSansDuployan.txt",
-      "license_sha256": "b1b12c372165b0a2cf7533c7fa8b6568b8981d2e207a15d7bf631bd1910c4fe0"
-    },
-    {
-      "family": "NotoSansDuployan",
       "path": "ofl/notosansduployan/NotoSansDuployan-Regular.ttf",
       "url": "https://raw.githubusercontent.com/google/fonts/2fe1e8c6b137fb13041a7cfca6fdcd8a910ea4dc/ofl/notosansduployan/NotoSansDuployan-Regular.ttf",
       "sha256": "2510875cbe4b602f90446e185b25eff1dc600acbc37e8a7a46bbf352603373be",
@@ -408,81 +399,9 @@
     },
     {
       "family": "NotoSansGujaratiUI",
-      "path": "ofl/notosansgujaratiui/NotoSansGujaratiUI-Black.ttf",
-      "url": "https://raw.githubusercontent.com/google/fonts/2fe1e8c6b137fb13041a7cfca6fdcd8a910ea4dc/ofl/notosansgujaratiui/NotoSansGujaratiUI-Black.ttf",
-      "sha256": "b1a9f30113e5253a5fcb9a2edd7c7032fff776c2e4ac2b803ab900392db09695",
-      "license": "OFL-1.1",
-      "license_file": "licenses/NotoSansGujaratiUI.txt",
-      "license_sha256": "5e0da210fb04058a8c0087985d2d456b931c2579811a49655721d3cf0c36b6d6"
-    },
-    {
-      "family": "NotoSansGujaratiUI",
-      "path": "ofl/notosansgujaratiui/NotoSansGujaratiUI-Bold.ttf",
-      "url": "https://raw.githubusercontent.com/google/fonts/2fe1e8c6b137fb13041a7cfca6fdcd8a910ea4dc/ofl/notosansgujaratiui/NotoSansGujaratiUI-Bold.ttf",
-      "sha256": "2c91d8e29fdebae8b3a50c0d3212f513e524db9eb1d10a34f729c25c4a5cd6f9",
-      "license": "OFL-1.1",
-      "license_file": "licenses/NotoSansGujaratiUI.txt",
-      "license_sha256": "5e0da210fb04058a8c0087985d2d456b931c2579811a49655721d3cf0c36b6d6"
-    },
-    {
-      "family": "NotoSansGujaratiUI",
-      "path": "ofl/notosansgujaratiui/NotoSansGujaratiUI-ExtraBold.ttf",
-      "url": "https://raw.githubusercontent.com/google/fonts/2fe1e8c6b137fb13041a7cfca6fdcd8a910ea4dc/ofl/notosansgujaratiui/NotoSansGujaratiUI-ExtraBold.ttf",
-      "sha256": "f58426066b454e32df586e3b50478d380ae1d0c6683a50fea08782e1f986c766",
-      "license": "OFL-1.1",
-      "license_file": "licenses/NotoSansGujaratiUI.txt",
-      "license_sha256": "5e0da210fb04058a8c0087985d2d456b931c2579811a49655721d3cf0c36b6d6"
-    },
-    {
-      "family": "NotoSansGujaratiUI",
-      "path": "ofl/notosansgujaratiui/NotoSansGujaratiUI-ExtraLight.ttf",
-      "url": "https://raw.githubusercontent.com/google/fonts/2fe1e8c6b137fb13041a7cfca6fdcd8a910ea4dc/ofl/notosansgujaratiui/NotoSansGujaratiUI-ExtraLight.ttf",
-      "sha256": "83e3e41358c38c92ba883747804ec4318a80957a9bb1d59fdd25e4025afa1a15",
-      "license": "OFL-1.1",
-      "license_file": "licenses/NotoSansGujaratiUI.txt",
-      "license_sha256": "5e0da210fb04058a8c0087985d2d456b931c2579811a49655721d3cf0c36b6d6"
-    },
-    {
-      "family": "NotoSansGujaratiUI",
-      "path": "ofl/notosansgujaratiui/NotoSansGujaratiUI-Light.ttf",
-      "url": "https://raw.githubusercontent.com/google/fonts/2fe1e8c6b137fb13041a7cfca6fdcd8a910ea4dc/ofl/notosansgujaratiui/NotoSansGujaratiUI-Light.ttf",
-      "sha256": "bf35a1bb4d244d5497a9bfdf425401c6a6b7cf3a99a8d96d0cfb03ee9715c210",
-      "license": "OFL-1.1",
-      "license_file": "licenses/NotoSansGujaratiUI.txt",
-      "license_sha256": "5e0da210fb04058a8c0087985d2d456b931c2579811a49655721d3cf0c36b6d6"
-    },
-    {
-      "family": "NotoSansGujaratiUI",
-      "path": "ofl/notosansgujaratiui/NotoSansGujaratiUI-Medium.ttf",
-      "url": "https://raw.githubusercontent.com/google/fonts/2fe1e8c6b137fb13041a7cfca6fdcd8a910ea4dc/ofl/notosansgujaratiui/NotoSansGujaratiUI-Medium.ttf",
-      "sha256": "194e67b03518fd263afa90ac6c6366b11ddf134deb351355d1c44910094af20e",
-      "license": "OFL-1.1",
-      "license_file": "licenses/NotoSansGujaratiUI.txt",
-      "license_sha256": "5e0da210fb04058a8c0087985d2d456b931c2579811a49655721d3cf0c36b6d6"
-    },
-    {
-      "family": "NotoSansGujaratiUI",
       "path": "ofl/notosansgujaratiui/NotoSansGujaratiUI-Regular.ttf",
       "url": "https://raw.githubusercontent.com/google/fonts/2fe1e8c6b137fb13041a7cfca6fdcd8a910ea4dc/ofl/notosansgujaratiui/NotoSansGujaratiUI-Regular.ttf",
       "sha256": "59c3611a41f68c55a22963fbfba9489cda4f06da3a03b1ede65eb76073ec7584",
-      "license": "OFL-1.1",
-      "license_file": "licenses/NotoSansGujaratiUI.txt",
-      "license_sha256": "5e0da210fb04058a8c0087985d2d456b931c2579811a49655721d3cf0c36b6d6"
-    },
-    {
-      "family": "NotoSansGujaratiUI",
-      "path": "ofl/notosansgujaratiui/NotoSansGujaratiUI-SemiBold.ttf",
-      "url": "https://raw.githubusercontent.com/google/fonts/2fe1e8c6b137fb13041a7cfca6fdcd8a910ea4dc/ofl/notosansgujaratiui/NotoSansGujaratiUI-SemiBold.ttf",
-      "sha256": "035b9cbbf3e1762c05138351cfd9b93a21f7fdcf95275162f01645c11a5b5d0e",
-      "license": "OFL-1.1",
-      "license_file": "licenses/NotoSansGujaratiUI.txt",
-      "license_sha256": "5e0da210fb04058a8c0087985d2d456b931c2579811a49655721d3cf0c36b6d6"
-    },
-    {
-      "family": "NotoSansGujaratiUI",
-      "path": "ofl/notosansgujaratiui/NotoSansGujaratiUI-Thin.ttf",
-      "url": "https://raw.githubusercontent.com/google/fonts/2fe1e8c6b137fb13041a7cfca6fdcd8a910ea4dc/ofl/notosansgujaratiui/NotoSansGujaratiUI-Thin.ttf",
-      "sha256": "4c513b4be825c276e8c32966ebb2034408e993ac9f2eea42ac98d6707357fbff",
       "license": "OFL-1.1",
       "license_file": "licenses/NotoSansGujaratiUI.txt",
       "license_sha256": "5e0da210fb04058a8c0087985d2d456b931c2579811a49655721d3cf0c36b6d6"
@@ -984,81 +903,9 @@
     },
     {
       "family": "NotoSansMyanmarUI",
-      "path": "ofl/notosansmyanmarui/NotoSansMyanmarUI-Black.ttf",
-      "url": "https://raw.githubusercontent.com/google/fonts/2fe1e8c6b137fb13041a7cfca6fdcd8a910ea4dc/ofl/notosansmyanmarui/NotoSansMyanmarUI-Black.ttf",
-      "sha256": "fc35b096efe860a64dde30d15d0049e21a1c9ecd8f2c7da71950544040e9ae7f",
-      "license": "OFL-1.1",
-      "license_file": "licenses/NotoSansMyanmarUI.txt",
-      "license_sha256": "5e0da210fb04058a8c0087985d2d456b931c2579811a49655721d3cf0c36b6d6"
-    },
-    {
-      "family": "NotoSansMyanmarUI",
-      "path": "ofl/notosansmyanmarui/NotoSansMyanmarUI-Bold.ttf",
-      "url": "https://raw.githubusercontent.com/google/fonts/2fe1e8c6b137fb13041a7cfca6fdcd8a910ea4dc/ofl/notosansmyanmarui/NotoSansMyanmarUI-Bold.ttf",
-      "sha256": "5c5f1efee3d4a877e3c32d0236e9187ac949de919c47bf6f0cfd2f6cc2771443",
-      "license": "OFL-1.1",
-      "license_file": "licenses/NotoSansMyanmarUI.txt",
-      "license_sha256": "5e0da210fb04058a8c0087985d2d456b931c2579811a49655721d3cf0c36b6d6"
-    },
-    {
-      "family": "NotoSansMyanmarUI",
-      "path": "ofl/notosansmyanmarui/NotoSansMyanmarUI-ExtraBold.ttf",
-      "url": "https://raw.githubusercontent.com/google/fonts/2fe1e8c6b137fb13041a7cfca6fdcd8a910ea4dc/ofl/notosansmyanmarui/NotoSansMyanmarUI-ExtraBold.ttf",
-      "sha256": "e3bf2ce32d45931f6d9b7fb1ef92eb77ec3df1effd7ba1396e7a27332ec1651e",
-      "license": "OFL-1.1",
-      "license_file": "licenses/NotoSansMyanmarUI.txt",
-      "license_sha256": "5e0da210fb04058a8c0087985d2d456b931c2579811a49655721d3cf0c36b6d6"
-    },
-    {
-      "family": "NotoSansMyanmarUI",
-      "path": "ofl/notosansmyanmarui/NotoSansMyanmarUI-ExtraLight.ttf",
-      "url": "https://raw.githubusercontent.com/google/fonts/2fe1e8c6b137fb13041a7cfca6fdcd8a910ea4dc/ofl/notosansmyanmarui/NotoSansMyanmarUI-ExtraLight.ttf",
-      "sha256": "4a04adf1888c1c794ee20708481306d26feb5d1a1ebbaf9a5c3a315043c0b675",
-      "license": "OFL-1.1",
-      "license_file": "licenses/NotoSansMyanmarUI.txt",
-      "license_sha256": "5e0da210fb04058a8c0087985d2d456b931c2579811a49655721d3cf0c36b6d6"
-    },
-    {
-      "family": "NotoSansMyanmarUI",
-      "path": "ofl/notosansmyanmarui/NotoSansMyanmarUI-Light.ttf",
-      "url": "https://raw.githubusercontent.com/google/fonts/2fe1e8c6b137fb13041a7cfca6fdcd8a910ea4dc/ofl/notosansmyanmarui/NotoSansMyanmarUI-Light.ttf",
-      "sha256": "2ac4403523ac2942fa39595755a56f9fa365bad3cc43d45fd7fd7b6203481139",
-      "license": "OFL-1.1",
-      "license_file": "licenses/NotoSansMyanmarUI.txt",
-      "license_sha256": "5e0da210fb04058a8c0087985d2d456b931c2579811a49655721d3cf0c36b6d6"
-    },
-    {
-      "family": "NotoSansMyanmarUI",
-      "path": "ofl/notosansmyanmarui/NotoSansMyanmarUI-Medium.ttf",
-      "url": "https://raw.githubusercontent.com/google/fonts/2fe1e8c6b137fb13041a7cfca6fdcd8a910ea4dc/ofl/notosansmyanmarui/NotoSansMyanmarUI-Medium.ttf",
-      "sha256": "29c79391ba8471135248450b8f7aab602f941dac43dc2ca900af177f01a99fc3",
-      "license": "OFL-1.1",
-      "license_file": "licenses/NotoSansMyanmarUI.txt",
-      "license_sha256": "5e0da210fb04058a8c0087985d2d456b931c2579811a49655721d3cf0c36b6d6"
-    },
-    {
-      "family": "NotoSansMyanmarUI",
       "path": "ofl/notosansmyanmarui/NotoSansMyanmarUI-Regular.ttf",
       "url": "https://raw.githubusercontent.com/google/fonts/2fe1e8c6b137fb13041a7cfca6fdcd8a910ea4dc/ofl/notosansmyanmarui/NotoSansMyanmarUI-Regular.ttf",
       "sha256": "af6ba8f406f6fe8e326b78860279bf2d9a132f80b739b5e1a8c1b209f6fa1303",
-      "license": "OFL-1.1",
-      "license_file": "licenses/NotoSansMyanmarUI.txt",
-      "license_sha256": "5e0da210fb04058a8c0087985d2d456b931c2579811a49655721d3cf0c36b6d6"
-    },
-    {
-      "family": "NotoSansMyanmarUI",
-      "path": "ofl/notosansmyanmarui/NotoSansMyanmarUI-SemiBold.ttf",
-      "url": "https://raw.githubusercontent.com/google/fonts/2fe1e8c6b137fb13041a7cfca6fdcd8a910ea4dc/ofl/notosansmyanmarui/NotoSansMyanmarUI-SemiBold.ttf",
-      "sha256": "8f297a11ab44fc9592a6b66f6c6dbad4a168e0761ed3b8a6ec0f1d55ca817a15",
-      "license": "OFL-1.1",
-      "license_file": "licenses/NotoSansMyanmarUI.txt",
-      "license_sha256": "5e0da210fb04058a8c0087985d2d456b931c2579811a49655721d3cf0c36b6d6"
-    },
-    {
-      "family": "NotoSansMyanmarUI",
-      "path": "ofl/notosansmyanmarui/NotoSansMyanmarUI-Thin.ttf",
-      "url": "https://raw.githubusercontent.com/google/fonts/2fe1e8c6b137fb13041a7cfca6fdcd8a910ea4dc/ofl/notosansmyanmarui/NotoSansMyanmarUI-Thin.ttf",
-      "sha256": "5344707d46667ff3fcf6cdc4b4cee17e3486c0843dd2669679ca62161a29930c",
       "license": "OFL-1.1",
       "license_file": "licenses/NotoSansMyanmarUI.txt",
       "license_sha256": "5e0da210fb04058a8c0087985d2d456b931c2579811a49655721d3cf0c36b6d6"
@@ -1218,36 +1065,9 @@
     },
     {
       "family": "NotoSansOriyaUI",
-      "path": "ofl/notosansoriyaui/NotoSansOriyaUI-Black.ttf",
-      "url": "https://raw.githubusercontent.com/google/fonts/2fe1e8c6b137fb13041a7cfca6fdcd8a910ea4dc/ofl/notosansoriyaui/NotoSansOriyaUI-Black.ttf",
-      "sha256": "ba5174bfd33278d3d28cf092ae64e3bdedeba0ad8cf8cfa6b4338b3556712b8b",
-      "license": "OFL-1.1",
-      "license_file": "licenses/NotoSansOriyaUI.txt",
-      "license_sha256": "5e0da210fb04058a8c0087985d2d456b931c2579811a49655721d3cf0c36b6d6"
-    },
-    {
-      "family": "NotoSansOriyaUI",
-      "path": "ofl/notosansoriyaui/NotoSansOriyaUI-Bold.ttf",
-      "url": "https://raw.githubusercontent.com/google/fonts/2fe1e8c6b137fb13041a7cfca6fdcd8a910ea4dc/ofl/notosansoriyaui/NotoSansOriyaUI-Bold.ttf",
-      "sha256": "0083e64c0b67116b8ecc920c0284301971c9099bf33a383eb38fd42e29476fa4",
-      "license": "OFL-1.1",
-      "license_file": "licenses/NotoSansOriyaUI.txt",
-      "license_sha256": "5e0da210fb04058a8c0087985d2d456b931c2579811a49655721d3cf0c36b6d6"
-    },
-    {
-      "family": "NotoSansOriyaUI",
       "path": "ofl/notosansoriyaui/NotoSansOriyaUI-Regular.ttf",
       "url": "https://raw.githubusercontent.com/google/fonts/2fe1e8c6b137fb13041a7cfca6fdcd8a910ea4dc/ofl/notosansoriyaui/NotoSansOriyaUI-Regular.ttf",
       "sha256": "2d151a5c2c9fb01a6cbe767f200b263d090d88bf6a74880f43ed81c211e51fb2",
-      "license": "OFL-1.1",
-      "license_file": "licenses/NotoSansOriyaUI.txt",
-      "license_sha256": "5e0da210fb04058a8c0087985d2d456b931c2579811a49655721d3cf0c36b6d6"
-    },
-    {
-      "family": "NotoSansOriyaUI",
-      "path": "ofl/notosansoriyaui/NotoSansOriyaUI-Thin.ttf",
-      "url": "https://raw.githubusercontent.com/google/fonts/2fe1e8c6b137fb13041a7cfca6fdcd8a910ea4dc/ofl/notosansoriyaui/NotoSansOriyaUI-Thin.ttf",
-      "sha256": "7fea1870b88536a0e6efb66dc862993629036334b425e8966c1b3cee21d9f887",
       "license": "OFL-1.1",
       "license_file": "licenses/NotoSansOriyaUI.txt",
       "license_sha256": "5e0da210fb04058a8c0087985d2d456b931c2579811a49655721d3cf0c36b6d6"

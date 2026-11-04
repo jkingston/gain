@@ -40,6 +40,68 @@ var scan_mode: core.Mode = .quick;
 var scan_failure: u32 = 0;
 var publication_cadence: gain.progressive_view.PublicationCadence = .{};
 
+var text_cache: gain.text_cache.Cache = .{};
+var text_memory: [960 * 1024]u8 align(16) = undefined;
+var text_auxiliary: [232 * 1024]u8 align(16) = undefined;
+var text_thread: ?std.Thread = null;
+var text_file: ?*anyopaque = null;
+var text_bytes: u32 = 0;
+var text_statistics: gain.text_contract.Statistics = .{};
+var text_failures: u32 = 0;
+
+fn textRead(_: *anyopaque, at: u32, output: [*]u8, count: u32) callconv(.c) u32 {
+    const file = text_file orelse return 0;
+    if (fseek(file, at, 0) != 0) return 0;
+    return @intCast(fread(output, 1, count, file));
+}
+
+fn textPoll(_: *anyopaque) callconv(.c) bool {
+    return stopping.load(.acquire);
+}
+
+fn textWorker() void {
+    const source = gain.text_contract.Source{ .context = &text_cache, .bytes = text_bytes, .read = textRead, .poll = textPoll };
+    const engine = gain.text_engine.api;
+    const workspace = gain.text_contract.Workspace{ .primary = &text_memory, .primary_bytes = text_memory.len, .auxiliary = &text_auxiliary, .auxiliary_bytes = text_auxiliary.len };
+    const result = engine.initialize(&source, &workspace);
+    defer engine.shutdown();
+    if (result != .ready) {
+        lock();
+        text_failures += 1;
+        unlock();
+        std.debug.print("Player UI font pack: {s}\n", .{@tagName(result)});
+        return;
+    }
+    while (!stopping.load(.acquire)) {
+        lock();
+        const slot = text_cache.claim();
+        unlock();
+        if (slot) |job| {
+            const prepared = engine.prepare(text_cache.request(job), text_cache.destination(job));
+            var statistics: gain.text_contract.Statistics = .{};
+            engine.statistics(&statistics);
+            lock();
+            text_statistics = statistics;
+            if (prepared != .ready and prepared != .cancelled) text_failures +%= 1;
+            text_cache.publish(job, prepared);
+            unlock();
+        } else std.Io.sleep(host_io.io(), .fromMilliseconds(4), .awake) catch {};
+    }
+}
+
+fn startText() void {
+    const path = if (getenv("GAIN_FONT_PACK")) |p| std.mem.span(p) else if (sd_root) |root| std.fmt.allocPrint(std.heap.c_allocator, "{s}/.gain/fonts/fonts.bin", .{root}) catch return else return;
+    defer if (getenv("GAIN_FONT_PACK") == null) std.heap.c_allocator.free(path);
+    const terminated = std.heap.c_allocator.dupeSentinel(u8, path, 0) catch return;
+    defer std.heap.c_allocator.free(terminated);
+    text_file = fopen(terminated, "rb") orelse return;
+    if (fseek(text_file.?, 0, 2) != 0) return;
+    const length = ftell(text_file.?);
+    if (length < 64 or length > std.math.maxInt(u32)) return;
+    text_bytes = @intCast(length);
+    text_thread = std.Thread.spawn(.{}, textWorker, .{}) catch null;
+}
+
 fn lock() void {
     mutex.lockUncancelable(host_io.io());
 }
@@ -263,6 +325,9 @@ fn init(at: u64) callconv(.c) void {
     milliseconds = at;
     projection = .{};
     cache = .{};
+    text_cache = .{};
+    text_statistics = .{};
+    text_failures = 0;
     index = .{};
     Platform.Diagnostics.report = .{};
     Platform.Diagnostics.catalog = null;
@@ -274,8 +339,9 @@ fn init(at: u64) callconv(.c) void {
         index.phase = "Catalogue unavailable";
         std.debug.print("Player UI catalogue: {s}\n", .{@errorName(failure)});
     };
-    state = .{ .index = &index, .covers = &cache, .track_store = .init(&track_memory) };
+    state = .{ .index = &index, .covers = &cache, .text_cache = &text_cache, .track_store = .init(&track_memory) };
     index.requested = sd_root != null;
+    startText();
 }
 
 fn apply(command: media.PlaybackCommand, at: u64) void {
@@ -354,6 +420,10 @@ fn deinit() callconv(.c) void {
     stopping.store(true, .release);
     if (scan_thread) |thread| thread.join();
     scan_thread = null;
+    if (text_thread) |thread| thread.join();
+    text_thread = null;
+    if (text_file) |file| _ = fclose(file);
+    text_file = null;
     if (sd_catalogue) |*owned| owned.deinit();
     sd_catalogue = null;
     if (catalogue) |*parsed| parsed.deinit();
@@ -413,4 +483,26 @@ export fn gain_player_ui_status(output: *Status) callconv(.c) void {
         .selected_id = state.selected_id,
         .playing_id = if (state.playing_track) |track| track.id else 0,
     };
+}
+
+/// Text release tooling uses the identical engine and bounded allocator.
+export fn gain_text_api() callconv(.c) *const gain.text_contract.Api {
+    return &gain.text_engine.api;
+}
+
+pub const TextStatus = extern struct {
+    version: u32 = 1,
+    revision: u32,
+    hits: u32,
+    misses: u32,
+    pending: u32,
+    failures: u32,
+    prepared: u32,
+    heap_peak: u32,
+};
+
+export fn gain_player_ui_text_status(output: *TextStatus) callconv(.c) void {
+    lock();
+    defer unlock();
+    output.* = .{ .revision = text_cache.revision.load(.acquire), .hits = text_cache.hits, .misses = text_cache.misses, .pending = @intFromBool(text_cache.pending()), .failures = text_failures, .prepared = text_statistics.labels, .heap_peak = text_statistics.heap_peak };
 }

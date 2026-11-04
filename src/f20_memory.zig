@@ -52,10 +52,16 @@ pub const fault_capsule = Region{ .start = 0x700000, .bytes = 4096 };
 pub const compressed_ring = Region{ .start = 0x800000, .bytes = 4 * 1024 * 1024 };
 pub const pcm_reservoir = Region{ .start = 0xc00000, .bytes = 192000 * 8 };
 pub const decoded_frames = Region{ .start = 0xe00000, .bytes = 65535 * 8 };
-// Fixed addresses retain the established DMA reservations. Fixed-quantum
-// output uses only Plan.bytes at the start of each buffer.
-pub const audio_buffers = Region{ .start = 0x1000000, .bytes = 4 * 512 * 1024 };
-pub const audio_buffer_capacity = 512 * 1024;
+// Every supported fixed-quantum period fits in 16 KiB, including 192 kHz
+// stereo 24-bit output. Font memory never aliases active DMA payloads.
+pub const audio_buffer_capacity = 16 * 1024;
+pub const audio_buffers = Region{ .start = 0x1000000, .bytes = 4 * audio_buffer_capacity };
+pub const text_code = Region{ .start = audio_buffers.end(), .bytes = 1024 * 1024 };
+pub const text_heap = Region{ .start = text_code.end(), .bytes = 960 * 1024 };
+pub const text_workspace = Region{ .start = 0xd78000, .bytes = 0x88000 };
+// This gap is above the final display snapshot and below decoder channel RAM.
+pub const text_aux_heap = Region{ .start = 0x3c6000, .bytes = 0x3a000 };
+pub const text_cache = Region{ .start = 0x4c0000, .bytes = 256 * 1024 };
 pub const catalog_a = Region{ .start = 0x1200000, .bytes = 6 * 1024 * 1024 };
 pub const catalog_b = Region{ .start = catalog_a.end(), .bytes = 6 * 1024 * 1024 };
 pub const task_stacks = Region{ .start = 0x1f00000, .bytes = 768 * 1024 };
@@ -105,6 +111,11 @@ pub const regions = [_]Region{
     pcm_reservoir,
     decoded_frames,
     audio_buffers,
+    text_code,
+    text_heap,
+    text_aux_heap,
+    text_workspace,
+    text_cache,
     catalog_a,
     catalog_b,
     task_stacks,
@@ -120,7 +131,7 @@ pub const regions = [_]Region{
 };
 
 comptime {
-    @setEvalBranchQuota(2000);
+    @setEvalBranchQuota(4000);
     for (regions, 0..) |region, i| {
         if (region.end() > ram_bytes or region.start & 3 != 0 or region.bytes == 0) @compileError("invalid F20 RAM reservation");
         for (regions[i + 1 ..]) |other| {
@@ -159,4 +170,18 @@ test "stream workspace slices retain byte capacity and DMA alignment" {
 
 test "ROM recovery context stays below every CPU stack" {
     try std.testing.expect(rom_context.end() <= task_stacks.start);
+}
+
+test "all board sample rates and output formats fit isolated DMA buffers" {
+    const output = @import("audio_output.zig");
+    const board = @import("f20_v27.zig");
+    inline for (std.enums.values(board.audio.SampleRate)) |rate| {
+        inline for (std.enums.values(@import("pcm.zig").OutputFormat)) |format| {
+            const plan = try output.Plan.init(@backingInt(rate), format);
+            try std.testing.expect(plan.bytes <= audio_buffer_capacity);
+        }
+    }
+    try std.testing.expectEqual(catalog_a.start, text_heap.end());
+    try std.testing.expect(pcm_reservoir.end() <= text_workspace.start);
+    try std.testing.expectEqual(decoded_frames.start, text_workspace.end());
 }

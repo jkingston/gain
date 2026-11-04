@@ -9,6 +9,7 @@ pub const Rect = ui.Rect;
 
 pub const Canvas = struct {
     surface: ui.Surface,
+    text_cache: ?*@import("text/cache.zig").Cache = null,
 
     pub fn init(pixels: *[ui.pixel_count]u16) Canvas {
         return .{ .surface = .{ .pixels = pixels } };
@@ -46,6 +47,7 @@ pub const Canvas = struct {
     }
 
     pub fn text(self: Canvas, x: i32, y: i32, max_width: u16, value: []const u8, role: fonts.Role, color: Color) void {
+        if (self.prepared(x, y, max_width, value, role, color, false, .left)) return;
         var clipped = self;
         const screen_clip = ui.intersection(self.surface.clip, .{ .x = 0, .y = 0, .width = ui.screen_width, .height = ui.screen_height });
         clipped.surface.clip = ui.intersection(screen_clip, .{ .x = x, .y = y, .width = max_width, .height = 48 });
@@ -81,6 +83,13 @@ pub const Canvas = struct {
     }
 
     pub fn ellipsis(self: Canvas, x: i32, y: i32, width: u16, value: []const u8, role: fonts.Role, color: Color) void {
+        if (self.prepared(x, y, width, value, role, color, true, .left)) return;
+        var fallback = self;
+        fallback.text_cache = null;
+        fallback.embeddedEllipsis(x, y, width, value, role, color);
+    }
+
+    fn embeddedEllipsis(self: Canvas, x: i32, y: i32, width: u16, value: []const u8, role: fonts.Role, color: Color) void {
         const view = std.unicode.Utf8View.init(value) catch return;
         var iterator = view.iterator();
         const tail = textWidth("…", role);
@@ -104,8 +113,39 @@ pub const Canvas = struct {
     }
 
     pub fn right(self: Canvas, right_x: i32, y: i32, value: []const u8, role: fonts.Role, color: Color) void {
+        if (self.prepared(right_x - 320, y, 320, value, role, color, true, .right)) return;
         const width = textWidth(value, role);
         self.text(right_x - width, y, width + 1, value, role, color);
+    }
+
+    pub fn centered(self: Canvas, x: i32, y: i32, width: u16, value: []const u8, role: fonts.Role, color: Color) void {
+        if (self.prepared(x, y, width, value, role, color, true, .center)) return;
+        const measured = @min(width, textWidth(value, role));
+        var fallback = self;
+        fallback.text_cache = null;
+        fallback.ellipsis(x + @divTrunc(@as(i32, width) - measured, 2), y, measured, value, role, color);
+    }
+
+    const Alignment = enum { left, center, right };
+    fn prepared(self: Canvas, x: i32, y: i32, width: u16, value: []const u8, role: fonts.Role, color: Color, ellipsize: bool, alignment: Alignment) bool {
+        const cache = self.text_cache orelse return false;
+        if (!@import("text/cache.zig").needsEngine(value)) return false;
+        const label = cache.lookup(value, role, width, ellipsize) orelse return false;
+        const left = x + switch (alignment) {
+            .left => @as(i32, 0),
+            .center => @divTrunc(@as(i32, width) - label.width, 2),
+            .right => @as(i32, width) - label.width,
+        };
+        const bounds = ui.intersection(ui.intersection(self.surface.clip, .{ .x = 0, .y = 0, .width = ui.screen_width, .height = ui.screen_height }), .{ .x = left, .y = y, .width = label.width, .height = label.height });
+        if (bounds.width == 0 or bounds.height == 0) return true;
+        for (0..@intCast(bounds.height)) |row| {
+            const mask_at = @as(usize, @intCast(bounds.y - y)) * 320 + @as(usize, @intCast(bounds.x - left)) + row * 320;
+            const pixel_at = @as(usize, @intCast(bounds.y * 320 + bounds.x)) + row * 320;
+            for (label.pixels[mask_at..][0..@intCast(bounds.width)], self.surface.pixels[pixel_at..][0..@intCast(bounds.width)]) |alpha, *destination| {
+                if (alpha != 0) destination.* = if (alpha == 255) color else blend(destination.*, color, alpha);
+            }
+        }
+        return true;
     }
 
     pub fn chevron(self: Canvas, x: i32, y: i32, color: Color) void {
@@ -212,4 +252,31 @@ test "linear ellipsis preserves the reference composition and UTF-8 boundaries" 
         Canvas.init(&actual).ellipsis(7, 11, bound, value, .reading, 0);
         try std.testing.expectEqualSlices(u16, &expected, &actual);
     };
+}
+
+test "prepared labels obey clipping and alignment without font work in drawing" {
+    const text = @import("text/cache.zig");
+    var cache: text.Cache = undefined;
+    cache.reset();
+    cache.beginFrame();
+    try std.testing.expect(cache.lookup("日本語", .body, 100, true) == null);
+    const job = cache.claim().?;
+    const label = cache.destination(job);
+    label.* = .{ .width = 17, .height = 11 };
+    for (0..11) |y| @memset(label.pixels[y * 320 ..][0..17], 255);
+    cache.publish(job, .ready);
+    var pixels: [ui.pixel_count]u16 = @splat(0xffff);
+    var c = Canvas.init(&pixels);
+    c.text_cache = &cache;
+    c.surface.clip = .{ .x = 20, .y = 10, .width = 40, .height = 30 };
+    c.centered(0, 5, 100, "日本語", .body, 0);
+    for (0..240) |y| for (0..320) |x| {
+        const expected: u16 = if (y >= 10 and y < 16 and x >= 41 and x < 58) 0 else 0xffff;
+        try std.testing.expectEqual(expected, pixels[y * 320 + x]);
+    };
+    const revision = cache.revision.load(.acquire);
+    for (0..100) |_| c.centered(0, 5, 100, "日本語", .body, 0);
+    try std.testing.expectEqual(revision, cache.revision.load(.acquire));
+    try std.testing.expect(!cache.pending());
+    try std.testing.expectEqual(@as(u32, 101), cache.hits);
 }

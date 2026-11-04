@@ -90,7 +90,7 @@ fn header(scene: *ui.Ui, battery_mv: u32, attenuation: u8, theme: ui.Theme) ui.E
 pub fn browser(scene: *ui.Ui, title: []const u8, empty: bool, battery_mv: u32, attenuation: u8, theme: ui.Theme) ui.Error!void {
     try scene.fill(whole, theme.background);
     try header(scene, battery_mv, attenuation, theme);
-    try label(scene, 10, 40, 300, 7, title[0..@min(title.len, 48)], theme.accent, 1);
+    try scene.text(.{ .x = 10, .y = 35, .width = 300, .height = 21 }, title, .{ .color = theme.accent, .font = .body });
     if (empty) try label(scene, 82, 112, 228, 14, "NO AUDIO FILES", theme.text, 2);
     try label(scene, 10, 225, 180, 7, "PLAY SELECT", theme.muted, 1);
     try label(scene, 226, 225, 84, 7, "BACK", theme.muted, 1);
@@ -100,7 +100,7 @@ pub fn browserRow(scene: *ui.Ui, row: usize, name: []const u8, directory: bool, 
     if (row >= visible_rows) return;
     const y: i32 = @intCast(59 + row * 27);
     if (active) try scene.fill(.{ .x = 7, .y = y, .width = 306, .height = 23 }, theme.accent);
-    try label(scene, 14, y + 8, 278, 7, name[0..@min(name.len, 45)], if (active) theme.accent_text else theme.text, 1);
+    try scene.text(.{ .x = 14, .y = y + 1, .width = 278, .height = 21 }, name, .{ .color = if (active) theme.accent_text else theme.text, .font = .body });
     if (directory) try label(scene, 298, y + 8, 8, 7, ">", if (active) theme.accent_text else theme.accent, 1);
 }
 
@@ -120,13 +120,6 @@ pub fn cleanTrackName(raw: []const u8) []const u8 {
         while (start < end and raw[start] == ' ') start += 1;
     }
     return raw[start..end];
-}
-
-fn firstLineLength(value: []const u8, maximum: usize) usize {
-    if (value.len <= maximum) return value.len;
-    var split = maximum;
-    while (split != 0 and value[split] != ' ') split -= 1;
-    return if (split == 0) maximum else split;
 }
 
 fn timeText(seconds_initial: u64, output: *[5]u8) void {
@@ -178,16 +171,9 @@ pub fn progress(scene: *ui.Ui, status: Status, theme: ui.Theme) ui.Error!void {
 pub fn player(scene: *ui.Ui, track: Track, status: Status, battery_mv: u32, attenuation: u8, theme: ui.Theme) ui.Error!void {
     try scene.fill(whole, theme.background);
     try header(scene, battery_mv, attenuation, theme);
-    try label(scene, 10, 42, 300, 7, track.artist[0..@min(track.artist.len, 48)], theme.accent, 1);
-    const name = cleanTrackName(track.name);
-    const first = firstLineLength(name, 24);
-    try label(scene, 10, 66, 300, 14, name[0..first], theme.text, 2);
-    if (first < name.len) {
-        const start = first + @as(usize, @intFromBool(name[first] == ' '));
-        const second = name[start..];
-        try label(scene, 10, 88, 300, 14, second[0..@min(second.len, 24)], theme.text, 2);
-    }
-    try label(scene, 10, 124, 300, 7, track.album[0..@min(track.album.len, 48)], theme.muted, 1);
+    try scene.text(.{ .x = 10, .y = 37, .width = 300, .height = 24 }, track.artist, .{ .color = theme.accent, .font = .reading });
+    try scene.text(.{ .x = 10, .y = 69, .width = 300, .height = 40 }, cleanTrackName(track.name), .{ .color = theme.text, .font = .title });
+    try scene.text(.{ .x = 10, .y = 119, .width = 300, .height = 24 }, track.album, .{ .color = theme.muted, .font = .reading });
     try label(scene, 10, 151, 48, 7, if (status.bits == 24) "24 BIT" else "16 BIT", theme.accent, 1);
     try label(scene, 64, 151, 246, 7, sampleRateText(status.sample_rate), theme.accent, 1);
     try progress(scene, status, theme);

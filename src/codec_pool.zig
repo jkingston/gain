@@ -31,6 +31,28 @@ pub const Pool = struct {
         return @ptrCast(@alignCast(self.storage.ptr + offset));
     }
 
+    /// Largest contiguous free payload. Text's two fixed pools use this to
+    /// choose an owner without recording a recoverable routing miss as OOM.
+    pub fn largestFreeBlock(self: *Pool) usize {
+        var largest: usize = 0;
+        var offset: usize = 0;
+        while (offset < self.storage.len) {
+            const block = self.header(offset);
+            if (block.used == 0) largest = @max(largest, block.capacity);
+            offset += header_bytes + block.capacity;
+        }
+        return largest;
+    }
+
+    /// Requested payload length for a live allocation owned by this pool.
+    pub fn allocationSize(self: *Pool, pointer: *anyopaque) usize {
+        const offset = @intFromPtr(pointer) - @intFromPtr(self.storage.ptr) - header_bytes;
+        std.debug.assert(offset < self.storage.len and offset % alignment == 0);
+        const block = self.header(offset);
+        std.debug.assert(block.used == 1);
+        return block.requested;
+    }
+
     pub fn allocate(self: *Pool, bytes: usize) ?*anyopaque {
         self.statistics.allocations +%= 1;
         if (bytes == 0 or bytes > self.storage.len - header_bytes) return self.failed();

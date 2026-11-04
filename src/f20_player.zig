@@ -296,6 +296,7 @@ fn Player(comptime Reader: type) type {
             }
             self.plan = try output.Plan.init(information.sample_rate, information.output_format);
             if (audio.sampleRate(information.sample_rate) == null) return error.UnsupportedSampleRate;
+            if (self.plan.bytes > memory.audio_buffer_capacity) return error.InvalidWorkspace;
             // Keep enough PCM beyond one decoder callback to publish EOF while
             // at least four DMA periods still separate output from that boundary.
             if (self.reservoir.capacity() < decoder_batch_frames + startup_margin_periods * self.plan.frames) return error.InvalidWorkspace;

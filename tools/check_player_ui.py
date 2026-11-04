@@ -79,6 +79,22 @@ class Status(c.Structure):
     ] + [("selected_id", c.c_uint64), ("playing_id", c.c_uint64)]
 
 
+class TextStatus(c.Structure):
+    _fields_ = [
+        (name, c.c_uint32)
+        for name in (
+            "version",
+            "revision",
+            "hits",
+            "misses",
+            "pending",
+            "failures",
+            "prepared",
+            "heap_peak",
+        )
+    ]
+
+
 class Player:
     def __init__(self, app, root):
         self.module = c.CDLL(str(app))
@@ -113,6 +129,11 @@ class Player:
         if result["version"] != 1 or result["failure"] or result["scan_failure"]:
             raise RuntimeError(f"Player UI failure: {result}")
         return result
+
+    def text_status(self):
+        value = TextStatus()
+        self.module.gain_player_ui_text_status(c.byref(value))
+        return {name: getattr(value, name) for name, _ in TextStatus._fields_}
 
     def frame(self, elapsed=17):
         self.now += elapsed
@@ -155,6 +176,33 @@ def qualify(app, root, synthetic=False):
                 4,
                 4,
             ), initial
+            # The generated card includes fictional Arabic, CJK and Korean
+            # names. Prepare them through the app worker, then prove that
+            # ordinary stable frames reuse labels without invoking the engine.
+            player.tap("next", "next", "select")
+            deadline = time.monotonic() + 10
+            while True:
+                player.frame()
+                text = player.text_status()
+                if text["prepared"] > 0 and not text["pending"]:
+                    break
+                if time.monotonic() > deadline:
+                    raise RuntimeError(f"Text worker timed out: {text}")
+                time.sleep(0.002)
+            if text["failures"] or text["heap_peak"] > (960 + 232) * 1024:
+                raise RuntimeError(f"Text worker failed: {text}")
+            for _ in range(120):
+                player.frame()
+            assert player.text_status()["prepared"] == text["prepared"]
+            player.tap(
+                "menu",
+                "previous",
+                "previous",
+                "previous",
+                "previous",
+                "previous",
+                "previous",
+            )
             artist = player.tap("next", "next", "select", "select", "select")
             assert artist["rows"] == 48, artist
             player.tap("next", "next", "next")
@@ -221,6 +269,8 @@ def main():
     if args.sd_root:
         result = qualify(app, args.sd_root.resolve(strict=True))
     else:
+        old_fonts = os.environ.get("GAIN_FONT_PACK")
+        os.environ["GAIN_FONT_PACK"] = str(ROOT / "tests/fonts.bin")
         with tempfile.TemporaryDirectory(prefix="gain-ui-card-") as directory:
             root = Path(directory) / "sd"
             create(root, albums=4, tracks_per_album=48)
@@ -242,6 +292,10 @@ def main():
                 hashlib.sha256(path.read_bytes()).digest() for path in sources
             ]
             result["mounted_files"] = checked["tracks"]
+        if old_fonts is None:
+            os.environ.pop("GAIN_FONT_PACK", None)
+        else:
+            os.environ["GAIN_FONT_PACK"] = old_fonts
     print(json.dumps(result, indent=2))
 
 

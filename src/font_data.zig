@@ -1,7 +1,7 @@
 //! Compiled Inter, Newsreader and Noto fallback masks; see assets/fonts/ for provenance.
 pub const Glyph = struct { code: u21, offset: u32, width: u8, height: u8, advance: u8, ink_x: u8, ink_y: u8, ink_width: u8, ink_height: u8 };
 
-pub const Role = enum { body, title, serif, caption, reading };
+pub const Role = enum(u8) { body, title, serif, caption, reading };
 pub const masks = @embedFile("font_data.bin");
 const body = [_]Glyph{
     .{ .code = 32, .offset = 0, .width = 5, .height = 21, .advance = 4, .ink_x = 0, .ink_y = 0, .ink_width = 0, .ink_height = 0 },

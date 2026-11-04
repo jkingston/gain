@@ -710,6 +710,76 @@ The ROM loads the SPL at `0xf4001000` and enters it at `0xf4001800`. The SPL
 initializes LPDDR and returns to the ROM USB loop. The final command uploads
 stage two and calls gain's handoff at `0xf4001a00`.
 
+## Language fonts
+
+The player uses its embedded atlas for simple text and recovery screens. Other
+metadata uses pinned HarfBuzz 15, FreeType 2.14.3, SheenBidi and utf8proc 2.11:
+Unicode 17 bidi/script resolution, grapheme fallback, OpenType shaping and
+hinted grayscale masks. Joining text is reshaped after ellipsis; RTL ellipsis
+lands at the visual end. Original metadata is preserved. Emoji is monochrome.
+The language pack contains Inter, Newsreader and 172 Noto families, covering
+73,388 codepoints. This is broad practical coverage, not every Unicode glyph.
+The exact font sources, checksums and notices are in `assets/fonts/languages.json`.
+
+Fonts live at `.gain/fonts/fonts.bin`. Build the pack with Python and
+`fonttools==4.61.1`; the source cache can be anywhere outside the repository:
+
+```sh
+python3 tools/build_font_pack.py --download --cache /tmp/gain-font-sources \
+  --output /path/to/sd/.gain/fonts/fonts.bin
+mise run build-text
+cp zig-out/bin/engine.bin /path/to/sd/.gain/fonts/engine.bin
+```
+
+Keep the generated `LICENSES.txt` with the pack. Static font instances have
+new internal family names and retain upstream notices. `--test-subset` builds
+only the generic repository fixture; it is not an installed language pack.
+The fixture is rebuilt with `--test-subset --retain-full NotoSansDuployan` to
+retain a real, large-table memory regression case.
+The simulator app opens the same pack under `GAIN_SD_ROOT`, or an explicit
+`GAIN_FONT_PACK=/path/to/fonts.bin`. Its host remains independent of fonts/apps.
+The cache's `locale` selects Japanese, simplified Chinese, traditional Chinese
+or Korean Han forms; automatic uses Japanese forms where available, then the
+coverage fallback. This affects glyph forms, not metadata or sorting.
+
+The native text engine is a separate, fixed-address SD component. The core boot
+image stays within its existing 2 MiB reservation. The loader validates the
+component version, addresses, length and CRC before execution. The build gate
+checks the ELF for memory bounds, OS syscalls, TLS and constructors. No OS
+startup runs. All authored adapters and runtime helpers are Zig. Missing or
+invalid packs retain the embedded text path and do not prevent boot/recovery.
+
+Only the storage owner shapes and rasterises. Twelve immutable label slots,
+two open font faces, a 128 KiB page cache, a resident coverage index and fixed
+960 KiB / 232 KiB allocation pools bound memory use. Large layout tables use
+the primary pool; small objects use the auxiliary gap above the LCD snapshot.
+Faces share immutable tables across UI sizes, and unusually large tables
+use transient faces that are released after each prepared label, preventing
+fragmentation across size changes. Allocation failure is reported rather than
+silently degrading shaping. Drawing only blends masks and copies
+bounded cold requests. Worker publication invalidates the affected UI; stable
+frames do not reshape text. Sparse FAT checkpoints bound warm font seeks to
+64 cluster steps, including fragmented cards. Audio admission, cancellation
+and watchdog hooks remain active during font I/O. Font and label memory have
+explicit reservations checked against audio, catalogues, USB and task stacks.
+
+`mise run test-text` runs the official Unicode 17 bidi/grapheme vectors, direct
+HarfBuzz glyph/position comparisons, multilingual rendering, cancellation,
+remount, clipping and fragmented FAT tests. `mise run test-player-ui` exercises
+the real app's asynchronous font worker and stable-frame cache reuse on a
+synthetic card. `mise run fuzz-text` fuzzes pack/request boundaries.
+`mise run bench-firmware` includes six cached multilingual rows. For a complete
+pack check and exported label masks:
+
+```sh
+python3 tools/check_text.py --app zig-out/lib/libgain-player-ui.dylib \
+  --pack /path/to/fonts.bin --all-families --output /tmp/gain-text-results
+```
+
+Host timing does not establish F20 frame deadlines, SD latency or power use.
+New text-engine loading, the revised DMA reservations and simultaneous audio /
+font preparation still require physical-device qualification.
+
 ## License
 
 gain is released under the [MIT License](LICENSE). Vendored code retains its

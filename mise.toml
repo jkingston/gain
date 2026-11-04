@@ -4,11 +4,11 @@ zig = "0.17.0"
 [tasks.format]
 alias = "fmt"
 description = "Format Zig sources"
-run = "zig fmt --ast-check build.zig build_codecs.zig build_opus.zig build_usb.zig build_art.zig src tests tools"
+run = "zig fmt --ast-check build.zig build_codecs.zig build_opus.zig build_usb.zig build_art.zig build_text.zig src tests tools"
 
 [tasks.lint]
 description = "Check formatting and Zig syntax"
-run = "zig fmt --check --ast-check build.zig build_codecs.zig build_opus.zig build_usb.zig build_art.zig src tests tools"
+run = "zig fmt --check --ast-check build.zig build_codecs.zig build_opus.zig build_usb.zig build_art.zig build_text.zig src tests tools"
 
 [tasks.build]
 description = "Build the SPL and stage-two firmware"
@@ -119,3 +119,19 @@ run = "python3 tools/run_music_checks.py"
 [tasks.fonts]
 description = "Regenerate pinned glyph masks (requires Pillow)"
 run = ["python3 tools/build_fonts.py", "zig fmt src/font_data.zig"]
+
+[tasks.test-text]
+description = "Test Unicode 17 conformance, shaping, clipping and bounded text caches"
+run = "zig build test-text --summary all"
+
+[tasks.build-text]
+description = "Build and verify the SD-backed native text component"
+run = "zig build build-text --summary all"
+
+[tasks.font-pack]
+description = "Build a pinned language pack (pass --cache and --output; requires fonttools 4.61.1)"
+run = "python3 tools/build_font_pack.py"
+
+[tasks.fuzz-text]
+description = "Fuzz font pack and text request boundaries with 100,000 cases"
+run = "zig build fuzz-text --fuzz=100K --summary all"

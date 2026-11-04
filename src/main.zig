@@ -17,6 +17,7 @@ const LcdDma = @import("f20_display.zig");
 const memory = board.memory;
 const Timer = x1000.Timer;
 const Watchdog = x1000.Watchdog;
+var text_loader: ?*@import("f20_text.zig").Loader = null;
 
 const Display = struct {
     const width = board.display.width;
@@ -244,7 +245,10 @@ fn clippedName(name: []const u8, maximum: usize) []const u8 {
 }
 
 fn drawBrowser(volume: *Volume, browser: *const Browser, battery_mv: u32, attenuation: u8, previous: ?player_view.BrowserState) !bool {
-    var scene = ui.Ui.init(Display.surface);
+    var surface = Display.surface;
+    surface.text_cache = LcdDma.text_cache;
+    if (surface.text_cache) |cache| cache.beginFrame();
+    var scene = ui.Ui.init(surface);
     try browser.draw(volume, &scene, battery_mv, attenuation, view_theme);
     scene.finish();
     const damage = player_view.browserDamage(previous, browserViewState(browser, attenuation));
@@ -368,6 +372,7 @@ fn playEntry(
         entry.size,
         volume.device,
         .{
+            .storage_work = if (text_loader) |loader| .{ .context = loader, .run = legacyTextStorage } else null,
             .descriptor_count = 120,
             .buffer_count = 3,
             .attenuation = attenuation,
@@ -382,6 +387,13 @@ fn playEntry(
 
     if (playback_ui.screen.failed) return error.DisplayFailure;
     return result.playback;
+}
+
+fn legacyTextStorage(context: *anyopaque, service: player.StorageService) void {
+    const loader: *@import("f20_text.zig").Loader = @ptrCast(@alignCast(context));
+    loader.yield = .{ .context = service.context, .poll = service.poll };
+    loader.service();
+    loader.yield = null;
 }
 
 fn playSelection(
@@ -519,7 +531,16 @@ fn browse(volume: *Volume, browser: *Browser, battery_mv: u32, attenuation_ptr: 
     var last_flush = Timer.now();
     diag.booted();
     if (!(drawBrowser(volume, browser, battery_mv, attenuation, null) catch |failure| return failure)) return error.DisplayFailure;
+    var text_revision: u32 = if (text_loader) |loader| loader.cache.revision.load(.acquire) else 0;
     while (true) {
+        if (text_loader) |loader| {
+            loader.service();
+            const revision = loader.cache.revision.load(.acquire);
+            if (revision != text_revision) {
+                text_revision = revision;
+                if (!(try drawBrowser(volume, browser, battery_mv, attenuation, null))) return error.DisplayFailure;
+            }
+        }
         Watchdog.kick();
         usb.poll();
         if (usb.needsHandoff()) return;
@@ -778,8 +799,17 @@ fn browseMusic(volume: *Volume, browser: *Browser, battery_mv: u32, attenuation:
     var index = try @import("f20_index.zig").State.init(volume);
     const covers = @import("f20_covers.zig").Loader.init();
     index.covers = covers;
+    const text = @import("f20_text.zig").Loader.init(volume);
+    index.text = text;
+    text_loader = text;
+    LcdDma.text_cache = &text.cache;
+    defer {
+        LcdDma.text_cache = null;
+        text_loader = null;
+        text.deinit();
+    }
     index.request(false);
-    var state = @import("f20_music_ui.zig").State{ .index = &index, .covers = &covers.cache, .attenuation = attenuation.*, .battery_mv = battery_mv, .track_store = @import("track_selection.zig").Store.init(memory.scan_artwork.cachedSlice(u8)) };
+    var state = @import("f20_music_ui.zig").State{ .index = &index, .covers = &covers.cache, .text_cache = &text.cache, .attenuation = attenuation.*, .battery_mv = battery_mv, .track_store = @import("track_selection.zig").Store.init(memory.scan_artwork.cachedSlice(u8)) };
     var session = MusicSession{ .state = &state, .input = input, .pmic = pmic };
     const old_keep_alive = volume.device.keep_alive;
     idle_music_session = &session;
@@ -885,6 +915,9 @@ fn browseMusic(volume: *Volume, browser: *Browser, battery_mv: u32, attenuation:
         }
         if (index.requested) @import("f20_index.zig").State.run(&index, .{ .context = &session, .poll = MusicSession.idlePoll });
         covers.service(volume);
+        text.yield = .{ .context = &session, .poll = MusicSession.idlePoll };
+        text.service();
+        text.yield = null;
         @import("f20_display.zig").idleLaunch();
         if (!state.isAnimating(session.now())) {
             diag.samplePower(pmic);

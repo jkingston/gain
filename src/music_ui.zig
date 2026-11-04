@@ -71,6 +71,8 @@ pub fn Controller(comptime Platform: type) type {
         flow_at: u64 = 0,
         revision: u32 = 0,
         cover_revision: u32 = 0,
+        text_cache: ?*@import("text/cache.zig").Cache = null,
+        text_revision: u32 = 0,
         track_store: @import("track_selection.zig").Store,
         requested_track: ?*const core.Track = null,
         requested_folders: bool = false,
@@ -506,6 +508,15 @@ pub fn Controller(comptime Platform: type) type {
         }
 
         pub fn frame(self: *State, now: u64) void {
+            if (self.text_cache) |cache| {
+                const revision = cache.revision.load(.acquire);
+                if (revision != self.text_revision) {
+                    self.text_revision = revision;
+                    self.dirty = true;
+                    self.major = true;
+                    self.rendered_screen = null;
+                }
+            }
             self.reconcile();
             self.ensureVisible();
             const defer_cosmetic = self.screen == .player and self.animation.isAnimating(now);
@@ -614,8 +625,7 @@ pub fn Controller(comptime Platform: type) type {
         }
 
         fn centered(c: C, y: i32, width: u16, text: []const u8, role: draw.fonts.Role, color: draw.Color) void {
-            const measured = @min(width, draw.textWidth(text, role));
-            label(c, @divTrunc(320 - @as(i32, measured), 2), y, measured, text, role, color);
+            c.centered(@divTrunc(320 - @as(i32, width), 2), y, width, text, role, color);
         }
 
         fn header(self: *State, c: C, title: []const u8, detail: []const u8) void {
@@ -687,7 +697,9 @@ pub fn Controller(comptime Platform: type) type {
         }
 
         pub fn renderTimelineInto(self: *State, pixels: *[320 * 240]u16, now: u64) void {
-            const c = C.init(pixels);
+            var c = C.init(pixels);
+            c.text_cache = self.text_cache;
+            if (self.text_cache) |cache| cache.beginFrame();
             c.fill(0, 188, 320, 42, paper);
             if (self.playing_track != null) self.timeline(c, now);
         }
@@ -701,7 +713,9 @@ pub fn Controller(comptime Platform: type) type {
         }
 
         pub fn renderInto(self: *State, pixels: *[320 * 240]u16, now: u64) void {
-            const c = C.init(pixels);
+            var c = C.init(pixels);
+            c.text_cache = self.text_cache;
+            if (self.text_cache) |cache| cache.beginFrame();
             const view = self.snapshot();
             const retained = self.screen == .albums and self.rendered_screen == .albums and self.rendered_surface == @intFromPtr(pixels);
             const scan_width = if (self.screen == .albums) albumProgressWidth() else 0;

@@ -14,3 +14,7 @@ pub const navigation = @import("navigation.zig");
 pub const library_metadata = @import("library_metadata.zig");
 pub const media_source = @import("media_source.zig");
 pub const catalog_codec = @import("catalog_codec.zig");
+
+pub const text_cache = @import("text/cache.zig");
+pub const text_contract = @import("text/contract.zig");
+pub const text_engine = @import("text/engine.zig");

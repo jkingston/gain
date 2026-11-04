@@ -7,6 +7,41 @@ pub fn build(b: *std.Build) void {
         .abi = .none,
         .cpu_model = .{ .explicit = &std.Target.mips.cpu.mips32r2 },
     });
+    const text_target = target;
+    const text_module = b.createModule(.{
+        .root_source_file = b.path("src/text_engine.zig"),
+        .target = text_target,
+        .single_threaded = true,
+        .optimize = .ReleaseSmall,
+        .strip = !(b.option(bool, "text-symbols", "Retain native text-engine debug symbols") orelse false),
+    });
+    @import("build_text.zig").add(b, text_module, text_target, .ReleaseSmall);
+    const text_engine = b.addExecutable(.{ .name = "gain-text.elf", .root_module = text_module });
+    text_engine.entry = .disabled;
+    text_engine.setLinkerScript(b.path("text.ld"));
+    const text_raw = text_engine.addObjCopy(.{ .format = .binary, .basename = "gain-text.bin" });
+    const text_pack = b.addSystemCommand(&.{ "python3", "tools/pack_text_engine.py" });
+    text_pack.addFileArg(text_raw.getOutput());
+    const text_component = text_pack.addOutputFileArg("engine.bin");
+    const text_component_check = b.addSystemCommand(&.{ "python3", "tools/check_text_component.py", "--elf" });
+    text_component_check.addArtifactArg(text_engine);
+    text_component_check.addArg("--component");
+    text_component_check.addFileArg(text_component);
+    const text_step = b.step("build-text", "Build the SD-backed F20 Unicode text engine");
+    text_step.dependOn(&text_component_check.step);
+    text_step.dependOn(&b.addInstallArtifact(text_engine, .{}).step);
+    text_step.dependOn(&b.addInstallFileWithDir(text_component, .bin, "engine.bin").step);
+    text_step.dependOn(&b.addInstallFileWithDir(text_raw.getOutput(), .bin, "gain-text.bin").step);
+    const text_test_module = b.createModule(.{ .root_source_file = b.path("src/text_tests.zig"), .target = b.graph.host, .optimize = .ReleaseSafe, .link_libc = true, .link_libcpp = true });
+    @import("build_text.zig").add(b, text_test_module, b.graph.host, .ReleaseSafe);
+    text_test_module.addImport("font_fixture", b.createModule(.{ .root_source_file = b.path("tests/font_fixture.zig"), .target = b.graph.host, .optimize = .ReleaseSafe }));
+    const text_tests = b.addTest(.{ .root_module = text_test_module });
+    const text_test_step = b.step("test-text", "Test Unicode layout, SD fonts and prepared label caching");
+    text_test_step.dependOn(&b.addRunArtifact(text_tests).step);
+    const text_fuzz = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("src/text_fuzz.zig"), .target = b.graph.host, .optimize = .ReleaseSafe }) });
+    const text_fuzz_run = b.addRunArtifact(text_fuzz);
+    text_test_step.dependOn(&text_fuzz_run.step);
+    b.step("fuzz-text", "Fuzz text-pack envelopes and UTF-8 request bounds").dependOn(&text_fuzz_run.step);
     const spl_optimize: std.builtin.OptimizeMode = .ReleaseSmall;
 
     const spl_module = b.createModule(.{
@@ -52,6 +87,7 @@ pub fn build(b: *std.Build) void {
     stage2.setLinkerScript(b.path("stage2.ld"));
     const stage2_raw = stage2.addObjCopy(.{ .format = .binary, .basename = "gain-stage2.bin" });
 
+    b.getInstallStep().dependOn(text_step);
     b.installArtifact(spl);
     b.installArtifact(stage2);
     b.getInstallStep().dependOn(&b.addInstallFileWithDir(spl_raw.getOutput(), .bin, "gain-spl.raw").step);
@@ -170,11 +206,9 @@ pub fn build(b: *std.Build) void {
         .optimize = .ReleaseSafe,
         .link_libc = true,
     });
-    player_app_module.addImport("gain_ui", b.createModule(.{
-        .root_source_file = b.path("src/ui_api.zig"),
-        .target = b.graph.host,
-        .optimize = .ReleaseSafe,
-    }));
+    const player_ui_module = b.createModule(.{ .root_source_file = b.path("src/ui_api.zig"), .target = b.graph.host, .optimize = .ReleaseSafe, .link_libc = true, .link_libcpp = true });
+    @import("build_text.zig").add(b, player_ui_module, b.graph.host, .ReleaseSafe);
+    player_app_module.addImport("gain_ui", player_ui_module);
     const player_app = b.addLibrary(.{ .name = "gain-player-ui", .linkage = .dynamic, .root_module = player_app_module });
     b.step("build-player-ui", "Build the production player UI as a simulator app").dependOn(&b.addInstallArtifact(player_app, .{}).step);
     const player_ui_check = b.addSystemCommand(&.{ "python3", "tools/check_player_ui.py", "--app" });
@@ -607,6 +641,7 @@ pub fn build(b: *std.Build) void {
     }
     const test_step = b.step("test", "Run host-side tests");
     test_step.dependOn(library_step);
+    test_step.dependOn(text_test_step);
     test_step.dependOn(usb_tests_step);
     test_step.dependOn(sim_policy_step);
     test_step.dependOn(codec_tests_step);

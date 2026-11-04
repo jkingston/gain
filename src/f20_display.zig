@@ -7,6 +7,7 @@ const phase = @import("display_phase.zig");
 const presentation = @import("presentation.zig");
 
 pub const Region = presentation.Region;
+pub var text_cache: ?*@import("text/cache.zig").Cache = null;
 
 pub const Poll = enum { idle, busy, failed };
 const descriptors: *align(32) volatile lcd_dma.Chain = @ptrFromInt(board.dma_descriptor_address);

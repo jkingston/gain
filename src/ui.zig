@@ -37,6 +37,7 @@ pub const TextStyle = struct {
     color: Color,
     scale: u2 = 1,
     alignment: Align = .start,
+    font: ?@import("font_data.zig").Role = null,
 };
 
 pub const Theme = struct {
@@ -76,6 +77,7 @@ pub const light_theme = Theme{
 
 pub const Surface = struct {
     pixels: *[pixel_count]Color,
+    text_cache: ?*@import("text/cache.zig").Cache = null,
     clip: Rect = .{ .x = 0, .y = 0, .width = screen_width, .height = screen_height },
 
     pub fn clear(self: Surface, color: Color) void {
@@ -98,6 +100,16 @@ pub const Surface = struct {
     }
 
     pub fn text(self: Surface, rect: Rect, value: []const u8, style: TextStyle) void {
+        if (style.font) |role| {
+            var canvas = @import("canvas.zig").Canvas{ .surface = self, .text_cache = self.text_cache };
+            canvas.surface.clip = intersection(self.clip, rect);
+            switch (style.alignment) {
+                .start => canvas.ellipsis(rect.x, rect.y, rect.width, value, role, style.color),
+                .center => canvas.centered(rect.x, rect.y, rect.width, value, role, style.color),
+                .end => canvas.right(rect.x + rect.width, rect.y, value, role, style.color),
+            }
+            return;
+        }
         if (style.scale == 0) return;
         const width = textWidth(value, style.scale);
         var clipped = self;

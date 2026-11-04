@@ -383,6 +383,8 @@ pub fn main(init: std.process.Init) !void {
     for (&art, 0..) |*pixel, i| pixel.* = @truncate(i *% 31337 +% i / 112);
     for (&frames, 0..) |*frame, i| frame.* = .{ .left = @bitCast(@as(u32, @truncate(i *% 982451653))), .right = @bitCast(@as(u32, @truncate(i *% 32452843))) };
     _ = try prepare({}, 0);
+    prepareText();
+    try measure(init.io, writer, "prepared_text_six_rows", 6, 500, {}, preparedText);
     try measure(init.io, writer, "text_six_rows", 6, 500, {}, text);
     try measure(init.io, writer, "cover_flow_seven_textures", 7, 200, {}, flow);
     var ui_fixture = try Fixture.init(128, 16);
@@ -403,4 +405,31 @@ pub fn main(init: std.process.Init) !void {
         defer host_allocator.free(name);
         try measure(init.io, writer, name, case.frames, 3, case, decode);
     }
+}
+
+var prepared_text: ui.text_cache.Cache = undefined;
+const prepared_strings = [_][]const u8{ "日本の音楽", "الموسيقى العربية", "Ελληνική μουσική", "বাংলা সংগীত", "Музыка", "한국 음악" };
+
+fn prepareText() void {
+    prepared_text.reset();
+    prepared_text.beginFrame();
+    for (prepared_strings) |value| {
+        _ = prepared_text.lookup(value, .reading, 288, true);
+        const job = prepared_text.claim().?;
+        const label = prepared_text.destination(job);
+        label.* = .{ .width = 200, .height = 24 };
+        for (0..24) |y| for (0..200) |x| {
+            label.pixels[y * 320 + x] = if (x % 6 < 3 and y % 6 < 4) 200 else 0;
+        };
+        prepared_text.publish(job, .ready);
+    }
+}
+
+fn preparedText(_: void, _: usize) !u64 {
+    var canvas = ui.canvas.Canvas.init(&pixels);
+    canvas.text_cache = &prepared_text;
+    prepared_text.beginFrame();
+    canvas.clear(0xffff);
+    for (prepared_strings, 0..) |value, row| canvas.ellipsis(16, @intCast(24 + row * 28), 288, value, .reading, 0x1945);
+    return @as(u64, pixels[24 * 320 + 16]) + prepared_text.hits;
 }

@@ -9,6 +9,7 @@ pub const State = struct {
     controls: controls.State,
     display: presenter.State = .{},
     failed: bool = false,
+    text_revision: u32 = 0,
 
     pub fn init(attenuation: u8) State {
         return .{ .controls = controls.State.init(attenuation) };
@@ -24,6 +25,13 @@ pub const State = struct {
         };
         if (status.sample_rate == 0) return command;
         const current = view.Status{ .sample_rate = status.sample_rate, .total_frames = status.total_frames, .played_frames = status.played_frames, .bits = if (status.output_format == .signed_24_in_u32) 24 else 16 };
+        if (@hasDecl(Display, "text_cache")) if (Display.text_cache) |cache| {
+            const revision = cache.revision.load(.acquire);
+            if (revision != self.text_revision and !self.display.commit_pending and Display.poll() == .idle) {
+                self.text_revision = revision;
+                self.display = .{};
+            }
+        };
         if (!self.display.begun) self.display.begin(Display, track, current, battery_mv, self.controls.attenuation, theme) catch return self.failedDisplay();
         self.display.update(Display, current, status.phase == .playing, self.controls.attenuation, theme) catch return self.failedDisplay();
         return command;

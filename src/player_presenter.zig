@@ -13,7 +13,8 @@ pub const State = struct {
 
     pub fn begin(self: *State, comptime Backend: type, track: view.Track, status: view.Status, battery_mv: u32, attenuation: u8, theme: ui.Theme) !void {
         if (self.begun) return error.AlreadyBegun;
-        var scene = ui.Ui.init(.{ .pixels = Backend.framebuffer });
+        var scene = ui.Ui.init(.{ .pixels = Backend.framebuffer, .text_cache = if (@hasDecl(Backend, "text_cache")) Backend.text_cache else null });
+        if (scene.surface.text_cache) |cache| cache.beginFrame();
         try view.player(&scene, track, status, battery_mv, attenuation, theme);
         scene.finish();
         // The full snapshot is prepared before the media engine starts.
@@ -30,7 +31,7 @@ pub const State = struct {
             try Backend.commit();
             self.commit_pending = false;
         }
-        var scene = ui.Ui.init(.{ .pixels = Backend.framebuffer });
+        var scene = ui.Ui.init(.{ .pixels = Backend.framebuffer, .text_cache = if (@hasDecl(Backend, "text_cache")) Backend.text_cache else null });
         const current_second = second(status);
         if (current_second != self.displayed_second) {
             try view.progress(&scene, status, theme);
