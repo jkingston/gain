@@ -36,6 +36,12 @@ const home_items = [_]HomeItem{
 };
 const visible_rows = 5;
 
+const CoverModel = struct {
+    id: u64,
+    texture: ?*const flow_scene.Prepared,
+    distance: f32,
+};
+
 /// Platform dependencies are resolved at compile time; no runtime dispatch is
 /// added to drawing or presentation. See f20_music_ui.zig for the device adapter.
 pub fn Controller(comptime Platform: type) type {
@@ -87,6 +93,8 @@ pub fn Controller(comptime Platform: type) type {
         motion_flags: u32 = 0,
         last_second: u64 = 0,
         last_visited: u32 = 0,
+        last_scan_total: u32 = 0,
+        last_scan_phase: []const u8 = "",
         last_active: u32 = 0,
         battery_mv: u32 = 0,
         failure: bool = false,
@@ -97,7 +105,11 @@ pub fn Controller(comptime Platform: type) type {
         rendered_count: usize = 0,
         rendered_battery: u32 = 0,
         rendered_scan_active: u32 = 0,
-        rendered_scan_visited: u32 = 0,
+        rendered_scan_width: u16 = 0,
+        rendered_flow: f32 = 0,
+        rendered_cover_revision: u32 = 0,
+        rendered_covers: [7]CoverModel = undefined,
+        rendered_cover_count: usize = 0,
 
         fn fail(self: *State, failure: anyerror) void {
             if (!self.failure) diag.report.failure = @intFromError(failure);
@@ -296,7 +308,7 @@ pub fn Controller(comptime Platform: type) type {
 
         pub fn handle(self: *State, event: Input, now: u64, playing: bool) media.PlaybackCommand {
             self.reconcile();
-            self.dirty = true;
+            if (self.screen == .player or (event != .volume_up and event != .volume_down)) self.dirty = true;
             switch (event) {
                 .volume_up, .volume_down => {
                     self.attenuation = if (event == .volume_up) self.attenuation -| 4 else @min(128, self.attenuation +| 4);
@@ -481,7 +493,7 @@ pub fn Controller(comptime Platform: type) type {
         }
 
         pub fn isAnimating(self: *const State, now: u64) bool {
-            return (self.screen == .albums and @abs(self.flow - @as(f32, @floatFromInt(self.selection))) > 0.005) or self.animation.isAnimating(now);
+            return (self.screen == .albums and @abs(self.flow - @as(f32, @floatFromInt(self.selection))) > 0.005) or (self.screen == .player and self.animation.isAnimating(now));
         }
 
         pub fn refreshBattery(self: *State, millivolts: u32, now: u64) void {
@@ -502,15 +514,22 @@ pub fn Controller(comptime Platform: type) type {
                 self.dirty = true;
                 self.major = true;
             }
-            const volume_moving = self.animation.tick(now);
+            const volume_moving = self.animation.tick(now) and self.screen == .player;
             if (volume_moving) self.dirty = true;
             if (!defer_cosmetic and self.last_active != diag.report.scan_active) {
                 self.last_active = diag.report.scan_active;
                 self.dirty = true;
                 self.major = true;
             }
-            if (self.last_visited != diag.report.scan_visited) {
+            if (self.last_visited != diag.report.scan_visited or self.last_scan_total != diag.report.scan_total) {
                 self.last_visited = diag.report.scan_visited;
+                self.last_scan_total = diag.report.scan_total;
+                // Now Playing shows activity, not a visited-track count. The
+                // carousel's one-pixel rule changes only at whole pixels.
+                if (diag.report.scan_active != 0 and self.screen != .player and (self.screen != .albums or albumProgressWidth() != self.rendered_scan_width)) self.dirty = true;
+            }
+            if ((self.screen == .library or (diag.report.scan_active != 0 and self.screen != .player and self.screen != .albums)) and !std.mem.eql(u8, self.last_scan_phase, self.index.phase)) {
+                self.last_scan_phase = self.index.phase;
                 self.dirty = true;
             }
             if (self.screen == .player and self.last_second != self.status.played_frames / @max(1, self.status.sample_rate)) {
@@ -677,13 +696,43 @@ pub fn Controller(comptime Platform: type) type {
             self.renderInto(lcd.framebuffer, now);
         }
 
+        fn albumProgressWidth() u16 {
+            return if (diag.report.scan_active != 0 and diag.report.scan_total > 0) @intCast(@min(296, @as(u64, diag.report.scan_visited) * 296 / diag.report.scan_total)) else 0;
+        }
+
         pub fn renderInto(self: *State, pixels: *[320 * 240]u16, now: u64) void {
             const c = C.init(pixels);
             const view = self.snapshot();
             const retained = self.screen == .albums and self.rendered_screen == .albums and self.rendered_surface == @intFromPtr(pixels);
-            const header_changed = !retained or self.rendered_selection != self.selection or self.rendered_count != view.album_count or self.rendered_battery != self.battery_mv or self.rendered_scan_active != diag.report.scan_active or self.rendered_scan_visited != diag.report.scan_visited;
+            const scan_width = if (self.screen == .albums) albumProgressWidth() else 0;
+            const cover_revision = self.covers.revision.load(.acquire);
+            var scene_changed = !retained or self.rendered_cover_revision != cover_revision;
+            var visible: [7]CoverModel = undefined;
+            var visible_count: usize = 0;
+            const inspect_scene = self.screen == .albums and (scene_changed or self.rendered_flow != self.flow or self.rendered_revision != view.revision);
+            if (inspect_scene) {
+                const anchor: i32 = @intFromFloat(@round(self.flow));
+                for ([_]i32{ -3, 3, -2, 2, -1, 1, 0 }) |offset| {
+                    const i = anchor + offset;
+                    if (i < 0 or i >= view.album_count) continue;
+                    const album = view.albums[@intCast(i)];
+                    const distance = @as(f32, @floatFromInt(i)) - self.flow;
+                    if (@abs(distance) > 3.4) continue;
+                    const model = CoverModel{ .id = album.id, .texture = self.covers.get(album.id, album.art), .distance = distance };
+                    visible[visible_count] = model;
+                    if (!scene_changed) {
+                        if (visible_count >= self.rendered_cover_count) scene_changed = true else {
+                            const previous = self.rendered_covers[visible_count];
+                            scene_changed = previous.id != model.id or previous.texture != model.texture or previous.distance != model.distance;
+                        }
+                    }
+                    visible_count += 1;
+                }
+                scene_changed = scene_changed or visible_count != self.rendered_cover_count;
+            }
+            const header_changed = !retained or self.rendered_selection != self.selection or self.rendered_count != view.album_count or self.rendered_battery != self.battery_mv or self.rendered_scan_active != diag.report.scan_active or self.rendered_scan_width != scan_width;
             const caption_changed = !retained or self.rendered_selection != self.selection or self.rendered_revision != view.revision;
-            if (retained) c.fill(0, 32, 320, 161, paper) else c.clear(paper);
+            if (!retained) c.clear(paper) else if (scene_changed) c.fill(0, 32, 320, 161, paper);
             var buf: [96]u8 = undefined;
             for (&self.covers.requested) |*request| request.* = .{};
             switch (self.screen) {
@@ -738,19 +787,15 @@ pub fn Controller(comptime Platform: type) type {
                         self.covers.request(request, album.id, album.art);
                         request += 1;
                     }
-                    var cards: [7]flow_scene.Card = undefined;
-                    var card_count: usize = 0;
-                    for ([_]i32{ -3, 3, -2, 2, -1, 1, 0 }) |offset| {
-                        const i = anchor + offset;
-                        if (i < 0 or i >= view.album_count) continue;
-                        const album = view.albums[@intCast(i)];
-                        const distance = @as(f32, @floatFromInt(i)) - self.flow;
-                        if (@abs(distance) > 3.4) continue;
-                        const texture = self.covers.get(album.id, album.art);
-                        cards[card_count] = .{ .texture = texture, .quad = flow_scene.project(distance) };
-                        card_count += 1;
+                    if (scene_changed) {
+                        var cards: [7]flow_scene.Card = undefined;
+                        for (visible[0..visible_count], cards[0..visible_count]) |model, *card| card.* = .{ .texture = model.texture, .quad = flow_scene.project(model.distance) };
+                        flow_scene.paintScene(.{ .pixels = pixels }, cards[0..visible_count]);
                     }
-                    flow_scene.paintScene(.{ .pixels = pixels }, cards[0..card_count]);
+                    if (inspect_scene) {
+                        @memcpy(self.rendered_covers[0..visible_count], visible[0..visible_count]);
+                        self.rendered_cover_count = visible_count;
+                    }
                     const caption_started = benchmarkClock();
                     diag.report.cover_scene_max = @max(diag.report.cover_scene_max, caption_started -% scene_started);
                     if (caption_changed) {
@@ -765,7 +810,7 @@ pub fn Controller(comptime Platform: type) type {
                     diag.report.cover_caption_max = @max(diag.report.cover_caption_max, benchmarkClock() -% caption_started);
                     if (diag.report.scan_active != 0) {
                         c.rounded(80, 12, 3, 3, 1, accent);
-                        if (diag.report.scan_total > 0) c.fill(12, 30, @intCast(@min(296, @as(u64, diag.report.scan_visited) * 296 / diag.report.scan_total)), 1, accent);
+                        if (scan_width > 0) c.fill(12, 30, scan_width, 1, accent);
                     }
                 },
                 .artists, .artist, .tracks => {
@@ -848,13 +893,15 @@ pub fn Controller(comptime Platform: type) type {
             }
             self.covers.publishRequests();
             self.rendered_surface = @intFromPtr(pixels);
-            self.rendered_screen = self.screen;
+            self.rendered_screen = if (self.jump_position != null) null else self.screen;
             self.rendered_selection = self.selection;
             self.rendered_revision = view.revision;
             self.rendered_count = view.album_count;
             self.rendered_battery = self.battery_mv;
             self.rendered_scan_active = diag.report.scan_active;
-            self.rendered_scan_visited = diag.report.scan_visited;
+            self.rendered_scan_width = scan_width;
+            self.rendered_flow = self.flow;
+            self.rendered_cover_revision = cover_revision;
         }
     };
 }
@@ -1304,4 +1351,224 @@ test "spaced previous and next presses begin animation at the input time after i
         state.frame(TestPlatform.milliseconds);
         try std.testing.expect(state.flow > 0.5 and state.flow < 0.99);
     }
+}
+
+test "stationary carousel retains its scene through scan updates, cover replacement and jump dismissal" {
+    var fixture: Fixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    var state = fixture.state();
+    const tracks = [_]core.Track{
+        .{ .id = 1, .path = "A/1", .stamp = .{}, .meta = .{ .title = "One", .album = "First", .album_artist = "Artist" } },
+        .{ .id = 2, .path = "B/1", .stamp = .{}, .meta = .{ .title = "Two", .album = "Second", .album_artist = "Artist" } },
+    };
+    try fixture.pair.publish(&.{}, &tracks, 42, true);
+    state.navigate(.albums);
+    const fresh = try std.testing.allocator.create([320 * 240]u16);
+    defer std.testing.allocator.destroy(fresh);
+    const retained = try std.testing.allocator.create([320 * 240]u16);
+    defer std.testing.allocator.destroy(retained);
+    for (0..80) |step| {
+        test_diag.report.scan_active = if (step < 60) 1 else 0;
+        test_diag.report.scan_total = 8192;
+        test_diag.report.scan_visited = @intCast(step * 64);
+        if (step == 15) {
+            const album = state.snapshot().albums[0];
+            const load = covers.Cache.Load{ .slot = 0, .request = .{ .id = album.id, .art = album.art } };
+            fixture.cache.begin(load);
+            fixture.cache.tiles[0] = .{ .width = 128, .height = 128, .pixels = @splat(0x1234) };
+            fixture.cache.publish(load);
+        }
+        if (step == 30) try fixture.pair.publish(&.{}, tracks[0..1], 42, true);
+        if (step == 40) state.jump_position = 10;
+        if (step == 45) state.jump_position = null;
+        state.renderInto(retained, step * 17);
+        var reference = state;
+        reference.rendered_screen = null;
+        reference.renderInto(fresh, step * 17);
+        try std.testing.expectEqualSlices(u16, fresh, retained);
+    }
+}
+
+test "scan counters schedule frames only for visible changes and phase transitions" {
+    var fixture: Fixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    TestPlatform.Display.reset();
+    TestPlatform.Display.latency = 0;
+    var state = fixture.state();
+    state.navigate(.player);
+    test_diag.report.scan_active = 1;
+    test_diag.report.scan_total = 8192;
+    for (0..1000) |now| {
+        TestPlatform.milliseconds = now;
+        test_diag.report.scan_visited = @intCast(now);
+        state.frame(now);
+    }
+    try std.testing.expectEqual(1, TestPlatform.Display.submissions);
+    test_diag.report.scan_active = 0;
+    TestPlatform.milliseconds = 1000;
+    state.frame(1000);
+    try std.testing.expectEqual(2, TestPlatform.Display.submissions);
+    state.navigate(.albums);
+    test_diag.report.scan_active = 1;
+    test_diag.report.scan_visited = 0;
+    for (1001..1400) |now| {
+        TestPlatform.milliseconds = now;
+        test_diag.report.scan_visited = @intCast((now - 1001) % 20);
+        state.frame(now);
+    }
+    // Fewer than 28 tracks never advances the 296-pixel rule at this size.
+    try std.testing.expectEqual(3, TestPlatform.Display.submissions);
+    state.navigate(.library);
+    TestPlatform.milliseconds = 1500;
+    state.frame(1500);
+    const before = TestPlatform.Display.submissions;
+    fixture.index_state.phase = "Preparing covers";
+    TestPlatform.milliseconds = 1600;
+    state.frame(1600);
+    try std.testing.expectEqual(before + 1, TestPlatform.Display.submissions);
+}
+
+test "cooperative indexing services animated UI and PCM while retaining immutable DMA frames" {
+    var fixture: Fixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    TestPlatform.Display.reset();
+    TestPlatform.Display.latency = 19;
+    const tracks = try std.testing.allocator.alloc(core.Track, views.max_tracks);
+    defer std.testing.allocator.free(tracks);
+    for (tracks, 0..) |*track, i| track.* = .{ .id = i + 1, .path = "Album/track.flac", .stamp = .{}, .meta = .{ .title = "Synthetic", .album = "Album", .track = @intCast(views.max_tracks - i) } };
+    for ([_]Screen{ .player, .albums }) |screen| {
+        TestPlatform.Display.reset();
+        TestPlatform.Display.latency = 19;
+        try fixture.pair.publish(&.{}, tracks[0..1], 42, true);
+        var state = fixture.state();
+        state.navigate(screen);
+        if (screen == .albums) state.flow = -0.8;
+        state.queue(&tracks[0]);
+        state.playing_track = state.track_store.begin().?;
+        state.requested_track = null;
+        state.status = .{ .phase = .playing, .sample_rate = 192000, .output_format = .signed_24_in_u32, .total_frames = 192000 * 60, .played_frames = 0 };
+        state.animation.request(0, 75);
+        test_diag.report.scan_active = 1;
+        test_diag.report.scan_total = views.max_tracks;
+        const reservoir = @import("pcm_reservoir.zig");
+        const output = @import("audio_output.zig");
+        const Audio = struct {
+            storage: [4096]reservoir.StereoFrame = undefined,
+            supply: [1920]reservoir.StereoFrame = @splat(.{ .left = 0x12340000, .right = -0x12340000 }),
+            bytes: [1920 * 8]u8 align(4) = undefined,
+        };
+        const audio = try std.testing.allocator.create(Audio);
+        defer std.testing.allocator.destroy(audio);
+        audio.* = .{};
+        @memset(&audio.storage, audio.supply[0]);
+        const Observer = struct {
+            state: *TestState,
+            audio: *Audio,
+            ring: reservoir.Ring,
+            plan: output.Plan,
+            now: u64 = 0,
+            periods: u32 = 0,
+            okay: bool = true,
+
+            pub fn cancelled(self: *@This()) bool {
+                self.now += 1;
+                TestPlatform.milliseconds = self.now;
+                if (self.now % 10 == 0) {
+                    const rendered = output.renderPeriod(&self.ring, &self.audio.bytes, self.plan, output.unity_gain_q24) catch unreachable;
+                    self.okay = self.okay and !rendered.underrun and rendered.frames == 1920;
+                    self.okay = self.okay and std.mem.readInt(u32, self.audio.bytes[0..4], .little) == 0x123400;
+                    self.okay = self.okay and std.mem.readInt(u32, self.audio.bytes[4..8], .little) == 0xedcc00;
+                    self.okay = self.okay and self.ring.write(&self.audio.supply) == 1920;
+                    self.periods += 1;
+                    self.state.status.played_frames += 1920;
+                }
+                test_diag.report.scan_visited = @intCast(@min(views.max_tracks, self.now * 32));
+                self.state.frame(self.now);
+                self.okay = self.okay and !self.state.failure and !TestPlatform.Display.corrupted;
+                return false;
+            }
+        };
+        var observer = Observer{ .state = &state, .audio = audio, .ring = try reservoir.Ring.initFilled(&audio.storage, audio.storage.len), .plan = try output.Plan.init(192000, .signed_24_in_u32) };
+        const old = fixture.pair.current();
+        const revision = try fixture.pair.prepareCooperative(&.{}, tracks, 42, true, &observer);
+        try std.testing.expect(fixture.pair.current() == old);
+        try std.testing.expect(observer.okay);
+        try std.testing.expect(observer.periods > 0);
+        try std.testing.expect(TestPlatform.Display.submissions > 1);
+        fixture.pair.commit(revision);
+        try std.testing.expectEqual(views.max_tracks, fixture.pair.current().track_count);
+    }
+}
+
+test "stationary flow still prefetches a newly selected destination before motion advances" {
+    var fixture: Fixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const tracks = [_]core.Track{
+        .{ .id = 1, .path = "A/1", .stamp = .{}, .meta = .{ .album = "A" } },
+        .{ .id = 2, .path = "B/1", .stamp = .{}, .meta = .{ .album = "B" } },
+        .{ .id = 3, .path = "C/1", .stamp = .{}, .meta = .{ .album = "C" } },
+        .{ .id = 4, .path = "D/1", .stamp = .{}, .meta = .{ .album = "D" } },
+        .{ .id = 5, .path = "E/1", .stamp = .{}, .meta = .{ .album = "E" } },
+    };
+    try fixture.pair.publish(&.{}, &tracks, 42, true);
+    var state = fixture.state();
+    state.navigate(.albums);
+    const pixels = try std.testing.allocator.create([320 * 240]u16);
+    defer std.testing.allocator.destroy(pixels);
+    state.renderInto(pixels, 100);
+    const revision = fixture.cache.request_revision.load(.acquire);
+    state.selection = 3;
+    // The event has retargeted movement, but elapsed animation time is zero.
+    state.renderInto(pixels, 100);
+    const destination_neighbour = state.snapshot().albums[4].id;
+    var found = false;
+    for (fixture.cache.requested) |request| if (request.id == destination_neighbour) {
+        found = true;
+    };
+    try std.testing.expect(found);
+    try std.testing.expect(fixture.cache.request_revision.load(.acquire) != revision);
+}
+
+test "volume commands apply immediately without animating hidden controls" {
+    var fixture: Fixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    TestPlatform.Display.reset();
+    TestPlatform.Display.latency = 0;
+    const track = core.Track{ .id = 1, .path = "Album/1", .stamp = .{}, .meta = .{ .title = "Synthetic", .album = "Album" } };
+    try fixture.pair.publish(&.{}, &.{track}, 42, true);
+    var state = fixture.state();
+    state.queue(&track);
+    state.playing_track = state.track_store.begin().?;
+    state.requested_track = null;
+    state.navigate(.albums);
+    for (0..50) |now| {
+        TestPlatform.milliseconds = now;
+        state.frame(now);
+    }
+    const before = TestPlatform.Display.submissions;
+    const old_volume = state.attenuation;
+    const command = state.handle(.volume_up, 50, true);
+    try std.testing.expectEqual(state.attenuation, command.set_attenuation);
+    try std.testing.expect(state.attenuation < old_volume);
+    for (50..110) |now| {
+        TestPlatform.milliseconds = now;
+        state.frame(now);
+        try std.testing.expect(!state.isAnimating(now));
+    }
+    try std.testing.expectEqual(before, TestPlatform.Display.submissions);
+    // Entering Now Playing during the same gesture shows its current phase.
+    state.navigate(.player);
+    try std.testing.expect(state.isAnimating(110));
+    try std.testing.expect(state.animation.mix(110) > 0);
+    for (110..300) |now| {
+        TestPlatform.milliseconds = now;
+        state.frame(now);
+    }
+    try std.testing.expect(TestPlatform.Display.submissions > before + 1);
+    try std.testing.expect(!state.failure);
 }
