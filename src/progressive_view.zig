@@ -56,6 +56,31 @@ pub const Artist = struct {
     track_count: u16 = 0,
 };
 
+/// Unchanged records add no information to a borrowed preview. Removals still
+/// require the final authoritative publication, which is never suppressed.
+pub fn previewNeeded(previous_source: u64, source: u64, visited: usize, stats: core.Stats) bool {
+    return previous_source != source or stats.reused != visited or stats.parsed != 0 or stats.renamed != 0 or stats.added != 0 or stats.errors != 0;
+}
+
+test "preview suppression requires every observed record to be unchanged on the same source" {
+    try std.testing.expect(!previewNeeded(42, 42, 32, .{ .reused = 32 }));
+    try std.testing.expect(previewNeeded(42, 43, 32, .{ .reused = 32 }));
+    try std.testing.expect(previewNeeded(42, 42, 32, .{ .reused = 31, .parsed = 1 }));
+    try std.testing.expect(previewNeeded(42, 42, 32, .{ .reused = 32, .renamed = 1 }));
+    try std.testing.expect(previewNeeded(42, 42, 32, .{ .reused = 31 }));
+}
+
+// Work-unit cadence, not a device wall-clock guarantee. Adapters measure the
+// elapsed service gap on target; the ordinary non-cooperative path erases it.
+const tracks_between_service = 128;
+const comparisons_between_service = 512;
+
+const Uninterrupted = struct {
+    pub fn cancelled(_: @This()) bool {
+        return false;
+    }
+};
+
 pub const Snapshot = struct {
     tracks: [max_tracks]*const core.Track = undefined,
     albums: [max_albums]Album = undefined,
@@ -74,6 +99,15 @@ pub const Snapshot = struct {
     complete: bool = false,
 
     pub fn build(self: *Snapshot, baseline: *const core.Catalog, visited: []const core.Track, source: u64, complete: bool, revision: u32) !void {
+        return self.buildCooperative(baseline, visited, source, complete, revision, Uninterrupted{});
+    }
+
+    /// The observer may service the published view while this inactive view is
+    /// rebuilt. It must not start another build or change either input arena.
+    pub fn buildCooperative(self: *Snapshot, baseline: *const core.Catalog, visited: []const core.Track, source: u64, complete: bool, revision: u32, observer: anytype) !void {
+        const Work = BuildWork(@TypeOf(observer));
+        var work = Work{ .observer = observer };
+        try work.check();
         self.track_count = 0;
         self.album_count = 0;
         self.artist_count = 0;
@@ -86,6 +120,7 @@ pub const Snapshot = struct {
         var old: usize = 0;
         var next: usize = 0;
         while (next < visited.len or (!complete and old < baseline.tracks.len)) {
+            if (self.track_count != 0 and self.track_count % tracks_between_service == 0) try work.check();
             const track = if (next == visited.len) keep: {
                 defer old += 1;
                 break :keep &baseline.tracks[old];
@@ -121,6 +156,7 @@ pub const Snapshot = struct {
             const id = core.hash(key) ^ source;
             var slot: usize = @intCast(id & (self.table.len - 1));
             while (self.table[slot] != 0) : (slot = (slot + 1) % self.table.len) {
+                work.step();
                 const index = self.table[slot] - 1;
                 const album = &self.albums[index];
                 if (album.id == id and std.mem.eql(u8, album.title, track.meta.album) and std.mem.eql(u8, album.artist, track.meta.album_artist) and std.mem.eql(u8, album.directory, directory) and std.mem.eql(u8, album.release_id, track.meta.release_id)) {
@@ -131,10 +167,13 @@ pub const Snapshot = struct {
             } else {
                 if (self.album_count == max_albums) return error.LibraryLimit;
                 var art: core.Artwork = .{};
-                for (baseline.albums) |album| if (album.id == id) {
-                    art = album.art;
-                    break;
-                };
+                for (baseline.albums) |album| {
+                    work.step();
+                    if (album.id == id) {
+                        art = album.art;
+                        break;
+                    }
+                }
                 self.track_groups[self.track_count - 1] = @intCast(self.album_count);
                 self.albums[self.album_count] = .{
                     .group = @intCast(self.album_count),
@@ -151,13 +190,9 @@ pub const Snapshot = struct {
                 self.album_count += 1;
             }
         }
-        std.mem.sort(Album, self.albums[0..self.album_count], {}, struct {
-            fn less(_: void, a: Album, b: Album) bool {
-                if (!std.ascii.eqlIgnoreCase(a.artist, b.artist)) return core.lessText(a.artist, b.artist);
-                if (!std.ascii.eqlIgnoreCase(a.title, b.title)) return core.lessText(a.title, b.title);
-                return a.id < b.id;
-            }
-        }.less);
+        try work.check();
+        if (comptime @TypeOf(observer) == Uninterrupted) std.mem.sort(Album, self.albums[0..self.album_count], {}, albumLess) else std.mem.sort(Album, self.albums[0..self.album_count], &work, Work.lessAlbum);
+        try work.check();
         for (self.albums[0..self.album_count], 0..) |album, i| self.group_ranks[album.group] = @intCast(i);
         for (self.track_groups[0..self.track_count]) |*group| group.* = self.group_ranks[group.*];
         // Stable counting buckets avoid comparing album identities for every
@@ -172,10 +207,12 @@ pub const Snapshot = struct {
             self.track_order[self.group_ranks[group]] = @intCast(track);
             self.group_ranks[group] += 1;
         }
+        var sort = Work.Sort{ .work = &work, .base = .{ .view = self, .order = .album } };
         for (self.albums[0..self.album_count]) |album| {
             const first: usize = album.first_track;
-            std.mem.sort(u16, self.track_order[first..][0..album.count], SortContext{ .view = self, .order = .album }, sortedLess);
+            if (comptime @TypeOf(observer) == Uninterrupted) std.mem.sort(u16, self.track_order[first..][0..album.count], sort.base, sortedLess) else std.mem.sort(u16, self.track_order[first..][0..album.count], &sort, Work.lessTrack);
         }
+        try work.check();
         for (self.albums[0..self.album_count], 0..) |*album, rank| {
             if (self.artist_count == 0 or !std.ascii.eqlIgnoreCase(self.artists[self.artist_count - 1].name, album.artist)) {
                 self.artists[self.artist_count] = .{ .name = album.artist, .first_album = @intCast(rank) };
@@ -186,7 +223,9 @@ pub const Snapshot = struct {
             self.artists[self.artist_count - 1].track_count += @intCast(album.count);
         }
         for (self.title_order[0..self.track_count], 0..) |*rank, i| rank.* = @intCast(i);
-        std.mem.sort(u16, self.title_order[0..self.track_count], SortContext{ .view = self, .order = .title }, sortedLess);
+        sort.base.order = .title;
+        if (comptime @TypeOf(observer) == Uninterrupted) std.mem.sort(u16, self.title_order[0..self.track_count], sort.base, sortedLess) else std.mem.sort(u16, self.title_order[0..self.track_count], &sort, Work.lessTrack);
+        try work.check();
         // title_order is already sorted within each artist. Stable partitioning
         // it into artist buckets gives the same order in linear time.
         var first: u16 = 0;
@@ -200,6 +239,13 @@ pub const Snapshot = struct {
             self.artist_track_order[self.group_ranks[artist]] = track;
             self.group_ranks[artist] += 1;
         }
+        try work.check();
+    }
+
+    fn albumLess(_: void, a: Album, b: Album) bool {
+        if (!std.ascii.eqlIgnoreCase(a.artist, b.artist)) return core.lessText(a.artist, b.artist);
+        if (!std.ascii.eqlIgnoreCase(a.title, b.title)) return core.lessText(a.title, b.title);
+        return a.id < b.id;
     }
 
     const SortContext = struct { view: *const Snapshot, order: enum { album, title } };
@@ -259,6 +305,52 @@ pub const Snapshot = struct {
     }
 };
 
+/// Comparators always retain their ordering, even after cancellation. Finish
+/// the bounded sort, then reject the inactive view at the next check. Polling
+/// never exposes partially sorted membership or requires unwinding a sort.
+fn BuildWork(comptime Observer: type) type {
+    return struct {
+        const Self = @This();
+        const Sort = struct { work: *Self, base: Snapshot.SortContext };
+        observer: Observer,
+        comparisons: usize = 0,
+        cancelled: bool = false,
+
+        fn check(self: *Self) !void {
+            if (comptime Observer == Uninterrupted) return;
+            if (self.cancelled) return error.Cancelled;
+            self.poll();
+            if (self.cancelled) return error.Cancelled;
+        }
+
+        // A callback can contain the board's storage/UI service. Keep one copy
+        // out of sort comparators instead of cloning it into every sort path.
+        noinline fn poll(self: *Self) void {
+            const cancelled = self.observer.cancelled();
+            self.cancelled = self.cancelled or cancelled;
+        }
+
+        fn step(self: *Self) void {
+            if (comptime Observer == Uninterrupted) return;
+            self.comparisons += 1;
+            if (self.comparisons == comparisons_between_service) {
+                self.comparisons = 0;
+                self.poll();
+            }
+        }
+
+        noinline fn lessAlbum(self: *Self, a: Album, b: Album) bool {
+            self.step();
+            return Snapshot.albumLess({}, a, b);
+        }
+
+        noinline fn lessTrack(context: *const Sort, a: u16, b: u16) bool {
+            context.work.step();
+            return Snapshot.sortedLess(context.base, a, b);
+        }
+    };
+}
+
 pub const Pair = struct {
     slots: [2]Snapshot = undefined,
     published: std.atomic.Value(u32) = .init(0),
@@ -269,9 +361,13 @@ pub const Pair = struct {
 
     /// One storage writer may prepare while UI reads the published slot.
     pub fn prepare(self: *Pair, baseline: *const core.Catalog, visited: []const core.Track, source: u64, complete: bool) !u32 {
+        return self.prepareCooperative(baseline, visited, source, complete, Uninterrupted{});
+    }
+
+    pub fn prepareCooperative(self: *Pair, baseline: *const core.Catalog, visited: []const core.Track, source: u64, complete: bool, observer: anytype) !u32 {
         const revision = self.published.load(.acquire) +% 1;
         const next: u1 = @truncate(revision);
-        try self.slots[next].build(baseline, visited, source, complete, revision);
+        try self.slots[next].buildCooperative(baseline, visited, source, complete, revision, observer);
         return revision;
     }
 
@@ -464,4 +560,47 @@ test "bucketed track orders match full comparison sorts for mixed and skewed lib
         }.less);
         try std.testing.expectEqualSlices(u16, &reference, view.artist_track_order[0..tracks.len]);
     }
+}
+
+test "cooperative rebuilds service readers without publishing partial sorts or cancelled arenas" {
+    const a = std.testing.allocator;
+    const pair = try a.create(Pair);
+    defer a.destroy(pair);
+    pair.* = .{};
+    const tracks = try a.alloc(core.Track, max_tracks);
+    defer a.free(tracks);
+    for (tracks, 0..) |*track, i| track.* = .{ .id = i + 1, .path = "Album/track.flac", .stamp = .{}, .meta = .{ .title = "Synthetic", .album = "Album", .track = @intCast(max_tracks - i) } };
+    try pair.publish(&.{}, tracks[0..1], 42, true);
+    const old = pair.current();
+    const Observer = struct {
+        pair: *Pair,
+        old: *const Snapshot,
+        calls: usize = 0,
+        cancel_at: usize = std.math.maxInt(usize),
+
+        pub fn cancelled(self: *@This()) bool {
+            std.debug.assert(self.pair.current() == self.old and self.old.track_count == 1);
+            self.calls += 1;
+            return self.calls == self.cancel_at;
+        }
+    };
+    var observer = Observer{ .pair = pair, .old = old };
+    const revision = try pair.prepareCooperative(&.{}, tracks, 42, true, &observer);
+    const calls = observer.calls;
+    try std.testing.expect(calls > max_tracks / tracks_between_service);
+    const expected = try a.create(Snapshot);
+    defer a.destroy(expected);
+    try expected.build(&.{}, tracks, 42, true, revision);
+    const prepared = &pair.slots[@as(u1, @truncate(revision))];
+    try std.testing.expectEqualSlices(u16, expected.track_order[0..max_tracks], prepared.track_order[0..max_tracks]);
+    try std.testing.expectEqualSlices(u16, expected.title_order[0..max_tracks], prepared.title_order[0..max_tracks]);
+    try std.testing.expectEqualSlices(u16, expected.artist_track_order[0..max_tracks], prepared.artist_track_order[0..max_tracks]);
+    for ([_]usize{ 1, 2, calls / 4, calls / 2, calls - 1 }) |cancel_at| {
+        observer = .{ .pair = pair, .old = old, .cancel_at = cancel_at };
+        try std.testing.expectError(error.Cancelled, pair.prepareCooperative(&.{}, tracks, 42, true, &observer));
+        try std.testing.expect(pair.current() == old);
+    }
+    observer = .{ .pair = pair, .old = old };
+    pair.commit(try pair.prepareCooperative(&.{}, tracks, 42, true, &observer));
+    try std.testing.expectEqual(max_tracks, pair.current().track_count);
 }

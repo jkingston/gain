@@ -70,8 +70,9 @@ fn publish(previous: *const core.Catalog, tracks: []const core.Track, source: u6
     cache.clearRequests();
 }
 
-fn scanCheckpoint(_: *anyopaque, previous: *const core.Catalog, tracks: []const core.Track, _: core.Stats) !void {
+fn scanCheckpoint(_: *anyopaque, previous: *const core.Catalog, tracks: []const core.Track, stats: core.Stats) !void {
     if (stopping.load(.acquire)) return error.Cancelled;
+    if (!gain.progressive_view.previewNeeded(previous.source, core.hash(sd_root.?), tracks.len, stats)) return;
     const at: u32 = @truncate(@as(u64, @intCast(@divTrunc(std.Io.Clock.awake.now(host_io.io()).nanoseconds, std.time.ns_per_ms))));
     if (!publication_cadence.due(at, 300)) return;
     try publish(previous, tracks, core.hash(sd_root.?), false);

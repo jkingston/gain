@@ -88,14 +88,27 @@ pub const State = struct {
         diag.report.scan_total = stats.candidates;
     }
 
-    fn checkpoint(context: *anyopaque, _: *const core.Catalog, tracks: []const core.Track, stats: core.Stats) !void {
+    fn publishView(self: *State, baseline: *const core.Catalog, tracks: []const core.Track, complete: bool) !void {
+        const Observer = struct {
+            state: *State,
+
+            pub fn cancelled(observer: @This()) bool {
+                return State.poll(observer.state);
+            }
+        };
+        const revision = try self.projection.prepareCooperative(baseline, tracks, self.volume.serial, complete, Observer{ .state = self });
+        self.projection.commit(revision);
+    }
+
+    fn checkpoint(context: *anyopaque, previous: *const core.Catalog, tracks: []const core.Track, stats: core.Stats) !void {
         const self: *State = @ptrCast(@alignCast(context));
         if (poll(self)) return error.Cancelled;
+        if (!self.cold and !views.previewNeeded(previous.source, self.volume.serial, tracks.len, stats)) return;
         if (!self.publication_cadence.due(x.Timer.now(), x.Timer.milliseconds(300))) return;
         const began = x.Timer.now();
         const retained_art = core.Catalog{ .albums = if (diag.catalog) |catalog| catalog.value.albums else &.{} };
         const baseline = if (!self.cold and diag.catalog != null) &diag.catalog.?.value else &retained_art;
-        try self.projection.publish(baseline, tracks, self.volume.serial, false);
+        try self.publishView(baseline, tracks, false);
         self.publication_cadence.published(x.Timer.now());
         diag.report.scan_worst_publication = @max(diag.report.scan_worst_publication, x.Timer.elapsed(began));
         diag.report.scan_publications += 1;
@@ -151,7 +164,7 @@ pub const State = struct {
             next.deinit();
         }
         if (diag.catalog) |old| next.value.generation = old.value.generation + 1;
-        try self.projection.publish(baseline, next.value.tracks, self.volume.serial, true);
+        try self.publishView(baseline, next.value.tracks, true);
         self.pending = next;
         self.complete = true;
         self.phase = "Library updated";
