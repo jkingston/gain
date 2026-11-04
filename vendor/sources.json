@@ -47,5 +47,34 @@
     "url": "https://github.com/richgel999/picojpeg",
     "revision": "8ab33a909b4115ace4a952b7ffcb64c350f9298d",
     "selection": "unmodified baseline streaming decoder; bounded Zig bridge and resampler"
+  },
+  "harfbuzz": {
+    "url": "https://github.com/harfbuzz/harfbuzz/releases/tag/15.0.0",
+    "version": "15.0.0",
+    "archive_sha256": "968536e9abd782f07f7954044c0c4020199fcdd39b41d221ec42d2a3be4a44df",
+    "selection": "unchanged src; HB_TINY, static OpenType fonts, FreeType stream bridge in Zig"
+  },
+  "freetype": {
+    "url": "https://download.savannah.gnu.org/releases/freetype/freetype-2.14.3.tar.xz",
+    "version": "2.14.3",
+    "archive_sha256": "36bc4f1cc413335368ee656c42afca65c5a3987e8768cc28cf11ba775e785a5f",
+    "selection": "unchanged include/src; TrueType, SFNT, grayscale raster; caller-owned Zig allocator and streams"
+  },
+  "sheen": {
+    "url": "https://github.com/Tehreer/SheenBidi",
+    "revision": "67b6f9d1489fb9222a9f46bba12649d4e7e3bfef",
+    "archive_sha256": "da13455868067f01e413b1241df84a2a220baa9ba71415e355162af2b7d4b2bb",
+    "selection": "Unicode 17 bidi/script resolution; scratch TLS disabled; unchanged upstream"
+  },
+  "utf8proc": {
+    "url": "https://github.com/JuliaStrings/utf8proc/releases/tag/v2.11.0",
+    "version": "2.11.0",
+    "archive_sha256": "6e45c0ce588803a7693862f4d081a70820b2344261731121eb3b58a31cba18a3",
+    "selection": "unchanged source; Unicode 17 grapheme boundaries"
+  },
+  "musl-setjmp": {
+    "provider": "Zig 0.17.0 bundled musl",
+    "selection": "unchanged libc/musl/src/setjmp/mips/setjmp.S and longjmp.S; assembled by the pinned Zig compiler",
+    "license_notice": "assets/fonts/licenses/musl.txt"
   }
 }

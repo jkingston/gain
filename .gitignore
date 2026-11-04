@@ -8,6 +8,7 @@ dist/
 *.elf
 *.bin
 !src/font_data.bin
+!tests/fonts.bin
 *.map
 
 __pycache__/

@@ -1,0 +1,2082 @@
+{
+  "version": 1,
+  "test_subset": true,
+  "sha256": "fe42005b4b31b403d72997f3790f01c7f04b9655dcf7e1aa1c66e2f55fce8737",
+  "bytes": 4888804,
+  "codepoints": 403,
+  "families": [
+    {
+      "name": "Inter",
+      "codepoints": 134
+    },
+    {
+      "name": "Newsreader",
+      "codepoints": 106
+    },
+    {
+      "name": "NotoEmoji",
+      "codepoints": 25
+    },
+    {
+      "name": "NotoMusic",
+      "codepoints": 108
+    },
+    {
+      "name": "NotoSans",
+      "codepoints": 147
+    },
+    {
+      "name": "NotoSansAdlam",
+      "codepoints": 110
+    },
+    {
+      "name": "NotoSansAnatolianHieroglyphs",
+      "codepoints": 105
+    },
+    {
+      "name": "NotoSansArabic",
+      "codepoints": 125
+    },
+    {
+      "name": "NotoSansArmenian",
+      "codepoints": 118
+    },
+    {
+      "name": "NotoSansAvestan",
+      "codepoints": 106
+    },
+    {
+      "name": "NotoSansBalinese",
+      "codepoints": 106
+    },
+    {
+      "name": "NotoSansBamum",
+      "codepoints": 105
+    },
+    {
+      "name": "NotoSansBassaVah",
+      "codepoints": 105
+    },
+    {
+      "name": "NotoSansBatak",
+      "codepoints": 106
+    },
+    {
+      "name": "NotoSansBengali",
+      "codepoints": 114
+    },
+    {
+      "name": "NotoSansBengaliUI",
+      "codepoints": 50
+    },
+    {
+      "name": "NotoSansBhaiksuki",
+      "codepoints": 105
+    },
+    {
+      "name": "NotoSansBrahmi",
+      "codepoints": 106
+    },
+    {
+      "name": "NotoSansBuginese",
+      "codepoints": 106
+    },
+    {
+      "name": "NotoSansBuhid",
+      "codepoints": 106
+    },
+    {
+      "name": "NotoSansCanadianAboriginal",
+      "codepoints": 111
+    },
+    {
+      "name": "NotoSansCarian",
+      "codepoints": 105
+    },
+    {
+      "name": "NotoSansCaucasianAlbanian",
+      "codepoints": 105
+    },
+    {
+      "name": "NotoSansChakma",
+      "codepoints": 106
+    },
+    {
+      "name": "NotoSansCham",
+      "codepoints": 106
+    },
+    {
+      "name": "NotoSansCherokee",
+      "codepoints": 109
+    },
+    {
+      "name": "NotoSansChorasmian",
+      "codepoints": 105
+    },
+    {
+      "name": "NotoSansCoptic",
+      "codepoints": 106
+    },
+    {
+      "name": "NotoSansCuneiform",
+      "codepoints": 105
+    },
+    {
+      "name": "NotoSansCypriot",
+      "codepoints": 105
+    },
+    {
+      "name": "NotoSansCyproMinoan",
+      "codepoints": 105
+    },
+    {
+      "name": "NotoSansDeseret",
+      "codepoints": 105
+    },
+    {
+      "name": "NotoSansDevanagari",
+      "codepoints": 118
+    },
+    {
+      "name": "NotoSansDisplay",
+      "codepoints": 135
+    },
+    {
+      "name": "NotoSansDuployan",
+      "codepoints": 106
+    },
+    {
+      "name": "NotoSansDuployan",
+      "codepoints": 106
+    },
+    {
+      "name": "NotoSansEgyptianHieroglyphs",
+      "codepoints": 106
+    },
+    {
+      "name": "NotoSansElbasan",
+      "codepoints": 106
+    },
+    {
+      "name": "NotoSansElymaic",
+      "codepoints": 105
+    },
+    {
+      "name": "NotoSansEthiopic",
+      "codepoints": 114
+    },
+    {
+      "name": "NotoSansGeorgian",
+      "codepoints": 115
+    },
+    {
+      "name": "NotoSansGlagolitic",
+      "codepoints": 105
+    },
+    {
+      "name": "NotoSansGothic",
+      "codepoints": 105
+    },
+    {
+      "name": "NotoSansGrantha",
+      "codepoints": 106
+    },
+    {
+      "name": "NotoSansGujarati",
+      "codepoints": 115
+    },
+    {
+      "name": "NotoSansGujaratiUI",
+      "codepoints": 51
+    },
+    {
+      "name": "NotoSansGujaratiUI",
+      "codepoints": 51
+    },
+    {
+      "name": "NotoSansGujaratiUI",
+      "codepoints": 51
+    },
+    {
+      "name": "NotoSansGujaratiUI",
+      "codepoints": 51
+    },
+    {
+      "name": "NotoSansGujaratiUI",
+      "codepoints": 51
+    },
+    {
+      "name": "NotoSansGujaratiUI",
+      "codepoints": 51
+    },
+    {
+      "name": "NotoSansGujaratiUI",
+      "codepoints": 51
+    },
+    {
+      "name": "NotoSansGujaratiUI",
+      "codepoints": 51
+    },
+    {
+      "name": "NotoSansGujaratiUI",
+      "codepoints": 51
+    },
+    {
+      "name": "NotoSansGunjalaGondi",
+      "codepoints": 106
+    },
+    {
+      "name": "NotoSansGurmukhi",
+      "codepoints": 115
+    },
+    {
+      "name": "NotoSansGurmukhiUI",
+      "codepoints": 51
+    },
+    {
+      "name": "NotoSansHanifiRohingya",
+      "codepoints": 106
+    },
+    {
+      "name": "NotoSansHanunoo",
+      "codepoints": 106
+    },
+    {
+      "name": "NotoSansHatran",
+      "codepoints": 105
+    },
+    {
+      "name": "NotoSansHebrew",
+      "codepoints": 119
+    },
+    {
+      "name": "NotoSansHK",
+      "codepoints": 147
+    },
+    {
+      "name": "NotoSansImperialAramaic",
+      "codepoints": 105
+    },
+    {
+      "name": "NotoSansIndicSiyaqNumbers",
+      "codepoints": 109
+    },
+    {
+      "name": "NotoSansInscriptionalPahlavi",
+      "codepoints": 105
+    },
+    {
+      "name": "NotoSansInscriptionalParthian",
+      "codepoints": 105
+    },
+    {
+      "name": "NotoSansJavanese",
+      "codepoints": 106
+    },
+    {
+      "name": "NotoSansJP",
+      "codepoints": 149
+    },
+    {
+      "name": "NotoSansKaithi",
+      "codepoints": 106
+    },
+    {
+      "name": "NotoSansKannada",
+      "codepoints": 115
+    },
+    {
+      "name": "NotoSansKannadaUI",
+      "codepoints": 51
+    },
+    {
+      "name": "NotoSansKawi",
+      "codepoints": 105
+    },
+    {
+      "name": "NotoSansKayahLi",
+      "codepoints": 106
+    },
+    {
+      "name": "NotoSansKharoshthi",
+      "codepoints": 106
+    },
+    {
+      "name": "NotoSansKhmer",
+      "codepoints": 114
+    },
+    {
+      "name": "NotoSansKhmerUI",
+      "codepoints": 23
+    },
+    {
+      "name": "NotoSansKhojki",
+      "codepoints": 106
+    },
+    {
+      "name": "NotoSansKhudawadi",
+      "codepoints": 106
+    },
+    {
+      "name": "NotoSansKR",
+      "codepoints": 157
+    },
+    {
+      "name": "NotoSansLao",
+      "codepoints": 114
+    },
+    {
+      "name": "NotoSansLaoLooped",
+      "codepoints": 114
+    },
+    {
+      "name": "NotoSansLaoUI",
+      "codepoints": 10
+    },
+    {
+      "name": "NotoSansLepcha",
+      "codepoints": 106
+    },
+    {
+      "name": "NotoSansLimbu",
+      "codepoints": 106
+    },
+    {
+      "name": "NotoSansLinearA",
+      "codepoints": 105
+    },
+    {
+      "name": "NotoSansLinearB",
+      "codepoints": 105
+    },
+    {
+      "name": "NotoSansLisu",
+      "codepoints": 105
+    },
+    {
+      "name": "NotoSansLycian",
+      "codepoints": 105
+    },
+    {
+      "name": "NotoSansLydian",
+      "codepoints": 106
+    },
+    {
+      "name": "NotoSansMahajani",
+      "codepoints": 106
+    },
+    {
+      "name": "NotoSansMalayalam",
+      "codepoints": 117
+    },
+    {
+      "name": "NotoSansMalayalamUI",
+      "codepoints": 53
+    },
+    {
+      "name": "NotoSansMandaic",
+      "codepoints": 106
+    },
+    {
+      "name": "NotoSansManichaean",
+      "codepoints": 106
+    },
+    {
+      "name": "NotoSansMarchen",
+      "codepoints": 105
+    },
+    {
+      "name": "NotoSansMasaramGondi",
+      "codepoints": 105
+    },
+    {
+      "name": "NotoSansMath",
+      "codepoints": 150
+    },
+    {
+      "name": "NotoSansMayanNumerals",
+      "codepoints": 105
+    },
+    {
+      "name": "NotoSansMedefaidrin",
+      "codepoints": 105
+    },
+    {
+      "name": "NotoSansMeeteiMayek",
+      "codepoints": 106
+    },
+    {
+      "name": "NotoSansMendeKikakui",
+      "codepoints": 105
+    },
+    {
+      "name": "NotoSansMeroitic",
+      "codepoints": 105
+    },
+    {
+      "name": "NotoSansMiao",
+      "codepoints": 105
+    },
+    {
+      "name": "NotoSansModi",
+      "codepoints": 106
+    },
+    {
+      "name": "NotoSansMongolian",
+      "codepoints": 106
+    },
+    {
+      "name": "NotoSansMono",
+      "codepoints": 137
+    },
+    {
+      "name": "NotoSansMro",
+      "codepoints": 105
+    },
+    {
+      "name": "NotoSansMultani",
+      "codepoints": 105
+    },
+    {
+      "name": "NotoSansMyanmar",
+      "codepoints": 114
+    },
+    {
+      "name": "NotoSansMyanmarUI",
+      "codepoints": 12
+    },
+    {
+      "name": "NotoSansMyanmarUI",
+      "codepoints": 12
+    },
+    {
+      "name": "NotoSansMyanmarUI",
+      "codepoints": 12
+    },
+    {
+      "name": "NotoSansMyanmarUI",
+      "codepoints": 12
+    },
+    {
+      "name": "NotoSansMyanmarUI",
+      "codepoints": 12
+    },
+    {
+      "name": "NotoSansMyanmarUI",
+      "codepoints": 12
+    },
+    {
+      "name": "NotoSansMyanmarUI",
+      "codepoints": 12
+    },
+    {
+      "name": "NotoSansMyanmarUI",
+      "codepoints": 12
+    },
+    {
+      "name": "NotoSansMyanmarUI",
+      "codepoints": 12
+    },
+    {
+      "name": "NotoSansNabataean",
+      "codepoints": 105
+    },
+    {
+      "name": "NotoSansNagMundari",
+      "codepoints": 105
+    },
+    {
+      "name": "NotoSansNandinagari",
+      "codepoints": 106
+    },
+    {
+      "name": "NotoSansNewa",
+      "codepoints": 106
+    },
+    {
+      "name": "NotoSansNewTaiLue",
+      "codepoints": 106
+    },
+    {
+      "name": "NotoSansNKo",
+      "codepoints": 106
+    },
+    {
+      "name": "NotoSansNushu",
+      "codepoints": 105
+    },
+    {
+      "name": "NotoSansOgham",
+      "codepoints": 105
+    },
+    {
+      "name": "NotoSansOlChiki",
+      "codepoints": 105
+    },
+    {
+      "name": "NotoSansOldHungarian",
+      "codepoints": 106
+    },
+    {
+      "name": "NotoSansOldNorthArabian",
+      "codepoints": 105
+    },
+    {
+      "name": "NotoSansOldPermic",
+      "codepoints": 105
+    },
+    {
+      "name": "NotoSansOldPersian",
+      "codepoints": 105
+    },
+    {
+      "name": "NotoSansOldSogdian",
+      "codepoints": 105
+    },
+    {
+      "name": "NotoSansOldSouthArabian",
+      "codepoints": 105
+    },
+    {
+      "name": "NotoSansOldTurkic",
+      "codepoints": 106
+    },
+    {
+      "name": "NotoSansOriya",
+      "codepoints": 117
+    },
+    {
+      "name": "NotoSansOriyaUI",
+      "codepoints": 52
+    },
+    {
+      "name": "NotoSansOriyaUI",
+      "codepoints": 52
+    },
+    {
+      "name": "NotoSansOriyaUI",
+      "codepoints": 52
+    },
+    {
+      "name": "NotoSansOriyaUI",
+      "codepoints": 52
+    },
+    {
+      "name": "NotoSansOsage",
+      "codepoints": 105
+    },
+    {
+      "name": "NotoSansOsmanya",
+      "codepoints": 105
+    },
+    {
+      "name": "NotoSansPahawhHmong",
+      "codepoints": 106
+    },
+    {
+      "name": "NotoSansPalmyrene",
+      "codepoints": 105
+    },
+    {
+      "name": "NotoSansPauCinHau",
+      "codepoints": 105
+    },
+    {
+      "name": "NotoSansPhagsPa",
+      "codepoints": 106
+    },
+    {
+      "name": "NotoSansPhoenician",
+      "codepoints": 105
+    },
+    {
+      "name": "NotoSansPsalterPahlavi",
+      "codepoints": 106
+    },
+    {
+      "name": "NotoSansRejang",
+      "codepoints": 106
+    },
+    {
+      "name": "NotoSansRunic",
+      "codepoints": 106
+    },
+    {
+      "name": "NotoSansSamaritan",
+      "codepoints": 105
+    },
+    {
+      "name": "NotoSansSaurashtra",
+      "codepoints": 106
+    },
+    {
+      "name": "NotoSansSC",
+      "codepoints": 151
+    },
+    {
+      "name": "NotoSansSharada",
+      "codepoints": 102
+    },
+    {
+      "name": "NotoSansShavian",
+      "codepoints": 105
+    },
+    {
+      "name": "NotoSansSiddham",
+      "codepoints": 106
+    },
+    {
+      "name": "NotoSansSignWriting",
+      "codepoints": 105
+    },
+    {
+      "name": "NotoSansSinhala",
+      "codepoints": 115
+    },
+    {
+      "name": "NotoSansSinhalaUI",
+      "codepoints": 51
+    },
+    {
+      "name": "NotoSansSogdian",
+      "codepoints": 105
+    },
+    {
+      "name": "NotoSansSoraSompeng",
+      "codepoints": 105
+    },
+    {
+      "name": "NotoSansSoyombo",
+      "codepoints": 105
+    },
+    {
+      "name": "NotoSansSundanese",
+      "codepoints": 106
+    },
+    {
+      "name": "NotoSansSunuwar",
+      "codepoints": 105
+    },
+    {
+      "name": "NotoSansSylotiNagri",
+      "codepoints": 106
+    },
+    {
+      "name": "NotoSansSymbols",
+      "codepoints": 108
+    },
+    {
+      "name": "NotoSansSymbols2",
+      "codepoints": 109
+    },
+    {
+      "name": "NotoSansSyriac",
+      "codepoints": 110
+    },
+    {
+      "name": "NotoSansTagalog",
+      "codepoints": 106
+    },
+    {
+      "name": "NotoSansTagbanwa",
+      "codepoints": 106
+    },
+    {
+      "name": "NotoSansTaiLe",
+      "codepoints": 106
+    },
+    {
+      "name": "NotoSansTaiTham",
+      "codepoints": 106
+    },
+    {
+      "name": "NotoSansTaiViet",
+      "codepoints": 106
+    },
+    {
+      "name": "NotoSansTakri",
+      "codepoints": 106
+    },
+    {
+      "name": "NotoSansTamil",
+      "codepoints": 114
+    },
+    {
+      "name": "NotoSansTamilSupplement",
+      "codepoints": 105
+    },
+    {
+      "name": "NotoSansTamilUI",
+      "codepoints": 50
+    },
+    {
+      "name": "NotoSansTangsa",
+      "codepoints": 105
+    },
+    {
+      "name": "NotoSansTC",
+      "codepoints": 147
+    },
+    {
+      "name": "NotoSansTelugu",
+      "codepoints": 114
+    },
+    {
+      "name": "NotoSansTeluguUI",
+      "codepoints": 50
+    },
+    {
+      "name": "NotoSansThaana",
+      "codepoints": 109
+    },
+    {
+      "name": "NotoSansThai",
+      "codepoints": 114
+    },
+    {
+      "name": "NotoSansThaiLooped",
+      "codepoints": 114
+    },
+    {
+      "name": "NotoSansThaiUI",
+      "codepoints": 11
+    },
+    {
+      "name": "NotoSansTifinagh",
+      "codepoints": 113
+    },
+    {
+      "name": "NotoSansTirhuta",
+      "codepoints": 106
+    },
+    {
+      "name": "NotoSansUgaritic",
+      "codepoints": 105
+    },
+    {
+      "name": "NotoSansVai",
+      "codepoints": 105
+    },
+    {
+      "name": "NotoSansVithkuqi",
+      "codepoints": 105
+    },
+    {
+      "name": "NotoSansWancho",
+      "codepoints": 105
+    },
+    {
+      "name": "NotoSansWarangCiti",
+      "codepoints": 106
+    },
+    {
+      "name": "NotoSansYi",
+      "codepoints": 105
+    },
+    {
+      "name": "NotoSansZanabazarSquare",
+      "codepoints": 105
+    },
+    {
+      "name": "NotoSerifTibetan",
+      "codepoints": 118
+    }
+  ],
+  "ranges": [
+    [
+      32,
+      126,
+      0
+    ],
+    [
+      183,
+      183,
+      0
+    ],
+    [
+      233,
+      233,
+      0
+    ],
+    [
+      769,
+      770,
+      0
+    ],
+    [
+      772,
+      772,
+      0
+    ],
+    [
+      776,
+      776,
+      0
+    ],
+    [
+      778,
+      778,
+      0
+    ],
+    [
+      803,
+      803,
+      0
+    ],
+    [
+      833,
+      833,
+      4
+    ],
+    [
+      837,
+      837,
+      4
+    ],
+    [
+      917,
+      917,
+      0
+    ],
+    [
+      942,
+      942,
+      0
+    ],
+    [
+      951,
+      951,
+      0
+    ],
+    [
+      953,
+      957,
+      0
+    ],
+    [
+      959,
+      959,
+      0
+    ],
+    [
+      963,
+      963,
+      0
+    ],
+    [
+      965,
+      965,
+      0
+    ],
+    [
+      1052,
+      1052,
+      0
+    ],
+    [
+      1059,
+      1059,
+      0
+    ],
+    [
+      1072,
+      1072,
+      0
+    ],
+    [
+      1079,
+      1079,
+      0
+    ],
+    [
+      1082,
+      1082,
+      0
+    ],
+    [
+      1085,
+      1085,
+      0
+    ],
+    [
+      1088,
+      1089,
+      0
+    ],
+    [
+      1091,
+      1091,
+      0
+    ],
+    [
+      1099,
+      1100,
+      0
+    ],
+    [
+      1111,
+      1111,
+      0
+    ],
+    [
+      1344,
+      1344,
+      8
+    ],
+    [
+      1377,
+      1377,
+      8
+    ],
+    [
+      1381,
+      1381,
+      8
+    ],
+    [
+      1385,
+      1386,
+      8
+    ],
+    [
+      1391,
+      1391,
+      8
+    ],
+    [
+      1397,
+      1400,
+      8
+    ],
+    [
+      1407,
+      1408,
+      8
+    ],
+    [
+      1410,
+      1410,
+      8
+    ],
+    [
+      1489,
+      1489,
+      60
+    ],
+    [
+      1492,
+      1494,
+      60
+    ],
+    [
+      1497,
+      1497,
+      60
+    ],
+    [
+      1500,
+      1502,
+      60
+    ],
+    [
+      1506,
+      1506,
+      60
+    ],
+    [
+      1511,
+      1514,
+      60
+    ],
+    [
+      1575,
+      1578,
+      7
+    ],
+    [
+      1580,
+      1580,
+      7
+    ],
+    [
+      1585,
+      1585,
+      7
+    ],
+    [
+      1587,
+      1587,
+      7
+    ],
+    [
+      1593,
+      1593,
+      7
+    ],
+    [
+      1601,
+      1602,
+      7
+    ],
+    [
+      1604,
+      1605,
+      7
+    ],
+    [
+      1608,
+      1610,
+      7
+    ],
+    [
+      1633,
+      1635,
+      7
+    ],
+    [
+      1740,
+      1740,
+      7
+    ],
+    [
+      2306,
+      2306,
+      4
+    ],
+    [
+      2325,
+      2325,
+      4
+    ],
+    [
+      2327,
+      2327,
+      4
+    ],
+    [
+      2332,
+      2332,
+      4
+    ],
+    [
+      2334,
+      2334,
+      4
+    ],
+    [
+      2340,
+      2340,
+      4
+    ],
+    [
+      2352,
+      2352,
+      4
+    ],
+    [
+      2358,
+      2360,
+      4
+    ],
+    [
+      2368,
+      2368,
+      4
+    ],
+    [
+      2381,
+      2381,
+      4
+    ],
+    [
+      2434,
+      2434,
+      14
+    ],
+    [
+      2455,
+      2455,
+      14
+    ],
+    [
+      2468,
+      2468,
+      14
+    ],
+    [
+      2476,
+      2476,
+      14
+    ],
+    [
+      2482,
+      2482,
+      14
+    ],
+    [
+      2488,
+      2488,
+      14
+    ],
+    [
+      2494,
+      2494,
+      14
+    ],
+    [
+      2496,
+      2496,
+      14
+    ],
+    [
+      2583,
+      2583,
+      55
+    ],
+    [
+      2588,
+      2588,
+      55
+    ],
+    [
+      2596,
+      2596,
+      55
+    ],
+    [
+      2602,
+      2602,
+      55
+    ],
+    [
+      2604,
+      2604,
+      55
+    ],
+    [
+      2616,
+      2616,
+      55
+    ],
+    [
+      2622,
+      2622,
+      55
+    ],
+    [
+      2624,
+      2624,
+      55
+    ],
+    [
+      2672,
+      2672,
+      55
+    ],
+    [
+      2690,
+      2690,
+      44
+    ],
+    [
+      2711,
+      2711,
+      44
+    ],
+    [
+      2716,
+      2716,
+      44
+    ],
+    [
+      2724,
+      2724,
+      44
+    ],
+    [
+      2736,
+      2736,
+      44
+    ],
+    [
+      2744,
+      2744,
+      44
+    ],
+    [
+      2750,
+      2750,
+      44
+    ],
+    [
+      2752,
+      2753,
+      44
+    ],
+    [
+      2822,
+      2822,
+      134
+    ],
+    [
+      2835,
+      2835,
+      134
+    ],
+    [
+      2839,
+      2839,
+      134
+    ],
+    [
+      2841,
+      2841,
+      134
+    ],
+    [
+      2849,
+      2849,
+      134
+    ],
+    [
+      2852,
+      2852,
+      134
+    ],
+    [
+      2872,
+      2872,
+      134
+    ],
+    [
+      2876,
+      2876,
+      134
+    ],
+    [
+      2879,
+      2880,
+      134
+    ],
+    [
+      2893,
+      2893,
+      134
+    ],
+    [
+      2951,
+      2951,
+      173
+    ],
+    [
+      2970,
+      2970,
+      173
+    ],
+    [
+      2980,
+      2980,
+      173
+    ],
+    [
+      2990,
+      2990,
+      173
+    ],
+    [
+      2996,
+      2996,
+      173
+    ],
+    [
+      3007,
+      3007,
+      173
+    ],
+    [
+      3016,
+      3016,
+      173
+    ],
+    [
+      3021,
+      3021,
+      173
+    ],
+    [
+      3074,
+      3074,
+      178
+    ],
+    [
+      3095,
+      3095,
+      178
+    ],
+    [
+      3108,
+      3108,
+      178
+    ],
+    [
+      3122,
+      3122,
+      178
+    ],
+    [
+      3128,
+      3128,
+      178
+    ],
+    [
+      3136,
+      3137,
+      178
+    ],
+    [
+      3142,
+      3142,
+      178
+    ],
+    [
+      3202,
+      3202,
+      69
+    ],
+    [
+      3221,
+      3221,
+      69
+    ],
+    [
+      3223,
+      3223,
+      69
+    ],
+    [
+      3233,
+      3233,
+      69
+    ],
+    [
+      3236,
+      3236,
+      69
+    ],
+    [
+      3240,
+      3240,
+      69
+    ],
+    [
+      3256,
+      3256,
+      69
+    ],
+    [
+      3264,
+      3264,
+      69
+    ],
+    [
+      3277,
+      3277,
+      69
+    ],
+    [
+      3330,
+      3330,
+      90
+    ],
+    [
+      3351,
+      3351,
+      90
+    ],
+    [
+      3364,
+      3364,
+      90
+    ],
+    [
+      3374,
+      3375,
+      90
+    ],
+    [
+      3378,
+      3379,
+      90
+    ],
+    [
+      3384,
+      3384,
+      90
+    ],
+    [
+      3390,
+      3390,
+      90
+    ],
+    [
+      3392,
+      3392,
+      90
+    ],
+    [
+      3458,
+      3458,
+      156
+    ],
+    [
+      3484,
+      3484,
+      156
+    ],
+    [
+      3501,
+      3501,
+      156
+    ],
+    [
+      3514,
+      3514,
+      156
+    ],
+    [
+      3517,
+      3517,
+      156
+    ],
+    [
+      3523,
+      3524,
+      156
+    ],
+    [
+      3538,
+      3539,
+      156
+    ],
+    [
+      3604,
+      3605,
+      181
+    ],
+    [
+      3607,
+      3607,
+      181
+    ],
+    [
+      3609,
+      3609,
+      181
+    ],
+    [
+      3618,
+      3619,
+      181
+    ],
+    [
+      3637,
+      3637,
+      181
+    ],
+    [
+      3652,
+      3652,
+      181
+    ],
+    [
+      3732,
+      3733,
+      79
+    ],
+    [
+      3737,
+      3737,
+      79
+    ],
+    [
+      3749,
+      3749,
+      79
+    ],
+    [
+      3751,
+      3751,
+      79
+    ],
+    [
+      3762,
+      3762,
+      79
+    ],
+    [
+      3765,
+      3765,
+      79
+    ],
+    [
+      3771,
+      3771,
+      79
+    ],
+    [
+      3851,
+      3851,
+      193
+    ],
+    [
+      3853,
+      3853,
+      193
+    ],
+    [
+      3904,
+      3904,
+      193
+    ],
+    [
+      3908,
+      3908,
+      193
+    ],
+    [
+      3921,
+      3921,
+      193
+    ],
+    [
+      3926,
+      3926,
+      193
+    ],
+    [
+      3938,
+      3939,
+      193
+    ],
+    [
+      3942,
+      3942,
+      193
+    ],
+    [
+      3954,
+      3954,
+      193
+    ],
+    [
+      3964,
+      3964,
+      193
+    ],
+    [
+      4017,
+      4017,
+      193
+    ],
+    [
+      4098,
+      4098,
+      108
+    ],
+    [
+      4112,
+      4112,
+      108
+    ],
+    [
+      4116,
+      4116,
+      108
+    ],
+    [
+      4121,
+      4121,
+      108
+    ],
+    [
+      4140,
+      4140,
+      108
+    ],
+    [
+      4142,
+      4142,
+      108
+    ],
+    [
+      4154,
+      4154,
+      108
+    ],
+    [
+      4156,
+      4156,
+      108
+    ],
+    [
+      4304,
+      4304,
+      40
+    ],
+    [
+      4311,
+      4315,
+      40
+    ],
+    [
+      4320,
+      4321,
+      40
+    ],
+    [
+      4323,
+      4323,
+      40
+    ],
+    [
+      4325,
+      4325,
+      40
+    ],
+    [
+      4633,
+      4633,
+      39
+    ],
+    [
+      4675,
+      4675,
+      39
+    ],
+    [
+      4725,
+      4725,
+      39
+    ],
+    [
+      4770,
+      4770,
+      39
+    ],
+    [
+      4826,
+      4826,
+      39
+    ],
+    [
+      4840,
+      4840,
+      39
+    ],
+    [
+      4843,
+      4843,
+      39
+    ],
+    [
+      4846,
+      4846,
+      39
+    ],
+    [
+      4917,
+      4917,
+      39
+    ],
+    [
+      5033,
+      5033,
+      25
+    ],
+    [
+      5043,
+      5043,
+      25
+    ],
+    [
+      5091,
+      5091,
+      25
+    ],
+    [
+      5123,
+      5123,
+      20
+    ],
+    [
+      5198,
+      5198,
+      20
+    ],
+    [
+      5200,
+      5200,
+      20
+    ],
+    [
+      5222,
+      5222,
+      20
+    ],
+    [
+      5251,
+      5251,
+      20
+    ],
+    [
+      5316,
+      5316,
+      20
+    ],
+    [
+      6017,
+      6017,
+      74
+    ],
+    [
+      6031,
+      6031,
+      74
+    ],
+    [
+      6035,
+      6035,
+      74
+    ],
+    [
+      6040,
+      6040,
+      74
+    ],
+    [
+      6042,
+      6042,
+      74
+    ],
+    [
+      6072,
+      6072,
+      74
+    ],
+    [
+      6082,
+      6082,
+      74
+    ],
+    [
+      6098,
+      6098,
+      74
+    ],
+    [
+      8205,
+      8205,
+      2
+    ],
+    [
+      8212,
+      8212,
+      0
+    ],
+    [
+      8226,
+      8226,
+      0
+    ],
+    [
+      8230,
+      8230,
+      0
+    ],
+    [
+      8295,
+      8295,
+      4
+    ],
+    [
+      8297,
+      8297,
+      4
+    ],
+    [
+      8594,
+      8594,
+      0
+    ],
+    [
+      8721,
+      8721,
+      0
+    ],
+    [
+      8734,
+      8734,
+      0
+    ],
+    [
+      9733,
+      9733,
+      0
+    ],
+    [
+      9829,
+      9829,
+      0
+    ],
+    [
+      9834,
+      9835,
+      3
+    ],
+    [
+      11568,
+      11568,
+      184
+    ],
+    [
+      11593,
+      11593,
+      184
+    ],
+    [
+      11598,
+      11598,
+      184
+    ],
+    [
+      11606,
+      11606,
+      184
+    ],
+    [
+      11612,
+      11612,
+      184
+    ],
+    [
+      11619,
+      11619,
+      184
+    ],
+    [
+      12363,
+      12363,
+      61
+    ],
+    [
+      12394,
+      12394,
+      61
+    ],
+    [
+      12398,
+      12398,
+      61
+    ],
+    [
+      12459,
+      12459,
+      61
+    ],
+    [
+      12490,
+      12490,
+      61
+    ],
+    [
+      20013,
+      20013,
+      61
+    ],
+    [
+      20048,
+      20048,
+      151
+    ],
+    [
+      20140,
+      20140,
+      61
+    ],
+    [
+      22243,
+      22243,
+      67
+    ],
+    [
+      22269,
+      22269,
+      61
+    ],
+    [
+      22283,
+      22283,
+      61
+    ],
+    [
+      22296,
+      22296,
+      61
+    ],
+    [
+      26085,
+      26085,
+      61
+    ],
+    [
+      26412,
+      26412,
+      61
+    ],
+    [
+      26481,
+      26481,
+      61
+    ],
+    [
+      26550,
+      26550,
+      61
+    ],
+    [
+      27005,
+      27005,
+      67
+    ],
+    [
+      27138,
+      27138,
+      61
+    ],
+    [
+      31354,
+      31354,
+      61
+    ],
+    [
+      38431,
+      38431,
+      151
+    ],
+    [
+      38899,
+      38899,
+      61
+    ],
+    [
+      44397,
+      44397,
+      78
+    ],
+    [
+      44544,
+      44544,
+      78
+    ],
+    [
+      45800,
+      45800,
+      78
+    ],
+    [
+      49884,
+      49884,
+      78
+    ],
+    [
+      50501,
+      50501,
+      78
+    ],
+    [
+      51020,
+      51020,
+      78
+    ],
+    [
+      54620,
+      54620,
+      78
+    ],
+    [
+      54744,
+      54744,
+      78
+    ],
+    [
+      65039,
+      65039,
+      2
+    ],
+    [
+      65533,
+      65533,
+      4
+    ],
+    [
+      119070,
+      119070,
+      3
+    ],
+    [
+      125184,
+      125184,
+      5
+    ],
+    [
+      125218,
+      125221,
+      5
+    ],
+    [
+      127471,
+      127471,
+      2
+    ],
+    [
+      127477,
+      127477,
+      2
+    ],
+    [
+      127752,
+      127752,
+      2
+    ],
+    [
+      127908,
+      127908,
+      2
+    ],
+    [
+      127925,
+      127925,
+      2
+    ],
+    [
+      127987,
+      127987,
+      2
+    ],
+    [
+      127997,
+      127997,
+      2
+    ],
+    [
+      128077,
+      128077,
+      2
+    ],
+    [
+      128105,
+      128105,
+      2
+    ]
+  ]
+}

@@ -1,0 +1,12 @@
+{
+  "BidiCharacterTest": {
+    "unicode": "17.0.0",
+    "sha256": "a3e6e905ab5afbe318a96df5401d0372a04cd73ef139ab5e3cf0ae241c255488",
+    "url": "https://www.unicode.org/Public/17.0.0/ucd/BidiCharacterTest.txt"
+  },
+  "GraphemeBreakTest": {
+    "unicode": "17.0.0",
+    "sha256": "e2d134d2c52919bace503ebb6a551c1855fe1a1faec18478c78fff254a1793ec",
+    "url": "https://www.unicode.org/Public/17.0.0/ucd/auxiliary/GraphemeBreakTest.txt"
+  }
+}
