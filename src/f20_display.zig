@@ -20,6 +20,8 @@ const timeout_ticks = x.Timer.milliseconds(100);
 const quick_disable_done = @as(u32, 1) << 7;
 var panel_config: phase.Config = undefined;
 var launch_deadline: ?u32 = null;
+var cadence_launch = false;
+var full_frame_pacer: @import("frame_pacer.zig").Pacer = .{};
 var missed_deadline: ?u32 = null;
 var launch_owner: @import("deadline_timer.zig").LaunchOwner = .poll;
 pub var last_failure: ?anyerror = null;
@@ -93,6 +95,7 @@ pub fn initialize() !void {
     try send(x.Lcd.command_flag | 0x34);
     try waitReady();
     panel_config = try calibrate();
+    full_frame_pacer = .{};
 }
 
 fn prepareRect(left: u16, top: u16, width: u16, height: u16, source: usize) !void {
@@ -156,9 +159,10 @@ pub const Frozen = struct { region: Region, source: usize };
 pub fn freeze(region: Region) !Frozen {
     const aligned = try presentation.alignedRegion(region, board.width, board.height);
     const address = @import("display_banks.zig").inactive(prepared_source, @intFromPtr(snapshot), @intFromPtr(next_snapshot));
-    const destination: *[board.width * board.height]u16 = @ptrFromInt(address);
+    const destination: *[board.width * board.height]u16 = @ptrFromInt(address & ~@as(usize, 0x20000000));
     try presentation.pack(framebuffer, board.width, board.height, aligned, destination);
-    return .{ .region = aligned, .source = @intFromPtr(destination) };
+    publishSnapshot(@intFromPtr(destination), aligned.pixels() * 2);
+    return .{ .region = aligned, .source = address };
 }
 
 fn prepareFrozen(frozen: Frozen) !void {
@@ -171,7 +175,13 @@ fn prepareFrozen(frozen: Frozen) !void {
 pub fn presentFrozen(frozen: Frozen, synchronized: bool) !void {
     const deadline = if (synchronized) try targetFor(frozen.region) else null;
     try prepareFrozen(frozen);
-    if (deadline) |at| launch_deadline = at else try commit();
+    cadence_launch = false;
+    if (deadline) |at| {
+        launch_deadline = at;
+    } else if (full_frame_pacer.deadline(x.Timer.now(), @intCast(panel_config.period))) |at| {
+        cadence_launch = true;
+        launch_deadline = at;
+    } else try commit();
 }
 
 pub fn prepare(region: Region) !void {
@@ -187,6 +197,8 @@ pub fn commit() !void {
     launch_deadline = null;
     missed_deadline = null;
     try state.commit(x.Timer.now());
+    if (prepared_region.width == board.width and prepared_region.height == board.height) full_frame_pacer.committed(x.Timer.now());
+    cadence_launch = false;
     x.Lcd.control.write(x.Lcd.burst_64_words | x.Lcd.control_enable);
     trace.record(.commit, x.Timer.now(), @as(u32, prepared_region.width) * prepared_region.height);
 }
@@ -209,6 +221,12 @@ pub fn useInterruptLaunch(enabled: bool) void {
     launch_owner = if (enabled) .interrupt else .poll;
 }
 
+/// A prepared source is immutable, but painting another canvas before its
+/// launch can delay the idle launch owner or prevent the executive rearming.
+pub fn waitingForLaunch() bool {
+    return state.phase == .prepared and launch_deadline != null;
+}
+
 pub fn pendingDeadline() ?u32 {
     return launch_deadline;
 }
@@ -216,6 +234,14 @@ pub fn pendingDeadline() ?u32 {
 pub fn launchFromInterrupt() void {
     if (state.phase != .prepared) return;
     const deadline = launch_deadline orelse return;
+    if (cadence_launch) {
+        if (@as(i32, @bitCast(x.Timer.now() -% deadline)) < 0) return;
+        commit() catch |failure| {
+            last_failure = last_failure orelse failure;
+            state.phase = .failed;
+        };
+        return;
+    }
     switch (phase.launchAt(x.Timer.now(), deadline)) {
         .wait => {},
         .commit => commit() catch |failure| {
@@ -243,6 +269,10 @@ pub fn poll() Poll {
     if (state.phase == .idle) return .idle;
     if (state.phase == .prepared) {
         if (!@import("deadline_timer.zig").pollMayHandle(launch_owner, missed_deadline != null)) return .busy;
+        if (cadence_launch) {
+            launchFromInterrupt();
+            return if (state.phase == .failed) .failed else .busy;
+        }
         if (launch_deadline orelse missed_deadline) |deadline| switch (phase.launchAt(x.Timer.now(), deadline)) {
             .wait => return .busy,
             .commit => commit() catch |failure| {
@@ -446,4 +476,17 @@ fn calibrate() !phase.Config {
     const config = phase.Config{ .period = (last -% first) / 9, .lines = maximum + 1 };
     try config.validate();
     return config;
+}
+
+/// The inactive snapshot is CPU-owned until every dirty cache line has reached
+/// physical RAM. DMA still receives the uncached alias and an immutable bank.
+fn publishSnapshot(address: usize, length: usize) void {
+    if (comptime @import("builtin").cpu.arch != .mipsel) return;
+    const end = (address + length + 31) & ~@as(usize, 31);
+    var line = address & ~@as(usize, 31);
+    while (line < end) : (line += 32) asm volatile ("cache 0x15, 0(%[at])"
+        :
+        : [at] "r" (line),
+        : .{ .memory = true });
+    x.memoryBarrier();
 }

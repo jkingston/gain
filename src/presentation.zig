@@ -85,19 +85,32 @@ pub fn alignedRegion(region: Region, width: u16, height: u16) Error!Region {
 pub fn pack(canvas: []const u16, width: u16, height: u16, region: Region, destination: []u16) Error!void {
     if (canvas.len != @as(usize, width) * height or destination.len < region.pixels()) return error.InvalidSource;
     _ = try alignedRegion(region, width, height);
+    if (region.x == 0 and region.width == width) {
+        copyPixels(destination[0..region.pixels()], canvas[@as(usize, region.y) * width ..][0..region.pixels()]);
+        return;
+    }
     for (0..region.height) |row| {
         const start = (@as(usize, region.y) + row) * width + region.x;
         const output = destination[row * region.width ..][0..region.width];
-        if (@intFromPtr(output.ptr) & 3 == 0 and region.width & 1 == 0) {
-            // The F20 uncached bus charges for each store. Pair RGB565 pixels
-            // into word stores; canvas rows may begin at an odd pixel.
-            const words: [*]u32 = @ptrCast(@alignCast(output.ptr));
-            for (0..region.width / 2) |pair| {
-                const index = start + pair * 2;
-                words[pair] = @bitCast([2]u16{ canvas[index], canvas[index + 1] });
-            }
-        } else @memcpy(output, canvas[start..][0..region.width]);
+        copyPixels(output, canvas[start..][0..region.width]);
     }
+}
+
+fn copyPixels(destination: []u16, source: []const u16) void {
+    if (@intFromPtr(destination.ptr) & 3 == 0 and destination.len & 1 == 0) {
+        // Explicit volatile word stores prevent LLVM turning an uncached copy
+        // back into the much slower byte-store memcpy implementation on MIPS.
+        const to: [*]volatile u32 = @ptrCast(@alignCast(destination.ptr));
+        const count = destination.len / 2;
+        if (@intFromPtr(source.ptr) & 3 == 0) {
+            const from: [*]const u32 = @ptrCast(@alignCast(source.ptr));
+            var at: usize = 0;
+            while (at + 8 <= count) : (at += 8) inline for (0..8) |offset| {
+                to[at + offset] = from[at + offset];
+            };
+            while (at < count) : (at += 1) to[at] = from[at];
+        } else for (0..count) |i| to[i] = @bitCast([2]u16{ source[i * 2], source[i * 2 + 1] });
+    } else @memcpy(destination, source);
 }
 
 test "all EOF FIFO drain and ACK schedules preserve ownership" {
@@ -326,4 +339,25 @@ test "late cooperative observation accepts physical drain but gives disable its 
     try state.commit(300);
     try std.testing.expectError(error.TimedOut, state.observe(500, 100, .{ .eof = true, .bus_busy = true }));
     try std.testing.expect(state.owned());
+}
+
+test "bulk and strided snapshot copies match scalar pixels with alignment and edge canaries" {
+    var random = std.Random.DefaultPrng.init(0x534e415053484f54);
+    const rng = random.random();
+    var source: [320 * 240 + 2]u16 align(32) = undefined;
+    var destination: [320 * 240 + 2]u16 align(32) = undefined;
+    for (&source) |*pixel| pixel.* = rng.int(u16);
+    for (0..1000) |i| {
+        const x: u16 = if (i % 4 == 0) 0 else rng.uintLessThan(u16, 320);
+        const y = rng.uintLessThan(u16, 240);
+        const w: u16 = if (i % 4 == 0) 320 else rng.intRangeAtMost(u16, 1, 320 - x);
+        const h = rng.intRangeAtMost(u16, 1, 240 - y);
+        const r = Region{ .x = x, .y = y, .width = w, .height = h };
+        @memset(&destination, 0xa55a);
+        const offset = i % 2;
+        try pack(source[0 .. 320 * 240], 320, 240, r, destination[offset..][0..r.pixels()]);
+        for (0..h) |row| for (0..w) |col| try std.testing.expectEqual(source[(@as(usize, y) + row) * 320 + x + col], destination[offset + row * w + col]);
+        if (offset != 0) try std.testing.expectEqual(0xa55a, destination[0]);
+        try std.testing.expectEqual(0xa55a, destination[offset + r.pixels()]);
+    }
 }

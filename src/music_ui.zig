@@ -609,6 +609,7 @@ pub fn Controller(comptime Platform: type) type {
                 if (!self.submit(now)) return;
                 submitted = true;
             }
+            if (@hasDecl(lcd, "waitingForLaunch")) if (lcd.waitingForLaunch()) return;
             if (!self.pending_frame.dueAt(now, self.dirty, lcd.renderIntervalMs())) return;
             if (moving) self.advanceFlow(now);
             const draw_started = Platform.now();
@@ -1009,6 +1010,10 @@ const TestPlatform = struct {
         var busy_until: u64 = 0;
         var latency: u64 = 19;
         var submissions: usize = 0;
+        var waiting_launch: bool = false;
+        pub fn waitingForLaunch() bool {
+            return waiting_launch;
+        }
         var active_hash: u32 = 0;
         var corrupted: bool = false;
         pub fn renderIntervalMs() u64 {
@@ -1039,6 +1044,7 @@ const TestPlatform = struct {
             latency = 19;
             active = 0;
             submissions = 0;
+            waiting_launch = false;
             corrupted = false;
             last_failure = null;
             @memset(&pixels, 0);
@@ -1676,4 +1682,30 @@ test "volume commands apply immediately without animating hidden controls" {
     }
     try std.testing.expect(TestPlatform.Display.submissions > before + 1);
     try std.testing.expect(!state.failure);
+}
+
+test "a scheduled display launch cannot be delayed by painting the next canvas" {
+    var fixture: Fixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    try fixture.pair.publish(&.{}, &.{}, 1, true);
+    TestPlatform.Display.reset();
+    defer TestPlatform.Display.reset();
+    TestPlatform.Display.latency = 0;
+    var state = fixture.state();
+    TestPlatform.milliseconds = 17;
+    state.frame(17);
+    const rendered_at = state.pending_frame.last_render;
+    const submissions = TestPlatform.Display.submissions;
+    state.dirty = true;
+    TestPlatform.Display.waiting_launch = true;
+    TestPlatform.milliseconds = 34;
+    state.frame(34);
+    try std.testing.expectEqual(rendered_at, state.pending_frame.last_render);
+    try std.testing.expectEqual(submissions, TestPlatform.Display.submissions);
+    TestPlatform.Display.waiting_launch = false;
+    TestPlatform.milliseconds = 40;
+    state.frame(40);
+    try std.testing.expectEqual(@as(u64, 40), state.pending_frame.last_render);
+    try std.testing.expectEqual(submissions + 1, TestPlatform.Display.submissions);
 }

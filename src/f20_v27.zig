@@ -30,7 +30,9 @@ pub const display = struct {
         if (address < 0xa0000000 or address >= 0xa2000000 or address & 3 != 0 or w == 0 or h == 0 or w & 1 != 0) return false;
         return @as(u64, address) + @as(u64, w) * h * 2 <= 0xa2000000;
     }
-    pub const clock_divider = 29;
+    // 600 MHz / 24 = 25 MHz. Each WR level lasts one clock: 40 ns,
+    // above the ILI9342's 33 ns minimum, with an 80 ns write cycle.
+    pub const clock_divider = 23;
     pub const clock_configuration: u32 = 0x90000000 | clock_divider;
     pub const mcu_configuration: u32 = 0x00000100;
     pub const mcu_control: u32 = 0x00000114;
