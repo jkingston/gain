@@ -10,8 +10,11 @@ pub const Cache = struct {
     ids: [slots]u64 = @splat(0),
     identities: [slots]u64 = @splat(0),
     failed_loads: u32 = 0,
-    ready: [slots]std.atomic.Value(bool) = @splat(.init(false)),
+    // One acquire observes readiness for the whole lookup. The storage owner
+    // alone updates this mask; tile borrows still require serialized UI access.
+    ready_mask: std.atomic.Value(u32) = .init(0),
     requested: [10]Request = @splat(.{}),
+    published_requests: [10]RequestKey = @splat(.{}),
     request_revision: std.atomic.Value(u32) = .init(0),
     revision: std.atomic.Value(u32) = .init(0),
 
@@ -19,8 +22,16 @@ pub const Cache = struct {
         self.requested[at] = .{ .id = id, .art = value };
     }
 
+    const RequestKey = struct { id: u64 = 0, artwork: u64 = 0 };
+
     pub fn publishRequests(self: *Cache) void {
-        _ = self.request_revision.fetchAdd(1, .release);
+        var changed = false;
+        for (self.requested, &self.published_requests) |request_value, *previous| {
+            const next = RequestKey{ .id = request_value.id, .artwork = if (request_value.id != 0) identity(request_value.art) else 0 };
+            changed = changed or previous.id != next.id or previous.artwork != next.artwork;
+            previous.* = next;
+        }
+        if (changed) _ = self.request_revision.fetchAdd(1, .release);
     }
 
     pub fn clearRequests(self: *Cache) void {
@@ -45,15 +56,37 @@ pub const Cache = struct {
         return null;
     }
 
+    fn slotBit(slot: usize) u32 {
+        std.debug.assert(slot < slots and slots <= @bitSizeOf(u32));
+        return @as(u32, 1) << @as(u5, @intCast(slot));
+    }
+
+    /// A single storage owner can remember a fully satisfied request revision.
+    /// Failed/cancelled loads remain pending until published or superseded.
+    pub const WorkQueue = struct {
+        exhausted: ?u32 = null,
+
+        pub fn pending(self: WorkQueue, revision: u32) bool {
+            return self.exhausted == null or self.exhausted.? != revision;
+        }
+
+        pub fn next(self: *WorkQueue, cache: *const Cache, requests: [10]Request, revision: u32) ?Load {
+            if (!self.pending(revision)) return null;
+            if (cache.nextLoad(requests)) |job| return job;
+            self.exhausted = revision;
+            return null;
+        }
+    };
+
     pub fn begin(self: *Cache, load: Load) void {
-        self.ready[load.slot].store(false, .release);
+        self.ready_mask.store(self.ready_mask.load(.monotonic) & ~slotBit(load.slot), .release);
         self.ids[load.slot] = 0;
     }
 
     pub fn publish(self: *Cache, load: Load) void {
         self.ids[load.slot] = load.request.id;
         self.identities[load.slot] = identity(load.request.art);
-        self.ready[load.slot].store(true, .release);
+        self.ready_mask.store(self.ready_mask.load(.monotonic) | slotBit(load.slot), .release);
         _ = self.revision.fetchAdd(1, .release);
     }
 
@@ -76,7 +109,8 @@ pub const Cache = struct {
 
     pub fn get(self: *const Cache, id: u64, art: core.Artwork) ?*const @import("cover_flow.zig").Prepared {
         const key = identity(art);
-        for (self.ids, 0..) |found, i| if (self.ready[i].load(.acquire) and found != 0 and found == id and self.identities[i] == key) return &self.tiles[i];
+        const ready = self.ready_mask.load(.acquire);
+        for (self.ids, 0..) |found, i| if (ready & slotBit(i) != 0 and found != 0 and found == id and self.identities[i] == key) return &self.tiles[i];
         return null;
     }
 };
@@ -87,13 +121,13 @@ test "an incomplete replacement is invisible until its prepared tile is publishe
     cache.* = .{};
     cache.ids[0] = 1;
     cache.identities[0] = Cache.identity(.{});
-    cache.ready[0].store(true, .release);
+    cache.ready_mask.store(1, .release);
     try std.testing.expect(cache.get(1, .{}) != null);
-    cache.ready[0].store(false, .release);
+    cache.ready_mask.store(0, .release);
     cache.ids[0] = 2;
     try std.testing.expect(cache.get(1, .{}) == null);
     try std.testing.expect(cache.get(2, .{}) == null);
-    cache.ready[0].store(true, .release);
+    cache.ready_mask.store(1, .release);
     try std.testing.expect(cache.get(2, .{}) != null);
     cache.request(0, 2, .{});
     cache.publishRequests();
@@ -189,4 +223,67 @@ test "bad first artwork is negatively cached without starving a good second cove
     cache.publish(replacement);
     try std.testing.expectEqual(128, cache.get(1, changed).?.width);
     try std.testing.expect(cache.get(1, old) == null);
+}
+
+test "stationary cover requests coalesce by content while identity and order changes wake work" {
+    const cache = try std.testing.allocator.create(Cache);
+    defer std.testing.allocator.destroy(cache);
+    cache.* = .{};
+    cache.publishRequests();
+    try std.testing.expectEqual(0, cache.request_revision.load(.acquire));
+    const art = core.Artwork{ .key = "synthetic", .cache_path = "atlas:0" };
+    cache.request(0, 1, art);
+    cache.publishRequests();
+    const revision = cache.request_revision.load(.acquire);
+    var duplicate = "synthetic".*;
+    for (0..100) |_| {
+        cache.request(0, 1, .{ .key = &duplicate, .cache_path = "atlas:0" });
+        cache.publishRequests();
+        try std.testing.expectEqual(revision, cache.request_revision.load(.acquire));
+    }
+    cache.request(1, 2, art);
+    cache.publishRequests();
+    try std.testing.expectEqual(revision + 1, cache.request_revision.load(.acquire));
+    std.mem.swap(Cache.Request, &cache.requested[0], &cache.requested[1]);
+    cache.publishRequests();
+    try std.testing.expectEqual(revision + 2, cache.request_revision.load(.acquire));
+    cache.request(0, 2, .{ .key = "synthetic", .cache_path = "atlas:1" });
+    cache.publishRequests();
+    try std.testing.expectEqual(revision + 3, cache.request_revision.load(.acquire));
+    cache.clearRequests();
+    try std.testing.expectEqual(revision + 4, cache.request_revision.load(.acquire));
+    cache.clearRequests();
+    try std.testing.expectEqual(revision + 4, cache.request_revision.load(.acquire));
+}
+
+test "cover queue drains every request, retries cancellation and sleeps only when satisfied" {
+    const cache = try std.testing.allocator.create(Cache);
+    defer std.testing.allocator.destroy(cache);
+    cache.* = .{};
+    var queue = Cache.WorkQueue{};
+    const art = core.Artwork{ .key = "synthetic", .cache_path = "atlas:0" };
+    cache.request(0, 1, art);
+    cache.request(1, 2, art);
+    cache.publishRequests();
+    const revision = cache.request_revision.load(.acquire);
+    const cancelled = queue.next(cache, cache.requested, revision).?;
+    cache.begin(cancelled);
+    // No publication means the partial tile is still invisible and retried.
+    try std.testing.expectEqual(cancelled.request.id, queue.next(cache, cache.requested, revision).?.request.id);
+    cache.publishMissing(cancelled);
+    const next = queue.next(cache, cache.requested, revision).?;
+    try std.testing.expectEqual(2, next.request.id);
+    cache.begin(next);
+    cache.tiles[next.slot] = .{ .width = 128, .height = 128 };
+    cache.publish(next);
+    try std.testing.expect(queue.next(cache, cache.requested, revision) == null);
+    try std.testing.expect(!queue.pending(revision));
+    cache.request(0, 1, .{ .key = "changed", .cache_path = "atlas:0" });
+    cache.publishRequests();
+    const changed = cache.request_revision.load(.acquire);
+    try std.testing.expect(queue.pending(changed));
+    try std.testing.expectEqual(1, queue.next(cache, cache.requested, changed).?.request.id);
+    // Clearing one ready bit must not hide another prepared slot.
+    cache.begin(.{ .slot = cancelled.slot, .request = cancelled.request });
+    try std.testing.expect(cache.get(2, art) != null);
 }

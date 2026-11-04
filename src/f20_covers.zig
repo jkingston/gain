@@ -10,6 +10,7 @@ pub const Loader = struct {
     cache: Cache = .{},
     file: ?@import("fat32.zig").File = null,
     unavailable: bool = false,
+    work: Cache.WorkQueue = .{},
     idle_yield: ?IdleYield = null,
 
     pub fn init() *Loader {
@@ -27,13 +28,15 @@ pub const Loader = struct {
 
     pub fn service(self: *Loader, volume: *library.Volume) void {
         const cache = &self.cache;
+        if (!self.work.pending(cache.request_revision.load(.acquire))) return;
         // UI may preempt this task. Snapshot only these small descriptors with
         // CPU interrupts masked; all FAT/card operations run after restoring.
         const status = @import("x1000.zig").Interrupts.disableCpu();
 
         const requests = cache.requested;
+        const revision = cache.request_revision.load(.monotonic);
         @import("x1000.zig").Interrupts.restoreCpu(status);
-        const job = cache.nextLoad(requests) orelse return;
+        const job = self.work.next(cache, requests, revision) orelse return;
         cache.begin(job);
         const result = self.load(volume, job) catch .missing;
         switch (result) {
