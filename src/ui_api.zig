@@ -18,3 +18,6 @@ pub const catalog_codec = @import("catalog_codec.zig");
 pub const text_cache = @import("text/cache.zig");
 pub const text_contract = @import("text/contract.zig");
 pub const text_engine = @import("text/engine.zig");
+
+pub const usb_view = @import("usb_view.zig");
+pub const battery = @import("battery.zig");

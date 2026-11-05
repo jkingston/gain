@@ -122,7 +122,7 @@ pub const Report = extern struct {
 
 var clocks: @import("executive.zig").Clock = .{ .previous = 0 };
 var started: u32 = 0;
-var last_power: u64 = 0;
+var power_sampling: @import("battery.zig").Sampling = .{};
 var last_health: u64 = 0;
 var allocators: [2]std.heap.FixedBufferAllocator = undefined;
 var current_slot: u1 = 0;
@@ -141,6 +141,7 @@ var stack_painted = false;
 var boot_recorded = false;
 
 pub fn initialize(build_identity: u64, painted: bool) void {
+    power_sampling = .{};
     stack_painted = painted;
     boot_recorded = false;
     started = x.Timer.now();
@@ -476,8 +477,7 @@ fn disableLog(failure: anyerror) void {
 
 pub fn samplePower(pmic: *@import("f20_power.zig").Controller) void {
     const ticks = now();
-    if (ticks - last_power < x.Timer.milliseconds(10_000)) return;
-    last_power = ticks;
+    if (!power_sampling.due(ticks / x.Timer.milliseconds(1), report.power_valid & 1 != 0)) return;
     const telemetry = pmic.telemetry() catch |err| {
         report.power_valid = 0;
         report.coulomb_running = 0;

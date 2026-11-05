@@ -120,7 +120,11 @@ pub fn Device(comptime Bus: type) type {
         pub fn telemetry(self: *Self) !Telemetry {
             const enabled = try self.read(.adc_enable);
             var result = Telemetry{ .status = try self.powerStatus(), .jacks = try self.jacks() };
-            if (enabled & 0x80 != 0) result.battery_mv = @intCast((@as(u32, try self.adc(.battery_voltage_high, 4)) * 11 + 5) / 10);
+            if (enabled & 0x80 != 0) {
+                const raw = try self.adc(.battery_voltage_high, 4);
+                // A newly enabled ADC can read zero before its first conversion.
+                if (raw != 0) result.battery_mv = @intCast((@as(u32, raw) * 11 + 5) / 10);
+            }
             if (enabled & 0x08 != 0) result.usb_mv = @intCast((@as(u32, try self.adc(.usb_voltage_high, 4)) * 17 + 5) / 10);
             if (enabled & 0x04 != 0) result.usb_microamps = @as(u32, try self.adc(.usb_current_high, 4)) * 375;
             if (try self.read(.adc_enable_second) & 0x80 != 0) result.die_millicelsius = @as(i32, try self.adc(.die_temperature_high, 4)) * 100 - 144700;
@@ -389,4 +393,15 @@ test "telemetry enables only the requested ADC channels" {
         try std.testing.expectEqual(0xa5, bus.registers[0x84]);
         try std.testing.expectEqual(0xc4, bus.registers[0x33]);
     }
+}
+
+test "an enabled battery ADC is unknown until its first nonzero conversion" {
+    var bus = Fake{};
+    var device = Device(*Fake).init(&bus, 0x34);
+    try device.configureJackInputs();
+    try device.enableTelemetry();
+    try std.testing.expect((try device.telemetry()).battery_mv == null);
+    bus.registers[0x78] = 0xeb;
+    bus.registers[0x79] = 3;
+    try std.testing.expect((try device.telemetry()).battery_mv.? > 4100);
 }

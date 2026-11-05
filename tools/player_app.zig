@@ -27,6 +27,9 @@ var state: State = undefined;
 var index: Platform.Index.State = .{};
 var catalogue: ?std.json.Parsed(core.Catalog) = null;
 var playing = false;
+var usb_phase: ?gain.usb_view.Phase = null;
+var usb_dirty = true;
+var power = gain.battery.Status{};
 var started_at: u64 = 0;
 var presented_revision: u64 = 0;
 var host_io: std.Io.Threaded = undefined;
@@ -332,6 +335,9 @@ fn init(at: u64) callconv(.c) void {
     Platform.Diagnostics.report = .{};
     Platform.Diagnostics.catalog = null;
     playing = false;
+    usb_phase = null;
+    usb_dirty = true;
+    power = .{};
     presented_revision = 0;
     Platform.Display.revision = 0;
     projection.publish(&.{}, &.{}, 0, true) catch unreachable;
@@ -365,6 +371,7 @@ fn input(event: api.Event, at: u64) callconv(.c) void {
     lock();
     defer unlock();
     milliseconds = at;
+    if (usb_phase != null) return;
     // The host forwards OS repeats for apps that want them; this player owns
     // its repeat clock and deliberately consumes only physical press/release.
     if (event.phase == .repeat) return;
@@ -387,6 +394,16 @@ fn input(event: api.Event, at: u64) callconv(.c) void {
 }
 
 fn frame(pixels: *api.Pixels, at: u64) callconv(.c) bool {
+    lock();
+    if (usb_phase) |phase| {
+        defer unlock();
+        milliseconds = at;
+        if (!usb_dirty) return false;
+        gain.usb_view.render(gain.canvas.Canvas.init(pixels), phase, power);
+        usb_dirty = false;
+        return true;
+    }
+    unlock();
     // Joining/spawning happens outside the callback lock; the worker may need
     // that lock to publish its final state while shutdown/reload waits for it.
     if (sd_root != null and index.requested) startScan();
@@ -505,4 +522,20 @@ export fn gain_player_ui_text_status(output: *TextStatus) callconv(.c) void {
     lock();
     defer unlock();
     output.* = .{ .revision = text_cache.revision.load(.acquire), .hits = text_cache.hits, .misses = text_cache.misses, .pending = @intFromBool(text_cache.pending()), .failures = text_failures, .prepared = text_statistics.labels, .heap_peak = text_statistics.heap_peak };
+}
+
+/// Application-only hardware fixtures; the generic simulator does not interpret
+/// battery or USB states. USB 0 resumes the preserved player, 1..3 show handoff.
+export fn gain_player_environment(millivolts: u32, charging: u32, usb: u32) callconv(.c) bool {
+    if (millivolts > 5000 or charging > 1 or usb > 3) return false;
+    lock();
+    defer unlock();
+    if (usb != 0) state.cancelInput(0);
+    power = gain.battery.Status.fromVoltage(millivolts, charging != 0);
+    usb_phase = if (usb == 0) null else @fromBackingInt(@intCast(usb - 1));
+    usb_dirty = true;
+    state.refreshBattery(millivolts, charging != 0, milliseconds);
+    state.dirty = true;
+    state.major = true;
+    return true;
 }

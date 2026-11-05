@@ -439,8 +439,8 @@ export fn gain_main() callconv(.c) noreturn {
     // A failed/disabled ADC is unknown, never a fabricated empty battery.
     pmic.enableTelemetry() catch |failure| diag.failed(4, failure);
     pmic.enableCoulombCounting() catch |failure| diag.failed(4, failure);
-    const telemetry = pmic.telemetry() catch null;
-    const battery_mv: u32 = if (telemetry) |value| value.battery_mv orelse 0 else 0;
+    diag.samplePower(&pmic);
+    const battery_mv = diag.report.battery_mv;
 
     Display.clear(Display.black);
     Display.text(102, 92, "GAIN", Display.white, 3);
@@ -508,10 +508,9 @@ export fn gain_main() callconv(.c) noreturn {
 fn runUsbMode(pmic: *@import("f20_power.zig").Controller) void {
     diag.flush();
     diag.event(.usb, .{ 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 });
-    Display.clear(Display.black);
-    Display.text(32, 68, "USB CONNECTED", Display.white, 3);
-    Display.text(32, 124, "EJECT ON COMPUTER TO RETURN", Display.cyan, 1);
-    _ = Display.present();
+    const view = @import("usb_view.zig");
+    var previous_phase: ?view.Phase = null;
+    var previous_power: @import("battery.zig").Status = .{};
     var last_health = Timer.now();
     while (true) {
         Watchdog.kick();
@@ -520,6 +519,22 @@ fn runUsbMode(pmic: *@import("f20_power.zig").Controller) void {
         if (Timer.elapsed(last_health) >= Timer.milliseconds(1000)) {
             last_health = Timer.now();
             diag.samplePower(pmic);
+        }
+        switch (usb.session().state) {
+            .remounting, .player, .ejected => return,
+            else => {},
+        }
+        const phase: view.Phase = switch (usb.session().state) {
+            .quiescing => .connecting,
+            .ejecting => .ejecting,
+            else => .connected,
+        };
+        const power = @import("battery.zig").Status.fromVoltage(if (diag.report.power_valid & 1 != 0) diag.report.battery_mv else 0, diag.report.power_valid & (1 << 5) != 0);
+        if (previous_phase == null or previous_phase.? != phase or !std.meta.eql(previous_power, power)) {
+            view.render(@import("canvas.zig").Canvas.init(LcdDma.framebuffer), phase, power);
+            _ = Display.present();
+            previous_phase = phase;
+            previous_power = power;
         }
         switch (usb.session().state) {
             .quiescing => usb.grantHost() catch {},
@@ -788,7 +803,7 @@ const MusicSession = struct {
                 return .stop;
             }
         } else self.power_started = null;
-        self.state.refreshBattery(diag.report.battery_mv, now_ms);
+        self.state.refreshBattery(if (diag.report.power_valid & 1 != 0) diag.report.battery_mv else 0, diag.report.power_valid & (1 << 5) != 0, now_ms);
         self.state.frame(self.now());
         if (self.state.failure) return .stop;
         return result;

@@ -11,12 +11,14 @@ const media = @import("f20_media.zig");
 const flow_scene = @import("cover_flow.zig");
 const navigation = @import("navigation.zig");
 
-const paper = draw.rgb(247, 247, 242);
-const ink = draw.rgb(31, 42, 44);
-const muted = draw.rgb(102, 114, 113);
-const line = draw.rgb(217, 222, 216);
-const accent = draw.rgb(35, 101, 91);
-const selected = draw.rgb(226, 234, 225);
+const chrome = @import("music_chrome.zig");
+const battery_status = @import("battery.zig");
+const paper = chrome.paper;
+const ink = chrome.ink;
+const muted = chrome.muted;
+const line = chrome.line;
+const accent = chrome.accent;
+const selected = chrome.selected;
 
 pub const Input = enum(u3) { select, back, home, up, down, volume_up, volume_down };
 
@@ -36,36 +38,7 @@ const home_items = [_]HomeItem{
 };
 const visible_rows = 5;
 
-const Layout = struct {
-    const left = 16;
-    const right = 304;
-    const width = right - left;
-    const row_top = 64;
-    const row_height = 32;
-    const footer_top = 216;
-    const timeline_top = 192;
-    const header_center = 25;
-    const battery_top = header_center - 5;
-
-    // The atlas includes transparent line padding. Align visible capitals,
-    // rather than centring those differently sized bitmap containers.
-    fn capTop(top: i32, role: draw.fonts.Role) i32 {
-        return top - draw.fonts.glyph(role, 'H').ink_y;
-    }
-
-    fn capBottom(bottom: i32, role: draw.fonts.Role) i32 {
-        const glyph = draw.fonts.glyph(role, 'H');
-        return bottom - glyph.ink_y - glyph.ink_height;
-    }
-
-    fn headerText(role: draw.fonts.Role) i32 {
-        return capTop(header_center - @divTrunc(@as(i32, draw.fonts.glyph(role, 'H').ink_height), 2), role);
-    }
-
-    fn rowText(top: i32, role: draw.fonts.Role) i32 {
-        return capTop(top + @divTrunc(row_height - @as(i32, draw.fonts.glyph(role, 'H').ink_height), 2), role);
-    }
-};
+const Layout = chrome.Layout;
 
 const CoverModel = struct {
     id: u64,
@@ -130,6 +103,7 @@ pub fn Controller(comptime Platform: type) type {
         last_scan_phase: []const u8 = "",
         last_active: u32 = 0,
         battery_mv: u32 = 0,
+        charging: bool = false,
         failure: bool = false,
         rendered_surface: usize = 0,
         rendered_screen: ?Screen = null,
@@ -137,6 +111,7 @@ pub fn Controller(comptime Platform: type) type {
         rendered_revision: u32 = 0,
         rendered_count: usize = 0,
         rendered_battery: u32 = 0,
+        rendered_charging: bool = false,
         rendered_scan_active: u32 = 0,
         rendered_scan_width: u16 = 0,
         rendered_flow: f32 = 0,
@@ -529,11 +504,14 @@ pub fn Controller(comptime Platform: type) type {
             return (self.screen == .albums and @abs(self.flow - @as(f32, @floatFromInt(self.selection))) > 0.005) or (self.screen == .player and self.animation.isAnimating(now));
         }
 
-        pub fn refreshBattery(self: *State, millivolts: u32, now: u64) void {
+        pub fn refreshBattery(self: *State, millivolts: u32, charging: bool, now: u64) void {
             // A header-only change must not replace a region transfer during
             // the short volume fade. A stable volume hold can refresh normally.
-            if (self.battery_mv == millivolts or (self.screen == .player and self.animation.isAnimating(now))) return;
+            if (self.screen == .player and self.animation.isAnimating(now)) return;
+            const previous = battery_status.Status.fromVoltage(self.battery_mv, self.charging);
             self.battery_mv = millivolts;
+            self.charging = charging;
+            if (std.meta.eql(previous, battery_status.Status.fromVoltage(millivolts, charging))) return;
             self.dirty = true;
             self.major = true;
         }
@@ -661,21 +639,7 @@ pub fn Controller(comptime Platform: type) type {
         }
 
         fn header(self: *State, c: C, title: []const u8, detail: []const u8) void {
-            const detail_right = Layout.right - 36;
-            const title_right: i32 = if (detail.len == 0) detail_right else detail_right - @as(i32, draw.textWidth(detail, .caption)) - 12;
-            label(c, Layout.left, Layout.headerText(.serif), @intCast(@max(0, title_right - Layout.left)), title, .serif, ink);
-            c.right(detail_right, Layout.headerText(.caption), detail, .caption, muted);
-            c.fill(Layout.left, 54, Layout.width, 1, line);
-            self.battery(c);
-        }
-
-        fn battery(self: *State, c: C) void {
-            const left = Layout.right - 24;
-            const top = Layout.battery_top;
-            c.fill(left, top, 21, 10, muted);
-            c.fill(left + 1, top + 1, 19, 8, paper);
-            c.fill(Layout.right - 2, top + 3, 2, 4, muted);
-            if (self.battery_mv > 0) c.fill(left + 2, top + 2, @intCast(@min(17, (self.battery_mv -| 3300) * 17 / 900)), 6, accent);
+            chrome.header(c, title, detail, battery_status.Status.fromVoltage(self.battery_mv, self.charging));
         }
 
         fn highlightRow(c: C, top: i32) void {
@@ -789,7 +753,7 @@ pub fn Controller(comptime Platform: type) type {
                 }
                 scene_changed = scene_changed or visible_count != self.rendered_cover_count;
             }
-            const header_changed = !retained or self.rendered_selection != self.selection or self.rendered_count != view.album_count or self.rendered_battery != self.battery_mv or self.rendered_scan_active != diag.report.scan_active or self.rendered_scan_width != scan_width;
+            const header_changed = !retained or self.rendered_selection != self.selection or self.rendered_count != view.album_count or self.rendered_battery != self.battery_mv or self.rendered_charging != self.charging or self.rendered_scan_active != diag.report.scan_active or self.rendered_scan_width != scan_width;
             const caption_changed = !retained or self.rendered_selection != self.selection or self.rendered_revision != view.revision;
             if (!retained) c.clear(paper) else if (scene_changed) c.fill(0, Layout.row_top, 320, 193 - Layout.row_top, paper);
             var buf: [96]u8 = undefined;
@@ -862,7 +826,7 @@ pub fn Controller(comptime Platform: type) type {
                     if (view.album_count == 0) centered(c, 105, 288, "No albums yet", .reading, muted);
                     diag.report.cover_caption_max = @max(diag.report.cover_caption_max, benchmarkClock() -% caption_started);
                     if (diag.report.scan_active != 0) {
-                        c.rounded(273, Layout.header_center - 1, 3, 3, 1, accent);
+                        c.rounded(Layout.scan_indicator_left, Layout.header_center - 1, 3, 3, 1, accent);
                         if (scan_width > 0) c.fill(Layout.left, 54, scan_width, 1, accent);
                     }
                 },
@@ -951,6 +915,7 @@ pub fn Controller(comptime Platform: type) type {
             self.rendered_revision = view.revision;
             self.rendered_count = view.album_count;
             self.rendered_battery = self.battery_mv;
+            self.rendered_charging = self.charging;
             self.rendered_scan_active = diag.report.scan_active;
             self.rendered_scan_width = scan_width;
             self.rendered_flow = self.flow;
@@ -1259,6 +1224,8 @@ test "retained carousel bands match a fresh render through selection and scan ch
     const old_report = test_diag.report;
     defer test_diag.report = old_report;
     for (0..41) |step| {
+        state.charging = step % 2 != 0;
+        state.battery_mv = if (step < 10) 0 else if (step < 20) 3300 else if (step < 30) 3800 else 4200;
         state.selection = if (step < 20) 0 else 1;
         state.flow = @as(f32, @floatFromInt(step)) / 40;
         test_diag.report.scan_active = if (step < 30) 1 else 0;
@@ -1398,12 +1365,12 @@ test "cosmetic header refresh waits for volume movement without waiting through 
     state.animation.request(100, 75);
     state.dirty = false;
     state.major = false;
-    state.refreshBattery(4099, 120);
+    state.refreshBattery(3799, false, 120);
     try std.testing.expectEqual(4100, state.battery_mv);
     try std.testing.expect(!state.major);
     _ = state.animation.tick(240);
-    state.refreshBattery(4099, 240);
-    try std.testing.expectEqual(4099, state.battery_mv);
+    state.refreshBattery(3799, false, 240);
+    try std.testing.expectEqual(3799, state.battery_mv);
     try std.testing.expect(state.major and state.dirty);
 }
 
