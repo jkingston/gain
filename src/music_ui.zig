@@ -23,10 +23,10 @@ const selected = chrome.selected;
 pub const Input = enum(u3) { select, back, home, up, down, volume_up, volume_down };
 
 pub const Screen = enum { home, albums, tracks, player, library, artists, artist, settings };
-pub const TrackScope = enum { album, artist, all };
+pub const TrackScope = enum { album, artist, all, queue };
 const HomeItem = struct {
     name: []const u8,
-    target: enum { player, albums, artists, songs, library, folders, settings },
+    target: enum { player, albums, artists, songs, library, folders, settings, queue },
 };
 const home_items = [_]HomeItem{
     .{ .name = "Now Playing", .target = .player },
@@ -35,6 +35,7 @@ const home_items = [_]HomeItem{
     .{ .name = "All Songs", .target = .songs },
     .{ .name = "Library", .target = .library },
     .{ .name = "Folders", .target = .folders },
+    .{ .name = "Queue", .target = .queue },
     .{ .name = "Settings", .target = .settings },
 };
 const visible_rows = 5;
@@ -170,6 +171,7 @@ pub fn Controller(comptime Platform: type) type {
                 .album => view.albumTrack(self.albumRank() orelse return null, position),
                 .artist => view.artistTrack(self.artistRank() orelse return null, position),
                 .all => if (position < view.track_count) view.tracks[view.title_order[position]] else null,
+                .queue => view.trackById(self.track_store.order.at(position) orelse return null),
             };
         }
 
@@ -182,6 +184,11 @@ pub fn Controller(comptime Platform: type) type {
         }
 
         fn startContext(self: *State, track: *const core.Track) void {
+            if (self.track_scope == .queue) {
+                _ = self.track_store.order.select(track.id);
+                self.queue(track);
+                return;
+            }
             const count = self.rows();
             if (count > self.track_store.order.capacity()) {
                 self.fail(error.QueueFull);
@@ -208,14 +215,12 @@ pub fn Controller(comptime Platform: type) type {
             const Resolver = struct {
                 view: *const views.Snapshot,
                 pub fn contains(resolver: @This(), id: u64) bool {
-                    for (resolver.view.tracks[0..resolver.view.track_count]) |track| if (track.id == id) return true;
-                    return false;
+                    return resolver.view.trackById(id) != null;
                 }
             };
             if (self.track_store.order.select(current.id)) {
                 const id = self.track_store.order.adjacent(direction, Resolver{ .view = view }) orelse return null;
-                for (view.tracks[0..view.track_count]) |track| if (track.id == id) return track;
-                return null;
+                return view.trackById(id);
             }
             // Direct maintenance/folder selections have no captured list.
             for (view.track_order[0..view.track_count], 0..) |index_value, rank| {
@@ -239,6 +244,7 @@ pub fn Controller(comptime Platform: type) type {
                     .album => if (self.albumRank()) |i| self.snapshot().albums[i].count else 0,
                     .artist => if (self.artistRank()) |i| self.snapshot().artists[i].track_count else 0,
                     .all => self.snapshot().track_count,
+                    .queue => self.track_store.order.count,
                 },
                 .library => 2,
                 .settings => 1,
@@ -425,13 +431,13 @@ pub fn Controller(comptime Platform: type) type {
                             self.requested_folders = true;
                             if (playing) return .stop;
                         } else {
-                            self.track_scope = .all;
+                            self.track_scope = if (target == .queue) .queue else .all;
                             self.tracks_return = .home;
                             self.navigate(switch (target) {
                                 .player => .player,
                                 .albums => .albums,
                                 .artists => .artists,
-                                .songs => .tracks,
+                                .songs, .queue => .tracks,
                                 .library => .library,
                                 .settings => .settings,
                                 .folders => unreachable,
@@ -894,6 +900,7 @@ pub fn Controller(comptime Platform: type) type {
                         .artist => if (artist) |a| a.name else "Artist",
                         .tracks => switch (self.track_scope) {
                             .all => "All Songs",
+                            .queue => "Queue",
                             .artist => if (artist) |a| a.name else "Songs",
                             .album => if (view.albumIndex(self.album_id)) |i| view.albums[i].title else "Tracks",
                         },
@@ -905,7 +912,7 @@ pub fn Controller(comptime Platform: type) type {
                         const name = switch (self.screen) {
                             .artists => view.artists[i].name,
                             .artist => if (i == 0) "All Songs" else view.albums[artist.?.first_album + i - 1].title,
-                            .tracks => (self.trackAt(i) orelse break).meta.title,
+                            .tracks => if (self.trackAt(i)) |track| track.meta.title else "Unavailable track",
                             else => unreachable,
                         };
                         const y: i32 = Layout.row_top + @as(i32, @intCast(i - self.first)) * Layout.row_height;
@@ -1774,6 +1781,38 @@ test "chosen all-song order survives browsing another album and progressive inse
     state.playing_track = state.track_store.begin();
     try std.testing.expectEqual(null, state.neighbouringTrack(1));
     try std.testing.expectEqual(2, state.neighbouringTrack(-1).?.id);
+}
+
+test "queue browsing resolves current metadata and selecting a row preserves its order" {
+    var fixture: Fixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    var state = fixture.state();
+    const tracks = [_]core.Track{
+        .{ .id = 11, .path = "A/1", .stamp = .{}, .meta = .{ .title = "Zulu", .album = "First" } },
+        .{ .id = 42, .path = "B/1", .stamp = .{}, .meta = .{ .title = "Alpha", .album = "Second" } },
+        .{ .id = 7, .path = "C/1", .stamp = .{}, .meta = .{ .title = "Beta", .album = "Third" } },
+    };
+    try fixture.pair.publish(&.{}, &tracks, 42, true);
+    for ([_]u64{ 11, 7, 42 }) |id| try state.track_store.order.append(id);
+    state.track_scope = .queue;
+    state.navigate(.tracks);
+    state.selection = 1;
+    _ = state.handle(.select, 0, false);
+    state.playing_track = state.track_store.begin();
+    try std.testing.expectEqual(7, state.playing_track.?.id);
+    try std.testing.expectEqual(3, state.track_store.order.count);
+    try std.testing.expectEqual(11, state.track_store.order.at(0).?);
+    try std.testing.expectEqual(1, state.track_store.order.cursor);
+    try fixture.pair.publish(&.{}, tracks[1..], 42, true);
+    state.track_scope = .queue;
+    state.navigate(.tracks);
+    try std.testing.expectEqual(null, state.trackAt(0));
+    const next = state.neighbouringTrack(1).?;
+    try std.testing.expectEqual(42, next.id);
+    state.queue(next);
+    state.playing_track = state.track_store.begin();
+    try std.testing.expectEqual(7, state.neighbouringTrack(-1).?.id);
 }
 
 test "play toggles pause and seeking previews without changing the queue" {

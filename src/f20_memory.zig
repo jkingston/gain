@@ -92,7 +92,9 @@ pub const boot_stack = Region{ .start = 0x1fe0000, .bytes = 0x1f000 };
 pub const scan_maps = Region{ .start = 0x1e20000, .bytes = 0xe0000 };
 pub const scan_scratch = Region{ .start = 0xe80000, .bytes = 0x180000 };
 pub const scan_io = Region{ .start = 0x740000, .bytes = 0x20000 };
-pub const scan_views = Region{ .start = 0x780000, .bytes = 0x80000 };
+// Two immutable views include ID indexes for bounded queue lookup. Extend into
+// the unused gap above scan_io; active decoder and artwork buffers stay intact.
+pub const scan_views = Region{ .start = 0x770000, .bytes = 0x90000 };
 pub const scan_artwork = Region{ .start = 0x704000, .bytes = 0x3c000 };
 pub const cover_cache = Region{ .start = 0xe10000, .bytes = 0x70000 };
 pub const regions = [_]Region{

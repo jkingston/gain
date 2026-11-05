@@ -257,6 +257,10 @@ Choosing a song captures the displayed album, artist or All Songs order as
 stable IDs and starts at that song. Browsing elsewhere or adding albums during a
 scan does not replace that queue. Next/previous and natural completion follow the
 captured order; removed tracks are skipped and retags use current metadata.
+The Queue view shows that captured order; selecting a queued track keeps the
+queue intact. Missing entries remain visible as unavailable and are skipped by
+next/previous. View publication prepares a sorted ID index, so painting queued
+rows never searches the entire catalogue.
 Another explicit song choice replaces the queue. Direct development commands and
 folder playback retain their existing local navigation behavior.
 

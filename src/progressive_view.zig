@@ -89,6 +89,7 @@ pub const Snapshot = struct {
     group_ranks: [max_albums]u16 = undefined,
     artists: [max_artists]Artist = undefined,
     title_order: [max_tracks]u16 = undefined,
+    id_order: [max_tracks]u16 = undefined,
     artist_track_order: [max_tracks]u16 = undefined,
     table: [2048]u16 = @splat(0),
     track_count: usize = 0,
@@ -222,6 +223,10 @@ pub const Snapshot = struct {
             self.artists[self.artist_count - 1].album_count += 1;
             self.artists[self.artist_count - 1].track_count += @intCast(album.count);
         }
+        for (self.id_order[0..self.track_count], 0..) |*rank, i| rank.* = @intCast(i);
+        sort.base.order = .identity;
+        if (comptime @TypeOf(observer) == Uninterrupted) std.mem.sort(u16, self.id_order[0..self.track_count], sort.base, sortedLess) else std.mem.sort(u16, self.id_order[0..self.track_count], &sort, Work.lessTrack);
+        try work.check();
         for (self.title_order[0..self.track_count], 0..) |*rank, i| rank.* = @intCast(i);
         sort.base.order = .title;
         if (comptime @TypeOf(observer) == Uninterrupted) std.mem.sort(u16, self.title_order[0..self.track_count], sort.base, sortedLess) else std.mem.sort(u16, self.title_order[0..self.track_count], &sort, Work.lessTrack);
@@ -248,11 +253,12 @@ pub const Snapshot = struct {
         return a.id < b.id;
     }
 
-    const SortContext = struct { view: *const Snapshot, order: enum { album, title } };
+    const SortContext = struct { view: *const Snapshot, order: enum { album, title, identity } };
 
     fn sortedLess(context: SortContext, a: u16, b: u16) bool {
         const view = context.view;
         switch (context.order) {
+            .identity => return view.tracks[a].id < view.tracks[b].id,
             .title => return titleLess(view, a, b),
             .album => {
                 if (view.track_groups[a] != view.track_groups[b]) return view.track_groups[a] < view.track_groups[b];
@@ -276,6 +282,19 @@ pub const Snapshot = struct {
         if (left.meta.track != right.meta.track) return left.meta.track < right.meta.track;
         if (!std.mem.eql(u8, left.path, right.path)) return core.lessText(left.path, right.path);
         return left.id < right.id;
+    }
+
+    pub fn trackById(self: *const Snapshot, id: u64) ?*const core.Track {
+        var first: usize = 0;
+        var end = self.track_count;
+        while (first < end) {
+            const middle = first + (end - first) / 2;
+            const track = self.tracks[self.id_order[middle]];
+            if (track.id < id) first = middle + 1 else end = middle;
+        }
+        if (first == self.track_count) return null;
+        const found = self.tracks[self.id_order[first]];
+        return if (found.id == id) found else null;
     }
 
     pub fn albumTrack(self: *const Snapshot, album: usize, row: usize) ?*const core.Track {
@@ -595,6 +614,7 @@ test "cooperative rebuilds service readers without publishing partial sorts or c
     try std.testing.expectEqualSlices(u16, expected.track_order[0..max_tracks], prepared.track_order[0..max_tracks]);
     try std.testing.expectEqualSlices(u16, expected.title_order[0..max_tracks], prepared.title_order[0..max_tracks]);
     try std.testing.expectEqualSlices(u16, expected.artist_track_order[0..max_tracks], prepared.artist_track_order[0..max_tracks]);
+    try std.testing.expectEqualSlices(u16, expected.id_order[0..max_tracks], prepared.id_order[0..max_tracks]);
     for ([_]usize{ 1, 2, calls / 4, calls / 2, calls - 1 }) |cancel_at| {
         observer = .{ .pair = pair, .old = old, .cancel_at = cancel_at };
         try std.testing.expectError(error.Cancelled, pair.prepareCooperative(&.{}, tracks, 42, true, &observer));
@@ -603,4 +623,22 @@ test "cooperative rebuilds service readers without publishing partial sorts or c
     observer = .{ .pair = pair, .old = old };
     pair.commit(try pair.prepareCooperative(&.{}, tracks, 42, true, &observer));
     try std.testing.expectEqual(max_tracks, pair.current().track_count);
+}
+
+test "ID lookup survives independent display orders and authoritative removal" {
+    const a = std.testing.allocator;
+    const pair = try a.create(Pair);
+    defer a.destroy(pair);
+    pair.* = .{};
+    const tracks = [_]core.Track{
+        .{ .id = 91, .path = "A/1", .stamp = .{}, .meta = .{ .title = "Zulu", .album = "First" } },
+        .{ .id = 3, .path = "B/1", .stamp = .{}, .meta = .{ .title = "Alpha", .album = "Last" } },
+        .{ .id = 50, .path = "C/1", .stamp = .{}, .meta = .{ .title = "Beta", .album = "Middle" } },
+    };
+    try pair.publish(&.{}, &tracks, 42, true);
+    for (tracks) |track| try std.testing.expectEqualStrings(track.path, pair.current().trackById(track.id).?.path);
+    for ([_]u64{ 0, 2, 4, 49, 51, 92, std.math.maxInt(u64) }) |id| try std.testing.expectEqual(null, pair.current().trackById(id));
+    try pair.publish(&.{}, tracks[1..], 42, true);
+    try std.testing.expectEqual(null, pair.current().trackById(91));
+    try std.testing.expectEqualStrings("B/1", pair.current().trackById(3).?.path);
 }
