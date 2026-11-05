@@ -25,6 +25,16 @@ pub fn move(selection: usize, count: usize, delta: i32) usize {
     return if (delta < 0) current -| @as(usize, @intCast(-@as(i64, delta))) else @min(count - 1, current +| @as(usize, @intCast(delta)));
 }
 
+/// Row-aligned window for either lists or grids, preserving the selected item.
+pub fn firstVisible(selection: usize, current: usize, capacity: usize, columns: usize) usize {
+    const cols = @max(1, columns);
+    const count = @max(cols, capacity);
+    const first = current - current % cols;
+    if (selection < first) return selection - selection % cols;
+    if (selection >= first +| count) return (selection / cols + 1 - count / cols) * cols;
+    return first;
+}
+
 pub const Policy = struct {
     held: u8 = 0,
     suppressed: u8 = 0,
@@ -361,5 +371,21 @@ test "a capped volume hold traverses the full range in a few seconds at differen
         try std.testing.expect(level >= 112);
         _ = policy.edge(.volume_up, false, now, .transport, 0);
         try std.testing.expectEqual(Action.none, policy.tick(now + 10000, .transport, 0, 0));
+    }
+}
+
+test "list and grid windows stay row aligned while scrolling and changing layout" {
+    for ([_]usize{ 1, 2, 3, 4 }) |columns| {
+        const capacity = columns * 3;
+        var first: usize = 0;
+        for (0..100) |selected| {
+            first = firstVisible(selected, first, capacity, columns);
+            try std.testing.expectEqual(@as(usize, 0), first % columns);
+            try std.testing.expect(selected >= first and selected < first + capacity);
+        }
+        first = firstVisible(7, first, capacity, columns);
+        try std.testing.expect(7 >= first and 7 < first + capacity);
+        first = firstVisible(0, first, capacity, columns);
+        try std.testing.expectEqual(@as(usize, 0), first);
     }
 }

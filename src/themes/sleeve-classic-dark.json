@@ -1,0 +1,754 @@
+{
+  "version": 1,
+  "name": "Sleeve-Classic / Dark",
+  "palette": {
+    "paper": "#201714",
+    "ink": "#f3e3cd",
+    "muted": "#b69d86",
+    "line": "#463227",
+    "accent": "#eea36d",
+    "selected": "#4e2e1f",
+    "selected_text": "#eea36d"
+  },
+  "header": [
+    {
+      "kind": "rect",
+      "rect": {
+        "x": 0,
+        "y": 0,
+        "w": 320,
+        "h": 80
+      },
+      "id": "header",
+      "color": "paper"
+    },
+    {
+      "kind": "battery",
+      "rect": {
+        "x": 278,
+        "y": 18,
+        "w": 24,
+        "h": 14
+      },
+      "color": "muted",
+      "background": "paper",
+      "focus": "accent"
+    },
+    {
+      "kind": "rect",
+      "rect": {
+        "x": 273,
+        "y": 16,
+        "w": 3,
+        "h": 3
+      },
+      "color": "accent",
+      "when": "scanning"
+    }
+  ],
+  "screens": {
+    "home": [
+      {
+        "kind": "progress",
+        "rect": {
+          "x": 16,
+          "y": 78,
+          "w": 288,
+          "h": 1
+        },
+        "binding": "scan_progress",
+        "color": "line",
+        "focus": "accent",
+        "when": "scanning"
+      },
+      {
+        "kind": "text",
+        "rect": {
+          "x": 16,
+          "y": 13,
+          "w": 248,
+          "h": 18
+        },
+        "binding": "page_detail",
+        "role": "caption",
+        "color": "muted",
+        "value": ""
+      },
+      {
+        "kind": "text",
+        "rect": {
+          "x": 16,
+          "y": 40,
+          "w": 288,
+          "h": 40
+        },
+        "binding": "page_title",
+        "role": "serif",
+        "alignment": "center"
+      },
+      {
+        "kind": "list",
+        "rect": {
+          "x": 8,
+          "y": 0,
+          "w": 304,
+          "h": 140,
+          "after": "header"
+        },
+        "binding": "home",
+        "role": "reading",
+        "row_height": 28,
+        "radius": 4,
+        "alignment": "center",
+        "detail": false,
+        "value": "",
+        "background": "paper",
+        "focus_text": "selected_text"
+      }
+    ],
+    "albums": [
+      {
+        "kind": "progress",
+        "rect": {
+          "x": 16,
+          "y": 78,
+          "w": 288,
+          "h": 1
+        },
+        "binding": "scan_progress",
+        "color": "line",
+        "focus": "accent",
+        "when": "scanning"
+      },
+      {
+        "kind": "text",
+        "rect": {
+          "x": 16,
+          "y": 13,
+          "w": 248,
+          "h": 18
+        },
+        "binding": "page_detail",
+        "role": "caption",
+        "color": "muted",
+        "value": ""
+      },
+      {
+        "kind": "text",
+        "rect": {
+          "x": 16,
+          "y": 40,
+          "w": 288,
+          "h": 40
+        },
+        "binding": "album_title",
+        "role": "serif",
+        "alignment": "center"
+      },
+      {
+        "kind": "covers",
+        "rect": {
+          "x": 0,
+          "y": 0,
+          "w": 320,
+          "h": 132,
+          "after": "header"
+        },
+        "edge": 128,
+        "reflection": 0,
+        "background": "paper"
+      },
+      {
+        "kind": "text",
+        "rect": {
+          "x": 16,
+          "y": 216,
+          "w": 288,
+          "h": 21
+        },
+        "binding": "album_artist",
+        "role": "body",
+        "alignment": "center",
+        "color": "muted"
+      },
+      {
+        "kind": "text",
+        "rect": {
+          "x": 16,
+          "y": 120,
+          "w": 288,
+          "h": 24
+        },
+        "binding": "empty_message",
+        "role": "body",
+        "color": "muted",
+        "alignment": "center",
+        "when": "empty_list"
+      }
+    ],
+    "tracks": [
+      {
+        "kind": "progress",
+        "rect": {
+          "x": 16,
+          "y": 78,
+          "w": 288,
+          "h": 1
+        },
+        "binding": "scan_progress",
+        "color": "line",
+        "focus": "accent",
+        "when": "scanning"
+      },
+      {
+        "kind": "text",
+        "rect": {
+          "x": 16,
+          "y": 13,
+          "w": 248,
+          "h": 18
+        },
+        "binding": "page_detail",
+        "role": "caption",
+        "color": "muted",
+        "value": ""
+      },
+      {
+        "kind": "text",
+        "rect": {
+          "x": 16,
+          "y": 40,
+          "w": 288,
+          "h": 40
+        },
+        "binding": "page_title",
+        "role": "serif",
+        "alignment": "center"
+      },
+      {
+        "kind": "list",
+        "rect": {
+          "x": 8,
+          "y": 0,
+          "w": 304,
+          "h": 140,
+          "after": "header"
+        },
+        "binding": "tracks",
+        "role": "reading",
+        "row_height": 28,
+        "radius": 4,
+        "alignment": "left",
+        "detail": false,
+        "value": "",
+        "background": "paper",
+        "focus_text": "selected_text"
+      },
+      {
+        "kind": "text",
+        "rect": {
+          "x": 16,
+          "y": 90,
+          "w": 288,
+          "h": 24
+        },
+        "binding": "empty_message",
+        "role": "body",
+        "color": "muted",
+        "alignment": "center",
+        "when": "empty_list"
+      }
+    ],
+    "player": [
+      {
+        "kind": "text",
+        "rect": {
+          "x": 16,
+          "y": 13,
+          "w": 248,
+          "h": 18
+        },
+        "binding": "page_detail",
+        "role": "caption",
+        "color": "muted",
+        "value": ""
+      },
+      {
+        "kind": "text",
+        "rect": {
+          "x": 16,
+          "y": 40,
+          "w": 288,
+          "h": 40
+        },
+        "binding": "page_title",
+        "role": "serif",
+        "alignment": "center"
+      },
+      {
+        "kind": "artwork",
+        "rect": {
+          "x": 16,
+          "y": 80,
+          "w": 96,
+          "h": 96
+        },
+        "background": "line",
+        "radius": 2,
+        "when": "track"
+      },
+      {
+        "kind": "text",
+        "rect": {
+          "x": 128,
+          "y": 80,
+          "w": 176,
+          "h": 28
+        },
+        "binding": "track_title",
+        "role": "title",
+        "when": "track"
+      },
+      {
+        "kind": "text",
+        "rect": {
+          "x": 128,
+          "y": 112,
+          "w": 176,
+          "h": 21
+        },
+        "binding": "track_artist",
+        "role": "body",
+        "when": "track"
+      },
+      {
+        "kind": "text",
+        "rect": {
+          "x": 128,
+          "y": 136,
+          "w": 176,
+          "h": 19
+        },
+        "binding": "track_album",
+        "role": "caption",
+        "color": "muted",
+        "when": "track"
+      },
+      {
+        "kind": "text",
+        "rect": {
+          "x": 128,
+          "y": 167,
+          "w": 116,
+          "h": 19
+        },
+        "binding": "codec",
+        "role": "caption",
+        "color": "muted",
+        "when": "track"
+      },
+      {
+        "kind": "transport",
+        "rect": {
+          "x": 16,
+          "y": 192,
+          "w": 288,
+          "h": 32
+        },
+        "color": "line",
+        "background": "paper",
+        "focus": "accent",
+        "focus_text": "muted",
+        "label_offset": 20,
+        "progress": "bar",
+        "when": "track"
+      },
+      {
+        "kind": "text",
+        "rect": {
+          "x": 16,
+          "y": 104,
+          "w": 288,
+          "h": 28
+        },
+        "binding": "literal",
+        "role": "title",
+        "value": "Choose a track",
+        "when": "empty"
+      },
+      {
+        "kind": "playback_modes",
+        "rect": {
+          "x": 252,
+          "y": 162,
+          "w": 52,
+          "h": 16
+        },
+        "color": "muted",
+        "when": "track"
+      }
+    ],
+    "library": [
+      {
+        "kind": "progress",
+        "rect": {
+          "x": 16,
+          "y": 78,
+          "w": 288,
+          "h": 1
+        },
+        "binding": "scan_progress",
+        "color": "line",
+        "focus": "accent",
+        "when": "scanning"
+      },
+      {
+        "kind": "text",
+        "rect": {
+          "x": 16,
+          "y": 13,
+          "w": 248,
+          "h": 18
+        },
+        "binding": "page_detail",
+        "role": "caption",
+        "color": "muted",
+        "value": ""
+      },
+      {
+        "kind": "text",
+        "rect": {
+          "x": 16,
+          "y": 40,
+          "w": 288,
+          "h": 40
+        },
+        "binding": "page_title",
+        "role": "serif",
+        "alignment": "center"
+      },
+      {
+        "kind": "text",
+        "rect": {
+          "x": 16,
+          "y": 90,
+          "w": 288,
+          "h": 24
+        },
+        "binding": "library_phase",
+        "role": "reading"
+      },
+      {
+        "kind": "list",
+        "rect": {
+          "x": 8,
+          "y": 128,
+          "w": 304,
+          "h": 64
+        },
+        "binding": "library",
+        "role": "body",
+        "row_height": 32,
+        "radius": 4,
+        "focus_text": "selected_text"
+      }
+    ],
+    "artists": [
+      {
+        "kind": "progress",
+        "rect": {
+          "x": 16,
+          "y": 78,
+          "w": 288,
+          "h": 1
+        },
+        "binding": "scan_progress",
+        "color": "line",
+        "focus": "accent",
+        "when": "scanning"
+      },
+      {
+        "kind": "text",
+        "rect": {
+          "x": 16,
+          "y": 13,
+          "w": 248,
+          "h": 18
+        },
+        "binding": "page_detail",
+        "role": "caption",
+        "color": "muted",
+        "value": ""
+      },
+      {
+        "kind": "text",
+        "rect": {
+          "x": 16,
+          "y": 40,
+          "w": 288,
+          "h": 40
+        },
+        "binding": "page_title",
+        "role": "serif",
+        "alignment": "center"
+      },
+      {
+        "kind": "list",
+        "rect": {
+          "x": 8,
+          "y": 0,
+          "w": 304,
+          "h": 140,
+          "after": "header"
+        },
+        "binding": "artists",
+        "role": "reading",
+        "row_height": 28,
+        "radius": 4,
+        "alignment": "left",
+        "detail": false,
+        "value": "",
+        "background": "paper",
+        "focus_text": "selected_text"
+      },
+      {
+        "kind": "text",
+        "rect": {
+          "x": 16,
+          "y": 90,
+          "w": 288,
+          "h": 24
+        },
+        "binding": "empty_message",
+        "role": "body",
+        "color": "muted",
+        "alignment": "center",
+        "when": "empty_list"
+      }
+    ],
+    "artist": [
+      {
+        "kind": "progress",
+        "rect": {
+          "x": 16,
+          "y": 78,
+          "w": 288,
+          "h": 1
+        },
+        "binding": "scan_progress",
+        "color": "line",
+        "focus": "accent",
+        "when": "scanning"
+      },
+      {
+        "kind": "text",
+        "rect": {
+          "x": 16,
+          "y": 13,
+          "w": 248,
+          "h": 18
+        },
+        "binding": "page_detail",
+        "role": "caption",
+        "color": "muted",
+        "value": ""
+      },
+      {
+        "kind": "text",
+        "rect": {
+          "x": 16,
+          "y": 40,
+          "w": 288,
+          "h": 40
+        },
+        "binding": "page_title",
+        "role": "serif",
+        "alignment": "center"
+      },
+      {
+        "kind": "list",
+        "rect": {
+          "x": 8,
+          "y": 0,
+          "w": 304,
+          "h": 140,
+          "after": "header"
+        },
+        "binding": "artist",
+        "role": "reading",
+        "row_height": 28,
+        "radius": 4,
+        "alignment": "left",
+        "detail": false,
+        "value": "",
+        "background": "paper",
+        "focus_text": "selected_text"
+      },
+      {
+        "kind": "text",
+        "rect": {
+          "x": 16,
+          "y": 90,
+          "w": 288,
+          "h": 24
+        },
+        "binding": "empty_message",
+        "role": "body",
+        "color": "muted",
+        "alignment": "center",
+        "when": "empty_list"
+      }
+    ],
+    "jump": [
+      {
+        "kind": "progress",
+        "rect": {
+          "x": 16,
+          "y": 78,
+          "w": 288,
+          "h": 1
+        },
+        "binding": "scan_progress",
+        "color": "line",
+        "focus": "accent",
+        "when": "scanning"
+      },
+      {
+        "kind": "text",
+        "rect": {
+          "x": 16,
+          "y": 13,
+          "w": 248,
+          "h": 18
+        },
+        "binding": "page_detail",
+        "role": "caption",
+        "color": "muted",
+        "value": ""
+      },
+      {
+        "kind": "text",
+        "rect": {
+          "x": 16,
+          "y": 40,
+          "w": 288,
+          "h": 40
+        },
+        "binding": "page_title",
+        "role": "serif",
+        "alignment": "center"
+      },
+      {
+        "kind": "text",
+        "rect": {
+          "x": 16,
+          "y": 86,
+          "w": 288,
+          "h": 40
+        },
+        "binding": "jump_percent",
+        "role": "serif",
+        "alignment": "center"
+      },
+      {
+        "kind": "progress",
+        "rect": {
+          "x": 16,
+          "y": 139,
+          "w": 288,
+          "h": 8
+        },
+        "binding": "jump_progress",
+        "radius": 3,
+        "color": "line",
+        "focus": "accent"
+      },
+      {
+        "kind": "text",
+        "rect": {
+          "x": 16,
+          "y": 167,
+          "w": 288,
+          "h": 24
+        },
+        "binding": "jump_title",
+        "role": "reading",
+        "alignment": "center",
+        "color": "muted"
+      }
+    ],
+    "menu": [
+      {
+        "kind": "progress",
+        "rect": {
+          "x": 16,
+          "y": 78,
+          "w": 288,
+          "h": 1
+        },
+        "binding": "scan_progress",
+        "color": "line",
+        "focus": "accent",
+        "when": "scanning"
+      },
+      {
+        "kind": "text",
+        "rect": {
+          "x": 16,
+          "y": 13,
+          "w": 248,
+          "h": 18
+        },
+        "binding": "page_detail",
+        "role": "caption",
+        "color": "muted",
+        "value": ""
+      },
+      {
+        "kind": "text",
+        "rect": {
+          "x": 16,
+          "y": 40,
+          "w": 288,
+          "h": 40
+        },
+        "binding": "page_title",
+        "role": "serif",
+        "alignment": "center"
+      },
+      {
+        "kind": "list",
+        "rect": {
+          "x": 8,
+          "y": 0,
+          "w": 304,
+          "h": 140,
+          "after": "header"
+        },
+        "binding": "menu",
+        "role": "reading",
+        "row_height": 28,
+        "radius": 4,
+        "alignment": "left",
+        "detail": false,
+        "value": "",
+        "background": "paper",
+        "focus_text": "selected_text"
+      },
+      {
+        "kind": "text",
+        "rect": {
+          "x": 16,
+          "y": 90,
+          "w": 288,
+          "h": 24
+        },
+        "binding": "empty_message",
+        "role": "body",
+        "color": "muted",
+        "alignment": "center",
+        "when": "empty_list"
+      }
+    ]
+  }
+}

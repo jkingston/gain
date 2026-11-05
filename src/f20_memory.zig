@@ -44,6 +44,9 @@ pub const audio_descriptors = Region{ .start = 0x2e5000, .bytes = 4096 };
 // Two uncached identity-mapped pages, owned by the USB controller.
 pub const usb_dma = Region{ .start = 0x280000, .bytes = @import("x1000_dma.zig").window_bytes };
 pub const canvas = Region{ .start = 0x300000, .bytes = 320 * 240 * 2 };
+// Theme parsing owns this otherwise unused gap after the canvas. Source and
+// compiled plans are separate; painting never aliases this scratch space.
+pub const theme_scratch = Region{ .start = 0x328000, .bytes = 96 * 1024 };
 pub const display_snapshot = Region{ .start = 0x340000, .bytes = 320 * 240 * 2 };
 pub const display_next = Region{ .start = 0x3a0000, .bytes = 320 * 240 * 2 };
 pub const display_staging = Region{ .start = 0x380000, .bytes = 320 * 42 * 2 };
@@ -107,6 +110,7 @@ pub const regions = [_]Region{
     audio_descriptors,
     usb_dma,
     canvas,
+    theme_scratch,
     display_snapshot,
     display_next,
     display_staging,

@@ -118,8 +118,24 @@ pub const Backend = struct {
         return result;
     }
 
-    pub fn artwork(_: *Backend, a: A, _: core.Album, _: []const core.Track, _: []const core.Entry, previous: ?core.Artwork, _: core.Mode) !core.Artwork {
-        return if (previous) |art| core.clone(a, art) else .{};
+    pub fn artwork(_: *Backend, a: A, album: core.Album, tracks: []const core.Track, entries: []const core.Entry, previous: ?core.Artwork, mode: core.Mode) !core.Artwork {
+        var selected = core.sidecarArtwork(entries, album.directory);
+        if (selected == null) for (album.tracks) |rank| {
+            const track = tracks[rank];
+            if (track.meta.embedded_art) {
+                selected = .{ .path = track.path, .kind = .audio, .stamp = track.stamp };
+                break;
+            }
+        };
+        const chosen = selected orelse return .{};
+        if (previous) |old| if (mode == .quick and std.mem.eql(u8, old.source, chosen.path) and old.stamp.same(chosen.stamp) and std.mem.eql(u8, old.recipe, "host-source-v1")) return core.clone(a, old);
+        return .{
+            .source = chosen.path,
+            .recipe = "host-source-v1",
+            .stamp = chosen.stamp,
+            .cache_path = if (chosen.kind == .artwork) "image" else "embedded",
+            .key = try std.fmt.allocPrint(a, "{x}:{d}:{d}", .{ core.hash(chosen.path), chosen.stamp.size, chosen.stamp.modified }),
+        };
     }
 
     pub fn playlist(self: *Backend, a: A, path: []const u8, tracks: []const core.Track) !core.Playlist {

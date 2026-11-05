@@ -104,18 +104,22 @@ pub fn batteryIcon(c: draw.Canvas, status: battery.Status) void {
 }
 
 pub fn batteryIconThemed(c: draw.Canvas, status: battery.Status, palette: Palette) void {
-    const left = Layout.battery_left;
-    const top = Layout.battery_top;
+    batteryAt(c, status, palette, Layout.battery_left, Layout.battery_top);
+}
+
+pub fn batteryAt(c: draw.Canvas, status: battery.Status, palette: Palette, left: i32, top: i32) void {
+    const right = left + Layout.battery_width + 2;
+    const badge_left = left - 14;
     const color = if (status.kind == .low or status.kind == .empty) draw.rgb(174, 65, 47) else palette.accent;
     // Own the entire fixed slot so removing a power badge leaves no stale pixels.
-    c.fill(Layout.power_badge_left, top, Layout.right - Layout.power_badge_left, Layout.battery_height, palette.paper);
+    c.fill(badge_left, top, 40, Layout.battery_height, palette.paper);
     c.fill(left, top, Layout.battery_width, Layout.battery_height, palette.muted);
     c.pixel(left, top, palette.paper);
     c.pixel(left + Layout.battery_width - 1, top, palette.paper);
     c.pixel(left, top + Layout.battery_height - 1, palette.paper);
     c.pixel(left + Layout.battery_width - 1, top + Layout.battery_height - 1, palette.paper);
     c.fill(left + 1, top + 1, Layout.battery_width - 2, Layout.battery_height - 2, palette.paper);
-    c.fill(Layout.right - 2, top + (Layout.battery_height - 4) / 2, 2, 4, palette.muted);
+    c.fill(right - 2, top + (Layout.battery_height - 4) / 2, 2, 4, palette.muted);
     const fill_width = Layout.battery_width - 4;
     const fill_height = Layout.battery_height - 4;
     if (status.kind == .unknown) {
@@ -126,7 +130,6 @@ pub fn batteryIconThemed(c: draw.Canvas, status: battery.Status, palette: Palett
     } else {
         c.fill(left + 2, top + 2, 1, fill_height, color);
     }
-    const badge_left = Layout.power_badge_left;
     const badge_top = top + (Layout.battery_height - Layout.power_badge_height) / 2;
     if (status.badge() == .charging) {
         // The bolt has its own fixed space; neither icon nor title shifts.

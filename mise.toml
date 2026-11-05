@@ -155,3 +155,7 @@ run = "zig build fuzz-metadata --fuzz=100K --summary all"
 [tasks.fuzz-artwork]
 description = "Fuzz bounded image decoding and PNG chunk mutations"
 run = "zig build fuzz-artwork --fuzz=100K --summary all"
+
+[tasks.themes]
+description = "Regenerate bundled native plans from the JSON themes"
+run = ["python3 tools/build_themes.py", "zig fmt src/builtin_themes.zig"]

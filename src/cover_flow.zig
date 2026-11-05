@@ -116,17 +116,21 @@ fn prepareReference(texture: Texture, output: *Prepared, observer: anytype) bool
 pub const Surface = struct { pixels: []u16, width: usize = 320, height: usize = 240, origin_x: usize = 0, origin_y: usize = 0 };
 
 pub fn project(distance: f32) Quad {
+    return projectThemed(distance, 160, 120, 112, 16);
+}
+
+pub fn projectThemed(distance: f32, x: i32, y: i32, edge: u16, reflection: u8) Quad {
     const magnitude = @min(3.5, @abs(distance));
     const turn = @min(1, magnitude);
     const stack = @max(0, magnitude - 1);
     const direction: f32 = if (distance < 0) -1 else 1;
-    const size: f32 = 112;
+    const size: f32 = @floatFromInt(edge);
     // Side sleeves have a tall outer edge and a receding inner edge. Their
     // screen-space translation stays independent of the local perspective.
     const yaw = -direction * turn * (68.0 * std.math.pi / 180.0);
     const depth = turn * 60 + stack * 12;
-    const center_x = 160 + direction * (turn * 74 + stack * 24);
-    const center_y: f32 = 120;
+    const center_x = @as(f32, @floatFromInt(x)) + direction * (turn * size * (74.0 / 112.0) + stack * size * (24.0 / 112.0));
+    const center_y: f32 = @floatFromInt(y);
     const focal: f32 = 380;
     const half_width = size / 2 * @cos(yaw);
     const half_depth = size / 2 * @sin(yaw);
@@ -141,7 +145,7 @@ pub fn project(distance: f32) Quad {
         .bottom_right = center_y + size / 2 * right_scale,
         .reciprocal_left = left_scale,
         .reciprocal_right = right_scale,
-        .reflection = 16,
+        .reflection = reflection,
     };
 }
 

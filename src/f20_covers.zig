@@ -84,7 +84,7 @@ pub const Loader = struct {
     const Result = enum { ready, missing, cancelled };
 
     fn load(self: *Loader, volume: *library.Volume, job: Cache.Load) !Result {
-        if (self.unavailable) return .missing;
+        if (self.unavailable or !std.mem.startsWith(u8, job.request.art.cache_path, "atlas:")) return .missing;
         const slot = try std.fmt.parseInt(u32, job.request.art.cache_path[6..], 10);
         if (self.file == null) {
             const entry = volume.findPath(".gain/artwork.bin") catch {

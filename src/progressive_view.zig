@@ -299,7 +299,7 @@ pub const Snapshot = struct {
         return null;
     }
 
-    pub fn trackById(self: *const Snapshot, id: u64) ?*const core.Track {
+    pub fn trackIndexById(self: *const Snapshot, id: u64) ?usize {
         var first: usize = 0;
         var end = self.track_count;
         while (first < end) {
@@ -309,7 +309,15 @@ pub const Snapshot = struct {
         }
         if (first == self.track_count) return null;
         const found = self.tracks[self.id_order[first]];
-        return if (found.id == id) found else null;
+        return if (found.id == id) self.id_order[first] else null;
+    }
+
+    pub fn trackById(self: *const Snapshot, id: u64) ?*const core.Track {
+        return self.tracks[self.trackIndexById(id) orelse return null];
+    }
+
+    pub fn albumForTrack(self: *const Snapshot, id: u64) ?*const Album {
+        return &self.albums[self.track_groups[self.trackIndexById(id) orelse return null]];
     }
 
     pub fn albumTrack(self: *const Snapshot, album: usize, row: usize) ?*const core.Track {

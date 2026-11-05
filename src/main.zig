@@ -16,6 +16,8 @@ const LcdDma = @import("f20_display.zig");
 const memory = board.memory;
 const Timer = x1000.Timer;
 const Watchdog = x1000.Watchdog;
+var retained_themes: @import("runtime_theme.zig").Store = .{};
+var usb_palette: @import("music_chrome.zig").Palette = @import("music_chrome.zig").light;
 var appearance: @import("music_chrome.zig").Appearance = .light;
 var text_loader: ?*@import("f20_text.zig").Loader = null;
 
@@ -376,7 +378,7 @@ fn runUsbMode(pmic: *@import("f20_power.zig").Controller) void {
         };
         const power = @import("battery.zig").Status.fromPower(if (diag.report.power_valid & 1 != 0) diag.report.battery_mv else 0, diag.report.power_valid & (1 << 5) != 0, diag.report.power_valid & (1 << 3) != 0);
         if (previous_phase == null or previous_phase.? != phase or !std.meta.eql(previous_power, power)) {
-            view.renderThemed(@import("canvas.zig").Canvas.init(LcdDma.framebuffer), phase, power, appearance);
+            view.renderPalette(@import("canvas.zig").Canvas.init(LcdDma.framebuffer), phase, power, usb_palette);
             _ = Display.present();
             previous_phase = phase;
             previous_power = power;
@@ -403,6 +405,10 @@ const MusicSession = struct {
     state: *@import("f20_music_ui.zig").State,
     input: *Input,
     pmic: *@import("f20_power.zig").Controller,
+    preferences_store: *@import("f20_preferences.zig").Store,
+    preferences_seen: @import("preferences.zig").Options,
+    preferences_due: ?u64 = null,
+    theme_pending: bool = true,
     return_rom: bool = false,
     playing: bool = false,
     flush_pending: bool = false,
@@ -475,6 +481,11 @@ const MusicSession = struct {
         } else self.power_started = null;
         self.state.refreshBattery(if (diag.report.power_valid & 1 != 0) diag.report.battery_mv else 0, diag.report.power_valid & (1 << 5) != 0, diag.report.power_valid & (1 << 3) != 0, now_ms);
         self.state.frame(self.now());
+        const preferences = self.state.preferences();
+        if (!std.meta.eql(preferences, self.preferences_seen)) {
+            self.preferences_seen = preferences;
+            self.preferences_due = now_ms +| 1000;
+        }
         const health = &@import("health.zig").snapshot;
         health.ui_locked = @intFromBool(self.state.locked);
         health.ui_appearance = @backingInt(self.state.appearance);
@@ -482,6 +493,26 @@ const MusicSession = struct {
         health.ui_backlight_active = @intFromBool(board.display.backlight.get());
         if (self.state.failure) return .stop;
         return result;
+    }
+
+    fn savePreferences(self: *@This(), force: bool) void {
+        const due = self.preferences_due orelse return;
+        if (!force and self.now() < due) return;
+        const value = self.state.preferences();
+        self.preferences_store.save(self.state.index.volume, value);
+        // A cooperative card operation may have serviced a newer user choice.
+        if (std.meta.eql(value, self.state.preferences())) self.preferences_due = null;
+    }
+
+    fn storageWork(context: *anyopaque, service: player.StorageService) void {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        if (service.poll(service.context)) return;
+        if (self.theme_pending and !self.playing) {
+            self.theme_pending = false;
+            @import("f20_themes.zig").load(self.state.index.volume, self.state);
+        }
+        self.savePreferences(false);
+        @import("f20_index.zig").State.run(self.state.index, service);
     }
 
     fn idlePoll(context: *anyopaque) bool {
@@ -507,6 +538,12 @@ const MusicSession = struct {
 };
 
 fn browseMusic(volume: *Volume, battery_mv: u32, attenuation: *u8, input: *Input, pmic: *@import("f20_power.zig").Controller) !void {
+    var preference_store = @import("f20_preferences.zig").Store{};
+    var preferences = preference_store.load(volume);
+    if (preference_store.journal.saved == null) {
+        preferences.appearance = appearance;
+        preferences.attenuation = attenuation.*;
+    }
     var index = try @import("f20_index.zig").State.init(volume);
     const covers = @import("f20_covers.zig").Loader.init();
     index.covers = covers;
@@ -521,7 +558,9 @@ fn browseMusic(volume: *Volume, battery_mv: u32, attenuation: *u8, input: *Input
     }
     index.request(false);
     var state = @import("f20_music_ui.zig").State{ .index = &index, .covers = &covers.cache, .text_cache = &text.cache, .attenuation = attenuation.*, .battery_mv = battery_mv, .appearance = appearance, .track_store = @import("track_selection.zig").Store.init(memory.scan_artwork.cachedSlice(u8)) };
-    var session = MusicSession{ .state = &state, .input = input, .pmic = pmic };
+    state.theme_store = retained_themes;
+    state.applyPreferences(preferences);
+    var session = MusicSession{ .state = &state, .input = input, .pmic = pmic, .preferences_store = &preference_store, .preferences_seen = preferences };
     // Font source polls occur between card transactions, so a long font read
     // can give urgent artwork a turn without adding a second storage owner.
     text.storage_work.hook = .{ .context = &session, .run = MusicSession.serviceCovers };
@@ -537,12 +576,16 @@ fn browseMusic(volume: *Volume, battery_mv: u32, attenuation: *u8, input: *Input
     }
     defer attenuation.* = state.attenuation;
     defer appearance = state.appearance;
+    defer usb_palette = state.palette();
+    defer retained_themes = state.theme_store;
     var last_flush = Timer.now();
     diag.booted();
     while (true) {
         _ = MusicSession.control(&session, state.status);
+        session.savePreferences(false);
         if (session.power_off) {
             index.finish();
+            session.savePreferences(true);
             diag.flush();
             powerOff(pmic);
         }
@@ -552,17 +595,20 @@ fn browseMusic(volume: *Volume, battery_mv: u32, attenuation: *u8, input: *Input
         }
         if (session.reconnect_pending) {
             index.finish();
+            session.savePreferences(true);
             diag.flush();
             usb.reconnect();
             return;
         }
         if (options.maintenance and session.return_rom) {
             index.finish();
+            session.savePreferences(true);
             diag.flush();
             maintenance.returnRom();
         }
         if (usb.needsHandoff()) {
             index.finish();
+            session.savePreferences(true);
             return;
         }
         if (state.requested_track) |track| {
@@ -593,7 +639,7 @@ fn browseMusic(volume: *Volume, battery_mv: u32, attenuation: *u8, input: *Input
                 .measure_stacks = options.maintenance,
                 .report_out = &measured,
                 .background = .{ .context = pmic, .poll = playbackPower },
-                .storage_work = .{ .context = &index, .run = @import("f20_index.zig").State.run },
+                .storage_work = .{ .context = &session, .run = MusicSession.storageWork },
             }, .{ .context = &session, .poll = MusicSession.control }) catch |failure| failed: {
                 diag.failed(1, failure);
                 playback_failed = true;
@@ -613,6 +659,7 @@ fn browseMusic(volume: *Volume, battery_mv: u32, attenuation: *u8, input: *Input
             // cancelled scan withdrew its preview before reclaiming memory.
             // Track changes alone do not change library membership or order.
             index.finish();
+            session.savePreferences(true);
             diag.flush();
             input.resync();
             _ = LcdDma.resetForDirect();
@@ -622,7 +669,7 @@ fn browseMusic(volume: *Volume, battery_mv: u32, attenuation: *u8, input: *Input
             diag.report.playback_handoff_max = @max(diag.report.playback_handoff_max, Timer.elapsed(handoff_began));
             continue;
         }
-        if (index.requested) @import("f20_index.zig").State.run(&index, .{ .context = &session, .poll = MusicSession.idlePoll });
+        if (index.requested or session.theme_pending) MusicSession.storageWork(&session, .{ .context = &session, .poll = MusicSession.idlePoll });
         covers.service(volume);
         text.serviceWithYield(.{ .context = &session, .poll = MusicSession.idlePoll });
         @import("f20_display.zig").idleLaunch();

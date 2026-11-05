@@ -21,3 +21,8 @@ pub const text_engine = @import("text/engine.zig");
 
 pub const usb_view = @import("usb_view.zig");
 pub const battery = @import("battery.zig");
+
+pub const preferences = @import("preferences.zig");
+pub const managed_file = @import("managed_file.zig");
+pub const runtime_theme = @import("runtime_theme.zig");
+pub const artwork = @import("artwork.zig");

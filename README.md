@@ -216,7 +216,8 @@ python3 tools/gain_metrics.py provision --sectors CARD_SECTOR_COUNT
 ```
 
 This creates `.gain/catalog.bin` (12 MiB plus a 4 KiB prefix), `artwork.bin`
-(16 MiB plus prefix) and `diagnostics.bin` (8 MiB plus prefix). Existing unknown
+(16 MiB plus prefix), `diagnostics.bin` (8 MiB plus prefix) and `settings.bin`
+(8 KiB including prefix). Existing unknown
 files and incomplete allocations are refused. It never formats or deletes music.
 
 Diagnostics use a fixed 32 KiB RAM ring and 4 KiB checksummed binary pages.
@@ -309,7 +310,7 @@ falls back to track tags. Gain is computed once per track, applied in Q24 at fin
 output and peak-limited; missing peak data never authorizes a digital boost.
 Hardware volume remains independent. Music playback uses 24-bit output to retain
 precision through normalization. Changes apply at the next track start; these
-settings are not yet persisted. Inter-track gapless playback is separate work.
+settings are saved to the owned settings journal. Inter-track gapless playback is separate work.
 
 ## Media support
 
@@ -348,8 +349,8 @@ buffers with silence before the output FIFO drains. Linked-descriptor interrupts
 wake output directly; a one-period watchdog bounds a missing notification.
 
 MP4 has direct sample lookup. MP3, FLAC and Ogg decoder seeking currently
-replays from the beginning. Choose Menu → Seek on Now Playing to preview a position,
-move with previous/next or the wheel, then Play to confirm or Back to cancel.
+replays from the beginning. Hold Previous/Next on Now Playing to preview a
+position and release to commit.
 Seeking joins the existing workers before restarting at the requested frame;
 pause remains paused across a seek. MP4 uses direct sample lookup. MP4/Ogg title parsing is available to decoder callers. Metadata and artwork support is described in the library section. Analogue
 noise/distortion, switching quality and battery savings require separate
@@ -520,18 +521,34 @@ reaching the 2 dB cap after 350 ms. A full-range hold takes about two seconds. T
 percentage. Its 113 fine positions span -64 dB to -8 dB; fractional animation
 targets preserve a distinct bar position for every half-decibel code.
 
-Settings > Themes offers Light and Dark appearances of the current production
-layout. Theme colours are per-controller values, with no parsing in drawing or
-input paths. The same palette applies to USB mode, battery chrome, Cover Flow
-background and the square progress/volume timeline. The other design-family and
-runtime theme-file experiments remain outside the production player. Appearance
-survives USB handoff in RAM, but is not yet saved across power cycles.
+Settings > Themes offers Classic, Archive, Studio, Sleeve and Sleeve Classic,
+each with Light and Dark appearances. Theme documents lower into validated native
+plans: resolved geometry, RGB565 colours, widget indexes and damage masks. Painting
+performs no JSON parsing or filesystem work. The selected palette also applies to
+USB mode and battery chrome. The transport bar is square; volume temporarily
+replaces time labels with a fading speaker icon and has no numeric percentage.
 
-A short Power press locks controls and turns off the backlight while audio and
-background indexing continue. Short Power again unlocks; that gesture cannot
-also activate a playback control. Held keys remain suppressed until released.
-Long Power retains the existing 1.5-second hardware shutdown. This pocket lock
-does not add an automatic display timeout or change panel power sequencing.
+An optional `.gain/theme.json` provides a Custom entry using the same schema as
+`src/themes/*.json`. The source is limited to 32 KiB and parsed in a bounded
+scratch arena. Invalid edits retain the last valid plan. Native firmware reads it
+while idle after mounting; the desktop app checks edits every 500 ms outside
+painting. Theme files contain data, not executable code. Run `mise run themes`
+after changing bundled JSON; tests compare the generated plans with runtime parsing.
+
+Theme, appearance, volume, ReplayGain and display timeout are saved after one
+second without changes, and flushed before shutdown or USB handoff. Persistence
+requires the host-provisioned 8 KiB `.gain/settings.bin`; existing provisioning
+creates it without changing music. Two independently checksummed journal sectors
+preserve the preceding settings if a write is interrupted. Drawing and input do
+not write the card; playback saves use its sole storage owner. Missing or corrupt
+settings use defaults, and an I/O failure disables saves until the next mount.
+
+Settings > Display offers 15, 30 (default), 60 seconds or Always On. Automatic
+sleep turns off the backlight while audio and indexing continue. Ordinary input
+wakes and performs its action; a short Power press only wakes. A short Power press
+while awake locks controls and turns off the backlight. Short Power again unlocks;
+held keys remain suppressed until released. Long Power retains the existing
+1.5-second hardware shutdown. Neither feature changes panel power sequencing.
 
 Starting a collection captures its membership and resets playback modes.
 Selecting a song starts that collection at the chosen song. Queue selections
@@ -561,14 +578,19 @@ GAIN_SD_ROOT=/tmp/gain-sd zig-out/bin/gain-sim \
 Use `.so` instead of `.dylib` on Linux. `GAIN_SD_ROOT` accepts any directory,
 including a mounted SD card or a real music folder. The adapter reads it through
 the production scanner and native tag readers, publishing progressive views on
-a background worker. It does not write to the supplied root. Playback uses a
-test transport clock; this app does not produce audio or emulate device timing.
-Artwork currently uses the renderer's missing-cover fallback.
+a background worker. Artwork uses the production image decoder and cover cache
+on a separate read-only worker. Playback uses a test transport clock; this app
+does not produce audio or emulate device timing. The app saves preferences only
+to an existing, validated `.gain/settings.bin`. Set `GAIN_UI_READ_ONLY=1` to
+disable writes when browsing an external root.
 
 The mock-card generator uses synthetic encoded audio, fictional multilingual
 tags, cover images, a playlist and preallocated firmware cache files. Generated
 cards must be outside the repo. `--mount /path/to/files` can add real files or
-folders through symlinks; the adapter still opens them read-only. No personal
+folders through symlinks; the adapter still opens media read-only. Artwork decoding runs on a separate
+read-only worker using the production image decoder and cover cache. Preferences
+write only an existing, validated `.gain/settings.bin`; `GAIN_UI_READ_ONLY=1`
+disables these writes for external-root qualification. No personal
 paths, collection data or generated cards are needed by repository tests.
 `GAIN_UI_CATALOG` optionally supplies external catalogue JSON when no SD root is
 set; it is a fixture input, not the normal library-discovery path.

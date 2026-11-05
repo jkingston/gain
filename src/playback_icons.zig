@@ -3,7 +3,7 @@
 const std = @import("std");
 const draw = @import("canvas.zig");
 
-pub const Kind = enum { shuffle, repeat_all, repeat_one };
+pub const Kind = enum { shuffle, repeat_all, repeat_one, speaker };
 pub const width = 22;
 pub const height = 16;
 const Mask = [width * height]u8;
@@ -29,6 +29,18 @@ const repeat_path = [_]Segment{
 };
 const numeral = [_]Segment{ segment(9, 7, 11, 6), segment(11, 6, 11, 10), segment(9, 10, 13, 10) };
 
+const speaker_path = [_]Segment{
+    segment(14, 5, 16, 7),   segment(16, 7, 16, 9), segment(16, 9, 14, 11),
+    segment(17, 2, 20, 5),   segment(20, 5, 21, 8), segment(21, 8, 20, 11),
+    segment(20, 11, 17, 14),
+};
+
+fn speaker(point: Point) bool {
+    const body = point.x >= 2 and point.x <= 6 and point.y >= 6 and point.y <= 10;
+    const cone = point.x >= 6 and point.x <= 11 and @abs(point.y - 8) <= 2 + (point.x - 6) * 0.6;
+    return body or cone or covered(point, &speaker_path);
+}
+
 fn covered(point: Point, path: []const Segment) bool {
     for (path) |edge| {
         const dx = edge.b.x - edge.a.x;
@@ -48,18 +60,22 @@ fn mask(comptime kind: Kind) Mask {
         var samples: u16 = 0;
         for (0..4) |sy| for (0..4) |sx| {
             const point = Point{ .x = @as(f32, @floatFromInt(x)) + (@as(f32, @floatFromInt(sx)) + 0.5) / 4, .y = @as(f32, @floatFromInt(y)) + (@as(f32, @floatFromInt(sy)) + 0.5) / 4 };
-            if (covered(point, if (kind == .shuffle) &shuffle_path else &repeat_path) or (kind == .repeat_one and covered(point, &numeral))) samples += 1;
+            if (if (kind == .speaker) speaker(point) else covered(point, if (kind == .shuffle) &shuffle_path else &repeat_path) or (kind == .repeat_one and covered(point, &numeral))) samples += 1;
         };
         result[y * width + x] = @intCast(samples * 255 / 16);
     };
     return result;
 }
 
-const masks = [_]Mask{ mask(.shuffle), mask(.repeat_all), mask(.repeat_one) };
+const masks = [_]Mask{ mask(.shuffle), mask(.repeat_all), mask(.repeat_one), mask(.speaker) };
 
 pub fn paint(c: draw.Canvas, x: i32, y: i32, kind: Kind, color: draw.Color) void {
+    paintFaded(c, x, y, kind, color, 255);
+}
+
+pub fn paintFaded(c: draw.Canvas, x: i32, y: i32, kind: Kind, color: draw.Color, opacity: u8) void {
     for (masks[@backingInt(kind)], 0..) |alpha, i| {
-        if (alpha != 0) c.blendPixel(x + @as(i32, @intCast(i % width)), y + @as(i32, @intCast(i / width)), color, alpha);
+        if (alpha != 0) c.blendPixel(x + @as(i32, @intCast(i % width)), y + @as(i32, @intCast(i / width)), color, @intCast(@as(u16, alpha) * opacity / 255));
     }
 }
 

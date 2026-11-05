@@ -22,8 +22,14 @@ extern fn fclose(*anyopaque) c_int;
 var milliseconds: u64 = 0;
 var projection: gain.progressive_view.Pair = .{};
 var cache: gain.cover_cache.Cache = .{};
+var cover_loader: @import("host_covers.zig").Loader = .{};
 var track_memory: [240 * 1024]u8 = undefined;
 var state: State = undefined;
+var preferences_store: @import("host_preferences.zig").Store = .{};
+var preferences_seen: gain.preferences.Options = .{};
+var preferences_due: ?u64 = null;
+var theme_attempted: ?u64 = null;
+var theme_poll_at: u64 = 0;
 var index: Platform.Index.State = .{};
 var catalogue: ?std.json.Parsed(core.Catalog) = null;
 var playing = false;
@@ -310,6 +316,26 @@ const Platform = struct {
 
 const State = gain.music_ui.Controller(Platform);
 
+fn loadTheme() void {
+    const path = sd_root orelse return;
+    const io = host_io.io();
+    const root = std.Io.Dir.cwd().openDir(io, path, .{}) catch return;
+    defer root.close(io);
+    const file = root.openFile(io, ".gain/theme.json", .{}) catch return;
+    defer file.close(io);
+    const stat = file.stat(io) catch return;
+    if (stat.size == 0 or stat.size > gain.runtime_theme.max_source) return;
+    const bytes = std.heap.c_allocator.alloc(u8, @intCast(stat.size)) catch return;
+    defer std.heap.c_allocator.free(bytes);
+    if ((file.readPositionalAll(io, bytes, 0) catch return) != bytes.len) return;
+    const fingerprint = core.hash(bytes);
+    if (theme_attempted != null and theme_attempted.? == fingerprint) return;
+    theme_attempted = fingerprint;
+    const scratch = std.heap.c_allocator.alloc(u8, gain.runtime_theme.scratch_bytes) catch return;
+    defer std.heap.c_allocator.free(scratch);
+    state.loadCustomTheme(bytes, scratch) catch return;
+}
+
 fn loadCatalogue() !void {
     const path = getenv("GAIN_UI_CATALOG") orelse return;
     const file = fopen(path, "rb") orelse return error.OpenCatalogue;
@@ -361,8 +387,15 @@ fn init(at: u64) callconv(.c) void {
         std.debug.print("Player UI catalogue: {s}\n", .{@errorName(failure)});
     };
     state = .{ .index = &index, .covers = &cache, .text_cache = &text_cache, .track_store = .init(&track_memory) };
+    state.applyPreferences(preferences_store.load(sd_root, host_io.io(), getenv("GAIN_UI_READ_ONLY") != null));
+    theme_attempted = null;
+    theme_poll_at = at +| 500;
+    loadTheme();
+    preferences_seen = state.preferences();
+    preferences_due = null;
     index.requested = sd_root != null;
     startText();
+    cover_loader.start(sd_root, host_io.io(), &cache, &stopping, lock, unlock);
 }
 
 fn apply(command: media.PlaybackCommand, at: u64) void {
@@ -442,7 +475,7 @@ fn frame(pixels: *api.Pixels, at: u64) callconv(.c) bool {
         defer unlock();
         milliseconds = at;
         if (!usb_dirty) return false;
-        gain.usb_view.renderThemed(gain.canvas.Canvas.init(pixels), phase, power, state.appearance);
+        gain.usb_view.renderPalette(gain.canvas.Canvas.init(pixels), phase, power, state.palette());
         usb_dirty = false;
         return true;
     }
@@ -469,6 +502,19 @@ fn frame(pixels: *api.Pixels, at: u64) callconv(.c) bool {
         }
         transportStatus(at);
     }
+    if (at >= theme_poll_at) {
+        theme_poll_at = at +| 500;
+        loadTheme();
+    }
+    const preferences = state.preferences();
+    if (!std.meta.eql(preferences, preferences_seen)) {
+        preferences_seen = preferences;
+        preferences_due = at +| 1000;
+    }
+    if (preferences_due) |due| if (at >= due) {
+        preferences_store.save(preferences);
+        preferences_due = null;
+    };
     state.frame(at);
     if (presented_revision == Platform.Display.revision) return false;
     pixels.* = Platform.Display.presented;
@@ -478,6 +524,7 @@ fn frame(pixels: *api.Pixels, at: u64) callconv(.c) bool {
 
 fn deinit() callconv(.c) void {
     stopping.store(true, .release);
+    cover_loader.close();
     if (scan_thread) |thread| thread.join();
     scan_thread = null;
     if (text_thread) |thread| thread.join();
@@ -488,6 +535,8 @@ fn deinit() callconv(.c) void {
     sd_catalogue = null;
     if (catalogue) |*parsed| parsed.deinit();
     catalogue = null;
+    preferences_store.save(state.preferences());
+    preferences_store.close();
     host_io.deinit();
 }
 
@@ -609,4 +658,41 @@ export fn gain_player_queue_item(position: u32) callconv(.c) u64 {
     lock();
     defer unlock();
     return state.track_store.order.at(position) orelse 0;
+}
+
+const PreferencesStatus = extern struct {
+    version: u32 = 1,
+    theme: u32,
+    appearance: u32,
+    attenuation: u32,
+    replay_gain: u32,
+    timeout: u32,
+    asleep: u32,
+    locked: u32,
+    available: u32,
+    failed: u32,
+    theme_revision: u32,
+    custom_available: u32,
+    covers_ready: u32,
+    cover_failures: u32,
+};
+
+export fn gain_player_preferences_status(output: *PreferencesStatus) callconv(.c) void {
+    lock();
+    defer unlock();
+    output.* = .{
+        .theme = @backingInt(state.theme_family),
+        .appearance = @backingInt(state.appearance),
+        .attenuation = state.attenuation,
+        .replay_gain = @backingInt(state.replay_gain.mode),
+        .timeout = @backingInt(state.display_timeout),
+        .asleep = @intFromBool(state.display_asleep),
+        .locked = @intFromBool(state.locked),
+        .available = @intFromBool(preferences_store.file != null),
+        .failed = @intFromBool(preferences_store.disabled),
+        .theme_revision = state.theme_store.revision,
+        .custom_available = @intFromBool(state.theme_store.has_custom),
+        .covers_ready = @popCount(cache.ready_mask.load(.acquire)),
+        .cover_failures = cache.failed_loads,
+    };
 }

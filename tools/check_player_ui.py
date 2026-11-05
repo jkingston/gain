@@ -101,14 +101,21 @@ class PlaybackStatus(c.Structure):
     )] + [("played_frames", c.c_uint64), ("total_frames", c.c_uint64)]
 
 
+class PreferencesStatus(c.Structure):
+    _fields_ = [(name, c.c_uint32) for name in (
+        "version", "theme", "appearance", "attenuation", "replay_gain", "timeout", "asleep", "locked", "available", "failed", "theme_revision", "custom_available", "covers_ready", "cover_failures"
+    )]
+
+
 class Player:
-    def __init__(self, app, root):
+    def __init__(self, app, root, persist=False):
         self.module = c.CDLL(str(app))
         self.module.gain_app_api.restype = c.POINTER(Api)
         self.module.gain_player_ui_status.argtypes = [c.POINTER(Status)]
         self.module.gain_player_playback_status.argtypes = [c.POINTER(PlaybackStatus)]
         self.module.gain_player_queue_item.argtypes = [c.c_uint32]
         self.module.gain_player_queue_item.restype = c.c_uint64
+        self.module.gain_player_preferences_status.argtypes = [c.POINTER(PreferencesStatus)]
         self.module.gain_player_environment.argtypes = [c.c_uint32] * 4
         self.module.gain_player_environment.restype = c.c_bool
         self.api = self.module.gain_app_api().contents
@@ -122,12 +129,21 @@ class Player:
             raise RuntimeError("Incompatible simulator app")
         self.pixels = Pixels()
         self.now = 0
+        self.old_read_only = os.environ.get("GAIN_UI_READ_ONLY")
+        if persist:
+            os.environ.pop("GAIN_UI_READ_ONLY", None)
+        else:
+            os.environ["GAIN_UI_READ_ONLY"] = "1"
         self.old_root = os.environ.get("GAIN_SD_ROOT")
         os.environ["GAIN_SD_ROOT"] = str(root)
         self.api.init(0)
 
     def close(self):
         self.api.deinit()
+        if self.old_read_only is None:
+            os.environ.pop("GAIN_UI_READ_ONLY", None)
+        else:
+            os.environ["GAIN_UI_READ_ONLY"] = self.old_read_only
         if self.old_root is None:
             os.environ.pop("GAIN_SD_ROOT", None)
         else:
@@ -147,6 +163,12 @@ class Player:
         result = {name: getattr(value, name) for name, _ in PlaybackStatus._fields_}
         assert result["version"] == 1
         return result
+
+    def preferences(self):
+        value = PreferencesStatus()
+        self.module.gain_player_preferences_status(c.byref(value))
+        assert value.version == 1 and not value.failed
+        return {name: getattr(value, name) for name, _ in PreferencesStatus._fields_}
 
     def queue(self):
         return [self.module.gain_player_queue_item(i) for i in range(self.playback()["count"])]
@@ -381,6 +403,91 @@ def qualify(app, root, synthetic=False):
         player.close()
 
 
+def qualify_preferences_and_themes(app, root):
+    """Writable qualification is restricted to this generated temporary card."""
+    player = Player(app, root, persist=True)
+    try:
+        player.settle_scan()
+        assert player.preferences()["available"]
+        player.tap("select", "menu", "select", "select")  # Play, then pause.
+        queue = player.queue()
+        deadline = time.monotonic() + 5
+        while player.preferences()["covers_ready"] == 0:
+            player.frame()
+            if time.monotonic() > deadline:
+                raise RuntimeError("Synthetic artwork was not prepared")
+            time.sleep(0.004)
+        assert player.preferences()["cover_failures"] == 0
+        current = player.status()["playing_id"]
+        player.home()
+        player.tap("next", "select", "next", "next", "select")
+        for family in range(5):
+            player.tap(*(["previous"] * 7 + ["next"] * family + ["select"]))
+            assert player.preferences()["theme"] == family
+            assert player.queue() == queue and player.status()["playing_id"] == current
+            player.tap(*(["previous"] * 7 + ["next"] * 5 + ["select"]))
+            assert player.preferences()["appearance"] == (family + 1) % 2
+        player.tap("back", "next", "select")  # Display timeout.
+        player.tap("previous", "previous", "previous", "select")
+        assert player.preferences()["timeout"] == 0
+        player.frame(1100)  # One coalesced save after the last setting change.
+        expected = player.preferences()
+    finally:
+        player.close()
+    journal = (root / ".gain/settings.bin").read_bytes()
+    reader = Player(app, root)  # Ordinary qualification stays read-only.
+    try:
+        reader.settle_scan()
+        reader.tap("volume_down")
+    finally:
+        reader.close()
+    assert (root / ".gain/settings.bin").read_bytes() == journal
+    player = Player(app, root, persist=True)
+    try:
+        player.settle_scan()
+        actual = player.preferences()
+        assert all(actual[key] == expected[key] for key in ("theme", "appearance", "attenuation", "replay_gain", "timeout"))
+        player.frame(15000)
+        assert player.preferences()["asleep"] and not player.preferences()["locked"]
+        player.tap("next")
+        assert not player.preferences()["asleep"] and player.status()["selection"] == 1
+        player.frame(15000)
+        player.tap("power")
+        assert not player.preferences()["asleep"] and not player.preferences()["locked"]
+        player.tap("power")
+        assert player.preferences()["locked"] and all(pixel == 0 for pixel in player.pixels)
+        player.tap("power")
+        assert not player.preferences()["locked"]
+        custom = json.loads((ROOT / "src/themes/archive-light.json").read_text())
+        custom["name"] = "Custom test"
+        path = root / ".gain/theme.json"
+        path.write_text(json.dumps(custom))
+        player.frame(501)
+        assert player.preferences()["custom_available"]
+        player.home()
+        player.tap("next", "select", "next", "next", "select")
+        player.tap(*(["previous"] * 7 + ["next"] * 6 + ["select"]))
+        assert player.preferences()["theme"] == 5
+        player.home()
+        player.tap("select", "select", "next")
+        selected = player.status()["selected_id"]
+        revision = player.preferences()["theme_revision"]
+        custom["palette"]["paper"] = "#101719"
+        path.write_text(json.dumps(custom))
+        player.frame(501)
+        assert player.preferences()["theme_revision"] > revision
+        assert player.status()["selected_id"] == selected
+        revision = player.preferences()["theme_revision"]
+        path.write_text("{}")
+        player.frame(501)
+        assert player.preferences()["theme_revision"] == revision
+        assert player.status()["selected_id"] == selected
+        return {"passed": True, "families": 5, "appearance_variants": 10, "persistent_settings": True,
+                "timeout_and_lock": True, "runtime_custom_reload": True, "invalid_theme_retains_plan": True}
+    finally:
+        player.close()
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--app", type=Path, required=True)
@@ -398,6 +505,7 @@ def main():
             root = Path(directory) / "sd"
             create(root, albums=4, tracks_per_album=48)
             result = qualify(app, root, synthetic=True)
+            result["preferences_and_themes"] = qualify_preferences_and_themes(app, root)
             # Reload/deinit must join a scan even before its first publication.
             interrupted = Player(app, root)
             interrupted.frame()

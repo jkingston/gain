@@ -74,7 +74,7 @@ pub const Cache = struct {
             };
         }
         for (requests, keys) |requested, key| {
-            if (requested.id == 0 or !requested.eligible or self.find(key, ready) != null or !std.mem.startsWith(u8, requested.art.cache_path, "atlas:")) continue;
+            if (requested.id == 0 or !requested.eligible or self.find(key, ready) != null or requested.art.cache_path.len == 0) continue;
             // An album's new artwork supersedes its old pixels, including a
             // negative entry. Do not retain both identities in separate slots.
             for (self.ids, 0..) |id, slot| if (id == requested.id and protected & slotBit(slot) == 0) return .{ .request = requested, .slot = slot };
@@ -508,4 +508,16 @@ test "obsolete preparation is cancelled without publishing missing art or starvi
         try std.testing.expect(queue.next(cache, cache.requested, cache.request_revision.load(.acquire)) == null);
         try std.testing.expectEqual(0, cache.failed_loads);
     }
+}
+
+test "cache scheduling is independent of a storage adapter's artwork locator scheme" {
+    var cache: Cache = .{};
+    cache.request(0, 1, .{});
+    try std.testing.expect(cache.nextLoad(cache.requested) == null);
+    cache.request(0, 1, .{ .key = "mock image", .cache_path = "image" });
+    const load = cache.nextLoad(cache.requested).?;
+    try std.testing.expectEqual(@as(u64, 1), load.request.id);
+    cache.begin(load);
+    cache.publishMissing(load);
+    try std.testing.expect(cache.nextLoad(cache.requested) == null);
 }

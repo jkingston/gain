@@ -1,9 +1,6 @@
 //! Shared music interaction, animation and rasterization. Platform supplies
 //! presentation, indexing and diagnostics; rendering performs no storage I/O.
 const std = @import("std");
-const draw = @import("canvas.zig");
-
-const C = draw.Canvas;
 const core = @import("library.zig");
 const views = @import("progressive_view.zig");
 const covers = @import("cover_cache.zig");
@@ -18,7 +15,7 @@ const battery_status = @import("battery.zig");
 
 pub const Input = enum(u3) { select, back, home, up, down, volume_up, volume_down, menu };
 
-pub const Screen = enum { home, albums, tracks, player, library, artists, artist, settings, music, folders, themes };
+pub const Screen = enum { home, albums, tracks, player, library, artists, artist, settings, music, folders, themes, display };
 pub const TrackScope = enum { album, artist, all, queue, folder };
 const MusicItem = enum { albums, artists, songs, shuffle_all };
 const music_items = [_]MusicItem{ .albums, .artists, .songs, .shuffle_all };
@@ -44,9 +41,8 @@ const Location = struct {
     selected_id: u64,
     track_anchor: u64,
 };
-const visible_rows = 5;
-
-const Layout = chrome.Layout;
+const theme = @import("runtime_theme.zig");
+const builtin_theme_count = @import("builtin_themes.zig").names.len;
 
 const CoverModel = struct {
     id: u64,
@@ -72,6 +68,16 @@ pub fn Controller(comptime Platform: type) type {
         history: [8]Location = undefined,
         history_count: usize = 0,
         appearance: chrome.Appearance = .light,
+        theme_store: @import("runtime_theme.zig").Store = .{},
+        rendered_theme_revision: u32 = 0,
+        rendered_track_id: u64 = 0,
+        rendered_phase: media.PlaybackPhase = .preparing,
+        rendered_scan_phase: []const u8 = "",
+        theme_family: @import("preferences.zig").Theme = .classic,
+        display_timeout: @import("preferences.zig").Timeout = .seconds30,
+        display_asleep: bool = false,
+        last_activity: ?u64 = null,
+        power_wake_only: bool = false,
         locked: bool = false,
         power_at: ?u64 = null,
         seek_frame: ?u64 = null,
@@ -551,8 +557,9 @@ pub fn Controller(comptime Platform: type) type {
                     .folder => self.collectionCount(.{ .scope = .folder, .directory = self.folderPath() }),
                 },
                 .library => 2,
-                .settings => 3,
-                .themes => 2,
+                .settings => 4,
+                .display => 4,
+                .themes => builtin_theme_count + 2,
                 .folders => self.folder_view.count,
                 .player => 0,
             };
@@ -567,17 +574,14 @@ pub fn Controller(comptime Platform: type) type {
             };
         }
 
-        fn visibleRows(_: *const State) usize {
-            // Reserve the scan footer before laying out full-height rows.
-            // Retain this iteration's five-row maximum and large headings.
-            const bottom: usize = if (diag.report.scan_active != 0) Layout.footer_top else 240;
-            return @min(visible_rows, (bottom - Layout.row_top) / Layout.row_height);
+        fn visibleRows(self: *const State) usize {
+            return @max(1, self.theme_store.current().pages[@backingInt(self.page())].capacity);
         }
 
         fn ensureVisible(self: *State) void {
-            const count = self.visibleRows();
-            if (self.selection < self.first) self.first = self.selection;
-            if (self.selection >= self.first + count) self.first = self.selection - (count - 1);
+            if (self.menu != null) return;
+            const span = self.theme_store.current().pages[@backingInt(self.page())];
+            self.first = navigation.firstVisible(self.selection, self.first, self.visibleRows(), span.columns);
         }
 
         pub fn cancelInput(self: *State, held: u8) void {
@@ -586,8 +590,37 @@ pub fn Controller(comptime Platform: type) type {
             self.raw_held = held;
         }
 
+        pub fn preferences(self: *const State) @import("preferences.zig").Options {
+            return .{ .theme = self.theme_family, .appearance = self.appearance, .attenuation = self.attenuation, .replay_gain = self.replay_gain.mode, .timeout = self.display_timeout };
+        }
+
+        pub fn applyPreferences(self: *State, options: @import("preferences.zig").Options) void {
+            self.theme_family = options.theme;
+            self.appearance = options.appearance;
+            self.theme_store.select(options.theme, options.appearance);
+            self.attenuation = options.attenuation;
+            self.replay_gain.mode = options.replay_gain;
+            self.display_timeout = options.timeout;
+            self.dirty = true;
+            self.major = true;
+            self.rendered_screen = null;
+            self.pending_frame.ready = false;
+        }
+
+        fn activity(self: *State, now: u64) void {
+            self.last_activity = now;
+            if (!self.display_asleep) return;
+            self.display_asleep = false;
+            self.rendered_screen = null;
+            self.pending_frame.ready = false;
+            self.dirty = true;
+            self.major = true;
+        }
+
         pub fn toggleLock(self: *State) void {
             self.locked = !self.locked;
+            self.display_asleep = false;
+            self.last_activity = null;
             self.cancelInput(self.raw_held);
             self.rendered_screen = null;
             self.pending_frame.ready = false;
@@ -601,22 +634,26 @@ pub fn Controller(comptime Platform: type) type {
             if (key == .power) {
                 if (pressed) {
                     self.power_at = now;
+                    self.power_wake_only = self.display_asleep;
+                    if (!self.locked) self.activity(now);
                 } else if (self.power_at) |at| {
                     self.power_at = null;
                     // The hardware session owns long-Power shutdown. A short
                     // release exclusively toggles the pocket lock.
-                    if (now -| at < 1500) {
+                    if (now -| at < 1500 and !self.power_wake_only) {
                         self.toggleLock();
                     }
                 }
                 return .none;
             }
             if (self.locked) return .none;
+            if (pressed) self.activity(now);
             return self.act(self.input_policy.edge(key, pressed, now, self.inputContext(), if (self.menu != null) self.menu.?.count() else if (self.jump_position != null or (self.screen == .player and self.status.total_frames != 0)) 21 else self.rows()), now, playing);
         }
 
         pub fn wheel(self: *State, direction: i2, now: u64, playing: bool) media.PlaybackCommand {
             if (self.locked) return .none;
+            self.activity(now);
             self.reconcile();
             return self.act(self.input_policy.wheel(direction, now, self.inputContext(), if (self.menu != null) self.menu.?.count() else if (self.jump_position != null) 8 else if (self.screen == .player and self.status.total_frames != 0) 21 else self.rows()), now, playing);
         }
@@ -625,6 +662,7 @@ pub fn Controller(comptime Platform: type) type {
             self.reconcile();
             self.raw_held = held;
             if (self.locked) return .none;
+            if (held != 0) self.activity(now);
             return self.act(self.input_policy.tick(now, self.inputContext(), if (self.menu != null) self.menu.?.count() else if (self.jump_position != null) 8 else if (self.screen == .player and self.status.total_frames != 0) 21 else self.rows(), held), now, playing);
         }
 
@@ -746,15 +784,17 @@ pub fn Controller(comptime Platform: type) type {
             const minimum_attenuation = 16;
             const maximum_attenuation = 128;
             const next: u8 = @intCast(std.math.clamp(@as(i16, self.attenuation) - steps, minimum_attenuation, maximum_attenuation));
-            if (next == self.attenuation) return .none;
-            self.attenuation = next;
-            if (self.screen == .player) self.dirty = true;
+            const changed = next != self.attenuation;
             const level = @as(f32, @floatFromInt(maximum_attenuation - next)) * 100 / (maximum_attenuation - minimum_attenuation);
             self.animation.request(now, level);
+            if (!changed) return .none;
+            self.attenuation = next;
+            if (self.screen == .player) self.dirty = true;
             return .{ .set_attenuation = next };
         }
 
         pub fn handle(self: *State, event: Input, now: u64, playing: bool) media.PlaybackCommand {
+            self.activity(now);
             self.reconcile();
             if (event != .volume_up and event != .volume_down) self.dirty = true;
             if (event == .menu) {
@@ -841,14 +881,21 @@ pub fn Controller(comptime Platform: type) type {
                     },
                     .library => self.index.request(self.selection == 1),
                     .themes => {
-                        self.appearance = @fromBackingInt(@intCast(self.selection));
-                        self.rendered_screen = null;
-                        self.pending_frame.ready = false;
-                        self.major = true;
+                        if (self.selection < builtin_theme_count) self.theme_family = @fromBackingInt(@intCast(self.selection)) else if (self.selection == builtin_theme_count) {
+                            if (self.theme_family != .custom) self.appearance = if (self.appearance == .light) .dark else .light;
+                        } else if (self.theme_store.has_custom) self.theme_family = .custom;
+                        self.theme_store.select(self.theme_family, self.appearance);
+                        self.themeChanged();
                     },
-                    .settings => if (self.selection == 2) {
+                    .display => {
+                        self.display_timeout = @fromBackingInt(@intCast(self.selection));
+                    },
+                    .settings => if (self.selection == 3) {
+                        self.push(.display);
+                        self.selection = @backingInt(self.display_timeout);
+                    } else if (self.selection == 2) {
                         self.push(.themes);
-                        self.selection = @backingInt(self.appearance);
+                        self.selection = if (self.theme_family == .custom) builtin_theme_count + 1 else @backingInt(self.theme_family);
                     } else if (self.selection == 1) {
                         self.push(.library);
                     } else {
@@ -969,8 +1016,15 @@ pub fn Controller(comptime Platform: type) type {
         }
 
         pub fn frame(self: *State, now: u64) void {
-            if (@hasDecl(lcd, "setAwake")) lcd.setAwake(!self.locked);
-            if (self.locked) {
+            if (self.last_activity == null) self.last_activity = now;
+            const timeout = self.display_timeout.milliseconds();
+            if (!self.locked and !self.display_asleep and self.raw_held == 0 and timeout != 0 and now -| self.last_activity.? >= timeout) {
+                self.display_asleep = true;
+                self.cancelInput(0);
+                self.pending_frame.ready = false;
+            }
+            if (@hasDecl(lcd, "setAwake")) lcd.setAwake(!self.locked and !self.display_asleep);
+            if (self.locked or self.display_asleep) {
                 // Drain an already-owned transfer, but submit no new frames.
                 // The audio/storage executive keeps running independently.
                 if (lcd.poll() == .failed) self.fail(lcd.last_failure orelse error.DisplayBusy);
@@ -987,6 +1041,11 @@ pub fn Controller(comptime Platform: type) type {
             }
             self.reconcile();
             self.ensureVisible();
+            const dependencies = self.theme_store.current().pages[@backingInt(self.page())];
+            if (dependencies.flags & theme.Flags.track_metadata != 0 and self.rendered_track_id != if (self.playing_track) |track| track.id else @as(u64, 0)) {
+                self.dirty = true;
+                self.major = true;
+            }
             const defer_cosmetic = self.screen == .player and self.animation.isAnimating(now);
             if (!defer_cosmetic and self.covers.revision.load(.acquire) != self.cover_revision) {
                 self.cover_revision = self.covers.revision.load(.acquire);
@@ -1004,15 +1063,19 @@ pub fn Controller(comptime Platform: type) type {
             if (self.last_visited != diag.report.scan_visited or self.last_scan_total != diag.report.scan_total) {
                 self.last_visited = diag.report.scan_visited;
                 self.last_scan_total = diag.report.scan_total;
+                if (self.screen == .player and dependencies.scan_widgets != 0) {
+                    self.dirty = true;
+                    self.major = true;
+                }
                 // Now Playing shows activity, not a visited-track count. The
                 // carousel's one-pixel rule changes only at whole pixels.
-                if (diag.report.scan_active != 0 and self.screen != .player and (self.screen != .albums or albumProgressWidth() != self.rendered_scan_width)) self.dirty = true;
+                if (diag.report.scan_active != 0 and self.screen != .player and (self.screen != .albums or self.albumProgressWidth() != self.rendered_scan_width)) self.dirty = true;
             }
-            if ((self.screen == .library or (diag.report.scan_active != 0 and self.screen != .player and self.screen != .albums)) and !std.mem.eql(u8, self.last_scan_phase, self.index.phase)) {
+            if ((dependencies.flags & theme.Flags.scan_phase != 0) and !std.mem.eql(u8, self.last_scan_phase, self.index.phase)) {
                 self.last_scan_phase = self.index.phase;
                 self.dirty = true;
             }
-            if (self.screen == .player and self.last_playback_phase != self.status.phase) {
+            if ((self.screen == .player or dependencies.flags & theme.Flags.playback_phase != 0) and self.last_playback_phase != self.status.phase) {
                 self.last_playback_phase = self.status.phase;
                 self.major = true;
                 self.dirty = true;
@@ -1072,7 +1135,7 @@ pub fn Controller(comptime Platform: type) type {
             Platform.trace(.render, Platform.now(), draw_ticks);
             diag.report.ui_draw_max = @max(diag.report.ui_draw_max, draw_ticks);
             const full = self.major or self.screen != .player or modal;
-            self.frozen = lcd.freeze(if (full) .{ .x = 0, .y = 0, .width = 320, .height = 240 } else .{ .x = 0, .y = 188, .width = 320, .height = 42 }) catch |failure| {
+            self.frozen = lcd.freeze(if (full) .{ .x = 0, .y = 0, .width = 320, .height = 240 } else .{ .x = 0, .y = @intCast(self.theme_store.current().transport.y), .width = 320, .height = self.theme_store.current().transport.h }) catch |failure| {
                 self.fail(failure);
                 return;
             };
@@ -1104,37 +1167,6 @@ pub fn Controller(comptime Platform: type) type {
             return true;
         }
 
-        fn label(c: C, x: i32, y: i32, w: u16, text: []const u8, role: draw.fonts.Role, color: draw.Color) void {
-            c.ellipsis(x, y, w, text, role, color);
-        }
-
-        fn centered(c: C, y: i32, width: u16, text: []const u8, role: draw.fonts.Role, color: draw.Color) void {
-            c.centered(@divTrunc(320 - @as(i32, width), 2), y, width, text, role, color);
-        }
-
-        fn menuRow(self: *State, c: C, row: usize, name: []const u8, value: []const u8, highlighted: bool, chevron: bool) void {
-            const accent = self.appearance.palette().accent;
-            const ink = self.appearance.palette().ink;
-            const muted = self.appearance.palette().muted;
-            const y: i32 = Layout.row_top + @as(i32, @intCast(row)) * Layout.row_height;
-            if (highlighted) self.highlightRow(c, y);
-            const color = if (highlighted) accent else ink;
-            label(c, Layout.left, Layout.rowText(y, .reading), if (value.len == 0) 268 else 190, name, .reading, color);
-            if (value.len != 0) c.right(Layout.right, Layout.rowText(y, .reading), value, .reading, color);
-            if (chevron) c.chevron(Layout.right - 6, y + 12, muted);
-        }
-
-        fn playbackModes(self: *const State, c: C) void {
-            const icons = @import("playback_icons.zig");
-            const color = self.appearance.palette().muted;
-            if (self.track_store.order.shuffled) icons.paint(c, 252, 162, .shuffle, color);
-            if (self.track_store.order.repeat != .off) icons.paint(c, 281, 162, if (self.track_store.order.repeat == .one) .repeat_one else .repeat_all, color);
-        }
-
-        fn header(self: *State, c: C, title: []const u8, detail: []const u8) void {
-            chrome.headerThemed(c, title, detail, battery_status.Status.fromPower(self.battery_mv, self.charging, self.external_power), self.appearance.palette());
-        }
-
         fn requestCovers(self: *State, now: u64) void {
             const view = self.snapshot();
             const plan = cover_loading.plan(.{
@@ -1159,355 +1191,272 @@ pub fn Controller(comptime Platform: type) type {
             self.cover_plan_revision = view.revision;
         }
 
-        fn highlightRow(self: *const State, c: C, top: i32) void {
-            const selected = self.appearance.palette().selected;
-            c.rounded(Layout.left - 8, top, Layout.width + 16, Layout.row_height, 4, selected);
+        fn page(self: *const State) @import("runtime_theme.zig").Page {
+            if (self.menu != null) return .menu;
+            if (self.jump_position != null) return .jump;
+            return switch (self.screen) {
+                .home => .home,
+                .albums => .albums,
+                .tracks, .folders => .tracks,
+                .player => .player,
+                .library => .library,
+                .artists => .artists,
+                .artist => .artist,
+                .music, .settings, .themes, .display => .menu,
+            };
         }
 
-        fn image(self: *State, c: C, album: views.Album, x: i32, y: i32, w: u16, h: u16, lean: i32) void {
-            const line = self.appearance.palette().line;
-            const tile = self.covers.get(album.id, album.art) orelse {
-                c.rounded(x, y, w, h, 2, line);
-                return;
+        pub fn palette(self: *const State) chrome.Palette {
+            const plan = self.theme_store.current();
+            return .{ .paper = plan.paper, .ink = plan.ink, .muted = plan.muted, .line = plan.line, .accent = plan.accent, .selected = plan.selected };
+        }
+
+        fn themeChanged(self: *State) void {
+            self.cancelInput(self.input_policy.held);
+            self.rendered_screen = null;
+            self.pending_frame.ready = false;
+            self.ensureVisible();
+            self.dirty = true;
+            self.major = true;
+        }
+
+        pub fn loadCustomTheme(self: *State, source: []const u8, scratch: []u8) !void {
+            try self.theme_store.load(source, scratch);
+            self.theme_store.select(self.theme_family, self.appearance);
+            self.themeChanged();
+        }
+
+        fn context(self: *State, now: u64, items: *[12]@import("music_widgets.zig").Item, detail_buffer: []u8, want_art: bool) @import("music_widgets.zig").Context {
+            const view = self.snapshot();
+            const artist = if (self.artistRank()) |rank| view.artists[rank] else null;
+            const menu = self.menu;
+            const title: []const u8 = if (menu) |actions| if (actions.kind == .player) "Playback" else switch (actions.collection.scope) {
+                .album => if (view.albumIndex(actions.collection.album)) |rank| view.albums[rank].title else "Album",
+                .artist => if (view.artistIndex(actions.collection.artist)) |rank| view.artists[rank].name else "Artist",
+                .folder => if (actions.collection.directory.len == 0) "Folders" else std.fs.path.basename(actions.collection.directory),
+                else => "Music",
+            } else if (self.jump_position != null) "Jump" else switch (self.screen) {
+                .home => "Home",
+                .music => "Music",
+                .albums => "Albums",
+                .artists => "Artists",
+                .artist => if (artist) |value| value.name else "Artist",
+                .tracks => switch (self.track_scope) {
+                    .all => "All Songs",
+                    .queue => "Queue",
+                    .artist => if (artist) |value| value.name else "Songs",
+                    .album => if (self.albumRank()) |rank| view.albums[rank].title else "Songs",
+                    .folder => "Songs",
+                },
+                .player => if (self.status.phase == .paused) "Paused" else "Now Playing",
+                .library => "Library",
+                .settings => "Settings",
+                .themes => "Themes",
+                .display => "Display timeout",
+                .folders => if (self.folder_path_len == 0) "Folders" else std.fs.path.basename(self.folderPath()),
             };
-            if (tile.width == 0 or tile.height == 0) {
-                c.rounded(x, y, w, h, 2, line);
-                return;
-            }
-            for (0..w) |xx| {
-                const dx = x + @as(i32, @intCast(xx));
-                if (dx < 0 or dx >= 320) continue;
-                const source_x = xx * flow_scene.texture_edge / w;
-                if (source_x < tile.x or source_x >= tile.x + tile.width) continue;
-                const slope = if (lean == 0) 0 else @divTrunc((@as(i32, @intCast(xx)) - @as(i32, w / 2)) * lean, @as(i32, w));
-                const top = y + slope;
-                const start: usize = @intCast(@max(0, -top));
-                const end: usize = @intCast(@max(0, @min(@as(i32, h), 240 - top)));
-                if (start >= end) continue;
-                var source_y = start * flow_scene.texture_edge / h;
-                var remainder = start * flow_scene.texture_edge % h;
-                var destination: usize = @intCast((top + @as(i32, @intCast(start))) * 320 + dx);
-                for (start..end) |_| {
-                    if (source_y >= tile.y and source_y < tile.y + tile.height) c.surface.pixels[destination] = tile.pixels[source_x * flow_scene.texture_edge + source_y];
-                    destination += 320;
-                    remainder += flow_scene.texture_edge;
-                    while (remainder >= h) {
-                        remainder -= h;
-                        source_y += 1;
+            const detail: []const u8 = if (menu == null and self.jump_position == null and self.screen == .albums) std.fmt.bufPrint(detail_buffer, "{d} / {d}", .{ if (view.album_count == 0) 0 else self.selection + 1, view.album_count }) catch "" else "";
+            const selection = if (menu) |actions| actions.selection else self.selection;
+            const first = if (menu != null) navigation.firstVisible(selection, 0, self.visibleRows(), self.theme_store.current().pages[@backingInt(self.page())].columns) else self.first;
+            const count = if (menu) |actions| actions.count() else self.rows();
+            var length: usize = 0;
+            if (self.page() != .player and self.page() != .albums and self.page() != .jump) {
+                const limit = @min(count, first + self.visibleRows());
+                for (first..limit) |position| {
+                    var item: @import("music_widgets.zig").Item = .{};
+                    if (menu) |actions| {
+                        if (actions.kind == .player) switch (position) {
+                            0 => item = .{ .name = "Queue", .chevron = true },
+                            1 => item = .{ .name = "Shuffle", .detail = if (self.track_store.order.shuffled) "On" else "Off" },
+                            2 => item = .{ .name = "Repeat", .detail = switch (self.track_store.order.repeat) {
+                                .off => "Off",
+                                .all => "All",
+                                .one => "One",
+                            } },
+                            else => unreachable,
+                        } else item.name = switch (position) {
+                            0 => "Play All",
+                            1 => "Shuffle",
+                            else => "Jump",
+                        };
+                    } else switch (self.screen) {
+                        .home => item = .{ .name = switch (position) {
+                            0 => "Music",
+                            1 => "Settings",
+                            else => "Now Playing",
+                        }, .chevron = true },
+                        .music => item = .{ .name = switch (music_items[position]) {
+                            .albums => "Albums",
+                            .artists => "Artists",
+                            .songs => "Songs",
+                            .shuffle_all => "Shuffle All",
+                        }, .chevron = music_items[position] != .shuffle_all },
+                        .artists => item.name = view.artists[position].name,
+                        .artist => item.name = if (position == 0) "All Songs" else view.albums[artist.?.first_album + position - 1].title,
+                        .tracks => if (self.trackAt(position)) |track| {
+                            item.name = track.meta.title;
+                            if (self.track_scope == .queue) item.secondary = track.meta.artist;
+                        } else {
+                            item.name = "Unavailable track";
+                        },
+                        .folders => if (self.folderRow(position)) |row| {
+                            item.name = std.fs.path.basename(row.path);
+                            item.chevron = row.directory;
+                            if (!row.directory and self.snapshot().trackByPath(row.path) == null) item.detail = "Pending";
+                        },
+                        .library => item.name = if (position == 0) "Update library" else "Verify library",
+                        .settings => item = switch (position) {
+                            0 => .{ .name = "ReplayGain", .detail = switch (self.replay_gain.mode) {
+                                .off => "Off",
+                                .track => "Track",
+                                .album => "Album",
+                            } },
+                            1 => .{ .name = "Library", .chevron = true },
+                            2 => .{ .name = "Themes", .chevron = true },
+                            else => .{ .name = "Display", .chevron = true },
+                        },
+                        .themes => {
+                            if (position < builtin_theme_count) item = .{ .name = @import("builtin_themes.zig").names[position], .detail = if (position == @backingInt(self.theme_family)) "Active" else "" } else if (position == builtin_theme_count) item = .{ .name = "Appearance", .detail = if (self.theme_family == .custom) "Theme" else if (self.appearance == .light) "Light" else "Dark" } else item = .{ .name = "Custom", .detail = if (!self.theme_store.has_custom) "Unavailable" else if (self.theme_family == .custom) "Active" else "" };
+                        },
+                        .display => item = .{ .name = ([_][]const u8{ "15 seconds", "30 seconds", "60 seconds", "Always on" })[position], .detail = if (position == @backingInt(self.display_timeout)) "Active" else "" },
+                        .albums, .player => unreachable,
                     }
+                    items[length] = item;
+                    length += 1;
                 }
             }
-        }
-
-        fn clock(buf: []u8, seconds: u64) []const u8 {
-            return std.fmt.bufPrint(buf, "{d}:{d:0>2}", .{ seconds / 60, seconds % 60 }) catch "";
-        }
-
-        fn timeline(self: *State, c: C, now: u64) void {
-            const line = self.appearance.palette().line;
-            const accent = self.appearance.palette().accent;
-            const muted = self.appearance.palette().muted;
-            const paper = self.appearance.palette().paper;
-            var buf: [96]u8 = undefined;
-            const mix = if (self.seek_frame != null) 0 else self.animation.mix(now);
-            const volume_width: u16 = @intFromFloat(std.math.clamp(self.animation.value(now) / 100, 0, 1) * 288);
-            const progress_width: u16 = @intCast(if (self.status.total_frames > 0) @min(288, (self.seek_frame orelse self.status.played_frames) * 288 / self.status.total_frames) else 0);
-            const opacity: u8 = @intFromFloat(mix * 255);
-            c.fill(Layout.left, Layout.timeline_top, Layout.width, 12, line);
-            if (volume_width > 0) c.fill(Layout.left, Layout.timeline_top, volume_width, 12, draw.blend(line, accent, opacity));
-            if (progress_width > 0) c.fill(Layout.left, Layout.timeline_top, progress_width, 12, draw.blend(line, accent, 255 - opacity));
-            const overlap = @min(volume_width, progress_width);
-            if (overlap > 0) c.fill(Layout.left, Layout.timeline_top, overlap, 12, accent);
-            const caption_top = Layout.capTop(212, .caption);
-            if (mix < 0.5) {
-                label(c, Layout.left, caption_top, 80, clock(&buf, (self.seek_frame orelse self.status.played_frames) / @max(1, self.status.sample_rate)), .caption, draw.blend(muted, paper, @intFromFloat(mix * 2 * 255)));
-                c.right(Layout.right, caption_top, clock(&buf, self.status.total_frames / @max(1, self.status.sample_rate)), .caption, draw.blend(muted, paper, @intFromFloat(mix * 2 * 255)));
-            } else {
-                label(c, Layout.left, caption_top, 80, "Volume", .caption, draw.blend(paper, muted, @intFromFloat((mix - 0.5) * 2 * 255)));
-            }
+            var artwork: core.Artwork = .{};
+            var artwork_id: u64 = 0;
+            if (want_art and self.theme_store.current().pages[@backingInt(self.page())].flags & theme.Flags.artwork != 0 and self.menu == null) if (self.playing_track) |track| {
+                if (view.albumForTrack(track.id)) |album| {
+                    artwork = album.art;
+                    artwork_id = album.id;
+                }
+                self.covers.request(0, artwork_id, artwork);
+            };
+            const jump_rank = (self.rows() -| 1) * (self.jump_position orelse 0) / 20;
+            const jump_title = if (self.jump_position == null) "" else switch (self.screen) {
+                .albums => if (view.album_count > 0) view.albums[jump_rank].title else "",
+                .artists => if (view.artist_count > 0) view.artists[jump_rank].name else "",
+                .tracks => if (self.trackAt(jump_rank)) |track| track.meta.title else "",
+                else => "",
+            };
+            return .{
+                .page = self.page(),
+                .jump_title = jump_title,
+                .title = title,
+                .empty_message = if (self.screen == .albums) "No albums yet" else if (self.screen == .artists) "No artists yet" else if (self.menu != null) "No songs here" else if (self.screen == .folders) (if (self.folder_error) "Folder too large" else "Empty folder") else "No songs yet",
+                .detail = detail,
+                .phase = self.index.phase,
+                .snapshot = view,
+                .cache = self.covers,
+                .items = items[0..length],
+                .first = first,
+                .selection = selection,
+                .total = count,
+                .track = self.playing_track,
+                .artwork = artwork,
+                .artwork_id = artwork_id,
+                .power = battery_status.Status.fromPower(self.battery_mv, self.charging, self.external_power),
+                .flow_position = self.flow,
+                .scanning = diag.report.scan_active != 0,
+                .scan_visited = diag.report.scan_visited,
+                .scan_total = diag.report.scan_total,
+                .elapsed = self.seek_frame orelse self.status.played_frames,
+                .duration = self.status.total_frames,
+                .sample_rate = self.status.sample_rate,
+                .volume_mix = if (self.seek_frame != null) 0 else self.animation.mix(now),
+                .volume_value = self.animation.value(now),
+                .playing = self.status.phase == .playing,
+                .jump = self.jump_position orelse 0,
+                .shuffled = self.track_store.order.shuffled,
+                .repeat = self.track_store.order.repeat,
+            };
         }
 
         pub fn renderTimelineInto(self: *State, pixels: *[320 * 240]u16, now: u64) void {
-            const paper = self.appearance.palette().paper;
-            var c = C.init(pixels);
-            c.text_cache = self.text_cache;
-            if (self.text_cache) |cache| cache.beginFrame();
-            c.fill(0, 188, 320, 42, paper);
-            if (self.playing_track != null) self.timeline(c, now);
+            var items: [12]@import("music_widgets.zig").Item = undefined;
+            var detail: [96]u8 = undefined;
+            @import("music_widgets.zig").render(self.theme_store.current(), pixels, self.context(now, &items, &detail, false), self.text_cache, true, false);
         }
 
         fn render(self: *State, now: u64) void {
             self.renderInto(lcd.framebuffer, now);
         }
 
-        fn albumProgressWidth() u16 {
-            return if (diag.report.scan_active != 0 and diag.report.scan_total > 0) @intCast(@min(Layout.width, @as(u64, diag.report.scan_visited) * Layout.width / diag.report.scan_total)) else 0;
+        fn albumProgressWidth(self: *const State) u16 {
+            return self.theme_store.current().scanProgress(.albums, diag.report.scan_visited, diag.report.scan_total);
         }
 
         pub fn renderInto(self: *State, pixels: *[320 * 240]u16, now: u64) void {
-            const paper = self.appearance.palette().paper;
-            const ink = self.appearance.palette().ink;
-            const muted = self.appearance.palette().muted;
-            const line = self.appearance.palette().line;
-            const accent = self.appearance.palette().accent;
-            var c = C.init(pixels);
-            c.text_cache = self.text_cache;
-            if (self.text_cache) |cache| cache.beginFrame();
-            if (self.menu) |menu| {
-                c.clear(paper);
-                self.header(c, if (menu.kind == .player) "Playback" else switch (menu.collection.scope) {
-                    .album => if (self.snapshot().albumIndex(menu.collection.album)) |i| self.snapshot().albums[i].title else "Album",
-                    .artist => if (self.snapshot().artistIndex(menu.collection.artist)) |i| self.snapshot().artists[i].name else "Artist",
-                    .folder => if (menu.collection.directory.len != 0) std.fs.path.basename(menu.collection.directory) else "Folders",
-                    else => "Music",
-                }, "");
-                if (menu.empty) label(c, Layout.left, Layout.rowText(Layout.row_top, .reading), Layout.width, "No songs in this folder", .reading, muted);
-                for (0..menu.count()) |i| {
-                    const name: []const u8 = if (menu.kind == .player) switch (i) {
-                        0 => "Queue",
-                        1 => "Shuffle",
-                        2 => "Repeat",
-                        else => unreachable,
-                    } else switch (i) {
-                        0 => "Play All",
-                        1 => "Shuffle",
-                        else => "Jump",
-                    };
-                    const value: []const u8 = if (menu.kind == .player) switch (i) {
-                        1 => if (self.track_store.order.shuffled) "On" else "Off",
-                        2 => switch (self.track_store.order.repeat) {
-                            .off => "Off",
-                            .all => "All",
-                            .one => "One",
-                        },
-                        else => "",
-                    } else "";
-                    self.menuRow(c, i, name, value, i == menu.selection, menu.kind == .player and i == 0);
-                }
-                self.rendered_surface = @intFromPtr(pixels);
-                self.rendered_screen = null;
-                return;
-            }
+            const plan = self.theme_store.current();
             const view = self.snapshot();
-            const retained = self.screen == .albums and self.rendered_screen == .albums and self.rendered_surface == @intFromPtr(pixels);
-            const scan_width = if (self.screen == .albums) albumProgressWidth() else 0;
+            const retained = self.screen == .albums and self.menu == null and self.jump_position == null and self.rendered_screen == .albums and self.rendered_surface == @intFromPtr(pixels) and self.rendered_theme_revision == self.theme_store.revision;
+            const scan_width = self.albumProgressWidth();
             const cover_revision = self.covers.revision.load(.acquire);
             var scene_changed = !retained or self.rendered_cover_revision != cover_revision;
             var visible: [7]CoverModel = undefined;
             var visible_count: usize = 0;
-            const inspect_scene = self.screen == .albums and (scene_changed or self.rendered_flow != self.flow or self.rendered_revision != view.revision);
-            if (inspect_scene) {
+            var cards: [7]flow_scene.Card = undefined;
+            const is_album = self.page() == .albums;
+            if (is_album) {
+                self.requestCovers(now);
+                const span = plan.pages[@backingInt(@import("runtime_theme.zig").Page.albums)];
+                const op = &plan.ops[span.covers];
                 const anchor: i32 = @intFromFloat(@round(self.flow));
                 var coverage = @import("display_trace.zig").Covers{};
                 for ([_]i32{ -3, 3, -2, 2, -1, 1, 0 }) |offset| {
-                    const i = anchor + offset;
-                    if (i < 0 or i >= view.album_count) continue;
-                    const album = view.albums[@intCast(i)];
-                    const distance = @as(f32, @floatFromInt(i)) - self.flow;
+                    const rank = anchor + offset;
+                    if (rank < 0 or rank >= view.album_count) continue;
+                    const album = view.albums[@intCast(rank)];
+                    const distance = @as(f32, @floatFromInt(rank)) - self.flow;
                     if (@abs(distance) > 3.4) continue;
                     const model = CoverModel{ .id = album.id, .texture = self.covers.get(album.id, album.art), .distance = distance };
                     const bit = @as(u7, 1) << @as(u3, @intCast(visible_count));
                     coverage.present |= bit;
                     const ready = if (model.texture) |tile| tile.width != 0 and tile.height != 0 else false;
                     if (ready) coverage.ready |= bit else if (model.texture != null) coverage.missing |= bit;
-                    if (i == anchor) {
+                    if (rank == anchor) {
                         coverage.center_present = true;
                         coverage.center_ready = ready;
                     }
-                    if (i == self.selection) coverage.destination_ready = ready;
-                    visible[visible_count] = model;
+                    if (rank == self.selection) coverage.destination_ready = ready;
                     if (!scene_changed) {
                         if (visible_count >= self.rendered_cover_count) scene_changed = true else {
                             const previous = self.rendered_covers[visible_count];
                             scene_changed = previous.id != model.id or previous.texture != model.texture or previous.distance != model.distance;
                         }
                     }
+                    visible[visible_count] = model;
+                    cards[visible_count] = .{ .texture = model.texture, .quad = flow_scene.projectThemed(distance, op.rect.x + @as(i32, @intCast(op.rect.w / 2)), op.rect.y + @as(i32, @intCast(op.edge / 2)), op.edge, op.reflection) };
                     visible_count += 1;
                 }
                 scene_changed = scene_changed or visible_count != self.rendered_cover_count;
                 Platform.trace(.covers, Platform.now(), @bitCast(coverage));
-            }
-            const header_changed = !retained or self.rendered_selection != self.selection or self.rendered_count != view.album_count or self.rendered_battery != self.battery_mv or self.rendered_charging != self.charging or self.rendered_external_power != self.external_power or self.rendered_scan_active != diag.report.scan_active or self.rendered_scan_width != scan_width;
-            const caption_changed = !retained or self.rendered_selection != self.selection or self.rendered_revision != view.revision;
-            if (!retained) c.clear(paper) else if (scene_changed) c.fill(0, Layout.row_top, 320, 193 - Layout.row_top, paper);
-            var buf: [96]u8 = undefined;
-            if (self.screen != .albums) {
+            } else {
                 self.covers.requested = @splat(.{});
                 self.cover_plan = null;
             }
-            switch (self.screen) {
-                .home, .music => {
-                    self.header(c, if (self.screen == .home) "Home" else "Music", "");
-                    for (self.first..@min(self.rows(), self.first + self.visibleRows())) |i| {
-                        const name: []const u8 = if (self.screen == .home) switch (i) {
-                            0 => "Music",
-                            1 => "Settings",
-                            else => "Now Playing",
-                        } else switch (music_items[i]) {
-                            .albums => "Albums",
-                            .artists => "Artists",
-                            .songs => "Songs",
-                            .shuffle_all => "Shuffle All",
-                        };
-                        self.menuRow(c, i - self.first, name, "", i == self.selection, self.screen == .home or music_items[i] != .shuffle_all);
-                    }
-                },
-                .folders => {
-                    self.header(c, if (self.folder_path_len == 0) "Folders" else std.fs.path.basename(self.folderPath()), "");
-                    for (self.first..@min(self.rows(), self.first + self.visibleRows())) |i| {
-                        const row = self.folderRow(i) orelse continue;
-                        self.menuRow(c, i - self.first, row.name, if (!row.directory and self.snapshot().trackByPath(row.path) == null) (if (view.complete) "Unavailable" else "Pending") else "", i == self.selection, row.directory);
-                    }
-                    if (self.rows() == 0) label(c, Layout.left, Layout.rowText(Layout.row_top, .reading), Layout.width, if (self.folder_error) "Folder too large" else "Empty folder", .reading, muted);
-                },
-                .library => {
-                    self.header(c, "Library", std.fmt.bufPrint(&buf, "{d} albums", .{view.album_count}) catch "");
-                    label(c, Layout.left, Layout.rowText(Layout.row_top, .reading), Layout.width, self.index.phase, .reading, ink);
-                    for ([_][]const u8{ "Update library", "Verify library" }, 0..) |name, i| {
-                        const y: i32 = 112 + @as(i32, @intCast(i)) * Layout.row_height;
-                        if (i == self.selection) self.highlightRow(c, y);
-                        label(c, Layout.left, Layout.rowText(y, .body), Layout.width, name, .body, ink);
-                    }
-                },
-                .albums => {
-                    const header_started = benchmarkClock();
-                    if (header_changed) {
-                        c.fill(0, 0, 320, Layout.row_top, paper);
-                        self.header(c, "Albums", std.fmt.bufPrint(&buf, "{d} / {d}", .{ if (view.album_count > 0) self.selection + 1 else 0, view.album_count }) catch "");
-                    }
-                    const scene_started = benchmarkClock();
-                    diag.report.cover_header_max = @max(diag.report.cover_header_max, scene_started -% header_started);
-                    self.requestCovers(now);
-                    if (scene_changed) {
-                        var cards: [7]flow_scene.Card = undefined;
-                        for (visible[0..visible_count], cards[0..visible_count]) |model, *card| card.* = .{ .texture = model.texture, .quad = flow_scene.project(model.distance) };
-                        flow_scene.paintScene(.{ .pixels = pixels[Layout.row_top * 320 .. 193 * 320], .height = 193 - Layout.row_top, .origin_y = Layout.row_top }, cards[0..visible_count]);
-                    }
-                    if (inspect_scene) {
-                        @memcpy(self.rendered_covers[0..visible_count], visible[0..visible_count]);
-                        self.rendered_cover_count = visible_count;
-                    }
-                    const caption_started = benchmarkClock();
-                    diag.report.cover_scene_max = @max(diag.report.cover_scene_max, caption_started -% scene_started);
-                    if (caption_changed) {
-                        c.fill(0, 193, 320, 47, paper);
-                        if (view.album_count > 0) {
-                            const album = view.albums[self.selection];
-                            centered(c, Layout.capTop(200, .reading), Layout.width, album.title, .reading, ink);
-                            centered(c, Layout.capBottom(224, .caption), Layout.width, album.artist, .caption, muted);
-                        }
-                    }
-                    if (view.album_count == 0) centered(c, 105, 288, "No albums yet", .reading, muted);
-                    diag.report.cover_caption_max = @max(diag.report.cover_caption_max, benchmarkClock() -% caption_started);
-                    if (diag.report.scan_active != 0) {
-                        c.rounded(Layout.scan_indicator_left, Layout.header_rule_top - 1, 3, 3, 1, accent);
-                        if (scan_width > 0) c.fill(Layout.left, Layout.header_rule_top, scan_width, 1, accent);
-                    }
-                },
-                .artists, .artist, .tracks => {
-                    const artist = if (self.artistRank()) |i| view.artists[i] else null;
-                    const title = switch (self.screen) {
-                        .artists => "Artists",
-                        .artist => if (artist) |a| a.name else "Artist",
-                        .tracks => switch (self.track_scope) {
-                            .all => "All Songs",
-                            .queue => "Queue",
-                            .artist => if (artist) |a| a.name else "Songs",
-                            .folder => "Songs",
-                            .album => if (view.albumIndex(self.album_id)) |i| view.albums[i].title else "Tracks",
-                        },
-                        else => unreachable,
-                    };
-                    self.header(c, title, "");
-                    var i = self.first;
-                    while (i < @min(self.rows(), self.first + self.visibleRows())) : (i += 1) {
-                        const name = switch (self.screen) {
-                            .artists => view.artists[i].name,
-                            .artist => if (i == 0) "All Songs" else view.albums[artist.?.first_album + i - 1].title,
-                            .tracks => if (self.trackAt(i)) |track| track.meta.title else "Unavailable track",
-                            else => unreachable,
-                        };
-                        const y: i32 = Layout.row_top + @as(i32, @intCast(i - self.first)) * Layout.row_height;
-                        if (i == self.selection) self.highlightRow(c, y);
-                        if (self.screen == .tracks and self.track_scope == .queue and i == self.selection) {
-                            label(c, Layout.left, Layout.capTop(y + 1, .reading), Layout.width, name, .reading, accent);
-                            if (self.trackAt(i)) |track| label(c, Layout.left, Layout.capBottom(y + Layout.row_height - 2, .caption), Layout.width, track.meta.artist, .caption, muted);
-                        } else {
-                            label(c, Layout.left, Layout.rowText(y, .reading), Layout.width, name, .reading, if (i == self.selection) accent else ink);
-                        }
-                    }
-                },
-                .settings => {
-                    self.header(c, "Settings", "");
-                    self.menuRow(c, 0, "ReplayGain", switch (self.replay_gain.mode) {
-                        .off => "Off",
-                        .track => "Track",
-                        .album => "Album",
-                    }, self.selection == 0, false);
-                    self.menuRow(c, 1, "Library", "", self.selection == 1, true);
-                    self.menuRow(c, 2, "Themes", "", self.selection == 2, true);
-                },
-                .themes => {
-                    self.header(c, "Themes", "");
-                    self.menuRow(c, 0, "Light", if (self.appearance == .light) "Active" else "", self.selection == 0, false);
-                    self.menuRow(c, 1, "Dark", if (self.appearance == .dark) "Active" else "", self.selection == 1, false);
-                },
-                .player => {
-                    self.header(c, if (self.status.phase == .paused) "Paused" else "Now Playing", "");
-                    if (self.playing_track) |track| {
-                        var album: views.Album = .{
-                            .id = 0,
-                            .title = track.meta.album,
-                            .artist = track.meta.album_artist,
-                            .directory = core.editionRoot(track.path),
-                            .release_id = track.meta.release_id,
-                            .representative = track,
-                        };
-                        if (diag.catalog) |catalog| if (catalog.value.trackById(track.id)) |t| {
-                            if (catalog.value.tracks[t].album_index < catalog.value.albums.len) {
-                                const a = catalog.value.albums[catalog.value.tracks[t].album_index];
-                                album.id = a.id;
-                                album.art = a.art;
-                            }
-                        };
-                        self.covers.request(0, album.id, album.art);
-                        self.image(c, album, Layout.left, Layout.row_top, 112, 112, 0);
-                        label(c, 144, Layout.capTop(Layout.row_top, .title), 160, track.meta.title, .title, ink);
-                        label(c, 144, Layout.capTop(100, .body), 160, track.meta.artist, .body, ink);
-                        label(c, 144, Layout.capTop(124, .caption), 160, track.meta.album, .caption, muted);
-                        label(c, 144, Layout.capBottom(176, .caption), 100, track.meta.codec, .caption, muted);
-                        self.playbackModes(c);
-                        self.timeline(c, now);
-                    } else label(c, 16, 100, 288, "Choose a track", .title, ink);
-                },
-            }
-            if (self.screen != .player and self.screen != .albums and diag.report.scan_active != 0) {
-                c.fill(0, Layout.footer_top, 320, 240 - Layout.footer_top, paper);
-                c.fill(Layout.left, Layout.footer_top, Layout.width, 1, line);
-                label(c, Layout.left, Layout.capTop(224, .caption), 175, self.index.phase, .caption, muted);
-                c.right(Layout.right, Layout.capTop(224, .caption), std.fmt.bufPrint(&buf, "{d} / {d}", .{ diag.report.scan_visited, diag.report.scan_total }) catch "", .caption, muted);
-                if (diag.report.scan_total > 0) c.fill(Layout.left, 238, @intCast(@min(Layout.width, @as(u64, diag.report.scan_visited) * Layout.width / diag.report.scan_total)), 2, accent);
-            }
-            if (self.screen == .player and diag.report.scan_active != 0) c.rounded(266, 22, 4, 4, 2, accent);
-            if (self.jump_position) |position| {
-                c.clear(paper);
-                self.header(c, "Jump", "");
-                centered(c, 86, 288, std.fmt.bufPrint(&buf, "{d}%", .{position * 5}) catch "", .serif, ink);
-                c.rounded(16, 139, 288, 8, 3, line);
-                const width: u16 = @intCast(position * 288 / 20);
-                if (width > 0) c.rounded(16, 139, width, 8, 3, accent);
-                const target = (self.rows() -| 1) * position / 20;
-                const text = switch (self.screen) {
-                    .albums => if (self.rows() > 0) view.albums[target].title else "",
-                    .artists => if (self.rows() > 0) view.artists[target].name else "",
-                    .tracks => if (self.trackAt(target)) |track| track.meta.title else "",
-                    else => "",
-                };
-                centered(c, 167, 288, text, .reading, muted);
+            var items: [12]@import("music_widgets.zig").Item = undefined;
+            var detail: [96]u8 = undefined;
+            var model = self.context(now, &items, &detail, true);
+            model.cards = cards[0..visible_count];
+            const span = plan.pages[@backingInt(self.page())];
+            const data_changed = (span.flags & theme.Flags.track_metadata != 0 and self.rendered_track_id != if (self.playing_track) |track| track.id else @as(u64, 0)) or (span.flags & theme.Flags.playback_phase != 0 and self.rendered_phase != self.status.phase) or (span.flags & theme.Flags.scan_phase != 0 and !std.mem.eql(u8, self.rendered_scan_phase, self.index.phase));
+            const header_changed = data_changed or !retained or self.rendered_selection != self.selection or self.rendered_count != view.album_count or self.rendered_battery != self.battery_mv or self.rendered_charging != self.charging or self.rendered_external_power != self.external_power;
+            const caption_changed = !retained or self.rendered_selection != self.selection or self.rendered_revision != view.revision;
+            const widgets = @import("music_widgets.zig");
+            if (retained and !header_changed and !caption_changed) {
+                if (scene_changed) widgets.render(plan, pixels, model, self.text_cache, false, true);
+                if (self.rendered_scan_active != diag.report.scan_active or self.rendered_scan_width != scan_width) _ = widgets.renderScanUpdate(plan, pixels, model, self.text_cache, self.rendered_scan_active != diag.report.scan_active);
+            } else widgets.render(plan, pixels, model, self.text_cache, false, false);
+            if (is_album) {
+                @memcpy(self.rendered_covers[0..visible_count], visible[0..visible_count]);
+                self.rendered_cover_count = visible_count;
             }
             self.covers.publishRequests();
             self.rendered_surface = @intFromPtr(pixels);
-            self.rendered_screen = if (self.jump_position != null or self.menu != null) null else self.screen;
+            self.rendered_screen = if (self.menu != null or self.jump_position != null) null else self.screen;
             self.rendered_selection = self.selection;
             self.rendered_revision = view.revision;
             self.rendered_count = view.album_count;
@@ -1518,6 +1467,10 @@ pub fn Controller(comptime Platform: type) type {
             self.rendered_scan_width = scan_width;
             self.rendered_flow = self.flow;
             self.rendered_cover_revision = cover_revision;
+            self.rendered_theme_revision = self.theme_store.revision;
+            self.rendered_track_id = if (self.playing_track) |track| track.id else 0;
+            self.rendered_phase = self.status.phase;
+            self.rendered_scan_phase = self.index.phase;
         }
     };
 }
@@ -2696,7 +2649,7 @@ test "light and dark selection invalidates retained screens and region rendering
     defer fixture.deinit();
     var state = fixture.state();
     state.navigate(.themes);
-    state.selection = 1;
+    state.selection = 5;
     _ = state.handle(.select, 0, false);
     try std.testing.expectEqual(chrome.Appearance.dark, state.appearance);
     var pixels: [320 * 240]u16 = undefined;
@@ -2709,6 +2662,7 @@ test "light and dark selection invalidates retained screens and region rendering
     // Compare just the timeline's owned region, including every antialiased edge.
     for ([_]chrome.Appearance{ .light, .dark }) |appearance| {
         state.appearance = appearance;
+        state.theme_store.select(state.theme_family, appearance);
         @memset(&pixels, appearance.palette().paper);
         state.renderTimelineInto(&pixels, 0);
         var fresh: [320 * 240]u16 = @splat(appearance.palette().paper);
@@ -2768,4 +2722,140 @@ test "fine volume steps reach all 113 positions with distinct bar targets and bo
     state.attenuation = 127;
     try std.testing.expectEqual(media.PlaybackCommand{ .set_attenuation = 128 }, state.act(.{ .adjust_volume = -4 }, 61000, true));
     try std.testing.expectEqual(media.PlaybackCommand.none, state.handle(.volume_down, 61500, true));
+}
+
+test "display timeout wakes through ordinary input without locking or changing the queue" {
+    var fixture: Fixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    var state = fixture.state();
+    state.display_timeout = .seconds15;
+    state.frame(0);
+    state.frame(14999);
+    try std.testing.expect(!state.display_asleep);
+    state.frame(15000);
+    try std.testing.expect(state.display_asleep and !state.locked);
+    _ = state.button(.volume_down, true, 16000, true);
+    try std.testing.expect(!state.display_asleep);
+    try std.testing.expectEqual(@as(u8, 65), state.attenuation);
+    _ = state.button(.volume_down, false, 16100, true);
+    state.frame(32000);
+    try std.testing.expect(state.display_asleep);
+    _ = state.button(.power, true, 33000, true);
+    _ = state.button(.power, false, 33100, true);
+    try std.testing.expect(!state.display_asleep and !state.locked);
+    state.display_timeout = .never;
+    state.frame(10000000);
+    try std.testing.expect(!state.display_asleep);
+}
+
+test "pressing or holding volume at either endpoint keeps its cue alive without DAC commands" {
+    var fixture: Fixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    var state = fixture.state();
+    for ([_]u8{ 16, 128 }) |attenuation| {
+        state.attenuation = attenuation;
+        const event: Input = if (attenuation == 16) .volume_up else .volume_down;
+        for (0..80) |i| {
+            const now = i * 50;
+            try std.testing.expectEqual(media.PlaybackCommand.none, state.handle(event, now, true));
+            _ = state.animation.tick(now);
+        }
+        try std.testing.expectEqual(@as(f32, 1), state.animation.mix(4000));
+        _ = state.animation.tick(5500);
+        try std.testing.expectEqual(@as(f32, 0), state.animation.mix(5500));
+    }
+}
+
+test "every bundled theme preserves transport damage and retained Cover Flow across scan changes" {
+    var fixture: Fixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const tracks = [_]core.Track{
+        .{ .id = 1, .path = "One/1.flac", .stamp = .{}, .meta = .{ .title = "A deliberately long title for wrapping and clipping", .artist = "Test artist", .album = "One", .codec = "flac" } },
+        .{ .id = 2, .path = "Two/1.flac", .stamp = .{}, .meta = .{ .title = "Second", .artist = "Test artist", .album = "Two", .codec = "flac" } },
+    };
+    try fixture.pair.publish(&.{}, &tracks, 1, true);
+    var state = fixture.state();
+    state.playing_track = &tracks[0];
+    state.status = .{ .phase = .playing, .sample_rate = 48000, .output_format = .signed_24_in_u32, .total_frames = 48000 * 100, .played_frames = 48000 * 20 };
+    var retained: [320 * 240]u16 = undefined;
+    var fresh: [320 * 240]u16 = undefined;
+    for (0..5) |family| for ([_]chrome.Appearance{ .light, .dark }) |appearance| {
+        state.theme_family = @fromBackingInt(@intCast(family));
+        state.appearance = appearance;
+        state.theme_store.select(state.theme_family, appearance);
+        state.navigate(.player);
+        state.animation = .{};
+        state.renderInto(&retained, 0);
+        state.animation.request(0, 90.5);
+        for ([_]u64{ 0, 40, 80, 140, 500, 1450, 1540, 1900 }) |now| {
+            _ = state.animation.tick(now);
+            state.status.played_frames += 197;
+            state.renderTimelineInto(&retained, now);
+            var reference = state;
+            reference.rendered_screen = null;
+            reference.renderInto(&fresh, now);
+            try std.testing.expectEqualSlices(u16, &fresh, &retained);
+        }
+        state.navigate(.albums);
+        state.renderInto(&retained, 0);
+        for (0..24) |step| {
+            state.flow = @as(f32, @floatFromInt(step % 9)) / 10;
+            test_diag.report.scan_active = if (step % 5 < 3) 1 else 0;
+            test_diag.report.scan_total = 100;
+            test_diag.report.scan_visited = @intCast(step * 4);
+            state.renderInto(&retained, step * 17);
+            var reference = state;
+            reference.rendered_screen = null;
+            reference.renderInto(&fresh, step * 17);
+            try std.testing.expectEqualSlices(u16, &fresh, &retained);
+        }
+    };
+}
+
+test "custom overlapping layers survive transport and Cover Flow partial redraws" {
+    const parsed = try std.json.parseFromSlice(theme.Document, std.testing.allocator, @embedFile("themes/classic-light.json"), .{});
+    defer parsed.deinit();
+    var document = parsed.value;
+    const overlay = theme.Node{ .kind = .text, .rect = .{ .x = 10, .y = 195, .w = 100, .h = 20 }, .value = "Overlay", .color = .accent };
+    const player = try std.testing.allocator.alloc(theme.Node, document.screens.player.len + 1);
+    defer std.testing.allocator.free(player);
+    @memcpy(player[0 .. player.len - 1], document.screens.player);
+    player[player.len - 1] = overlay;
+    document.screens.player = player;
+    const albums = try std.testing.allocator.alloc(theme.Node, document.screens.albums.len + 1);
+    defer std.testing.allocator.free(albums);
+    @memcpy(albums[0 .. albums.len - 1], document.screens.albums);
+    albums[albums.len - 1] = overlay;
+    document.screens.albums = albums;
+    var fixture: Fixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    var state = fixture.state();
+    try theme.compile(document, &state.theme_store.banks[0]);
+    state.theme_store.has_custom = true;
+    state.theme_store.using_custom = true;
+    const tracks = [_]core.Track{.{ .id = 1, .path = "Album/one.flac", .stamp = .{}, .meta = .{ .title = "One", .album = "Album", .artist = "Artist" } }};
+    try fixture.pair.publish(&.{}, &tracks, 1, true);
+    state.playing_track = &tracks[0];
+    state.status = .{ .phase = .playing, .sample_rate = 48000, .output_format = .signed_24_in_u32, .total_frames = 480000, .played_frames = 48000 };
+    var retained: [320 * 240]u16 = undefined;
+    var fresh: [320 * 240]u16 = undefined;
+    for ([_]Screen{ .player, .albums }) |screen| {
+        state.navigate(screen);
+        state.renderInto(&retained, 0);
+        state.animation.request(0, 80);
+        for (0..20) |step| {
+            const now = step * 17;
+            _ = state.animation.tick(now);
+            state.flow = @as(f32, @floatFromInt(step)) / 30;
+            if (screen == .player) state.renderTimelineInto(&retained, now) else state.renderInto(&retained, now);
+            var reference = state;
+            reference.rendered_screen = null;
+            reference.renderInto(&fresh, now);
+            try std.testing.expectEqualSlices(u16, &fresh, &retained);
+        }
+    }
 }

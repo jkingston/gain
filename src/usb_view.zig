@@ -10,7 +10,10 @@ pub fn render(c: draw.Canvas, phase: Phase, power: battery.Status) void {
 }
 
 pub fn renderThemed(c: draw.Canvas, phase: Phase, power: battery.Status, appearance: chrome.Appearance) void {
-    const palette = appearance.palette();
+    renderPalette(c, phase, power, appearance.palette());
+}
+
+pub fn renderPalette(c: draw.Canvas, phase: Phase, power: battery.Status, palette: chrome.Palette) void {
     c.clear(palette.paper);
     chrome.headerThemed(c, switch (phase) {
         .connecting => "Connecting",
