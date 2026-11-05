@@ -441,6 +441,7 @@ const MusicSession = struct {
                     if (self.playing) return .stop;
                 }
             },
+            .toggle_lock => self.state.toggleLock(),
             .input => remote = @fromBackingInt(@intCast(command.value)),
             .input_sample => self.input.injected = if (command.value == 0xffff) null else command.value,
             .reconnect => {

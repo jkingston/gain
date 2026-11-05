@@ -586,6 +586,15 @@ pub fn Controller(comptime Platform: type) type {
             self.raw_held = held;
         }
 
+        pub fn toggleLock(self: *State) void {
+            self.locked = !self.locked;
+            self.cancelInput(self.raw_held);
+            self.rendered_screen = null;
+            self.pending_frame.ready = false;
+            self.dirty = true;
+            self.major = true;
+        }
+
         pub fn button(self: *State, key: navigation.Button, pressed: bool, now: u64, playing: bool) media.PlaybackCommand {
             self.reconcile();
             if (pressed) self.raw_held |= key.mask() else self.raw_held &= ~key.mask();
@@ -597,12 +606,7 @@ pub fn Controller(comptime Platform: type) type {
                     // The hardware session owns long-Power shutdown. A short
                     // release exclusively toggles the pocket lock.
                     if (now -| at < 1500) {
-                        self.locked = !self.locked;
-                        self.cancelInput(self.raw_held);
-                        self.rendered_screen = null;
-                        self.pending_frame.ready = false;
-                        self.dirty = true;
-                        self.major = true;
+                        self.toggleLock();
                     }
                 }
                 return .none;

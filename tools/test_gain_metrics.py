@@ -35,6 +35,14 @@ class MetricsTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 monitor.health()
 
+    def test_health_retries_the_legacy_exact_length_after_a_stalled_extension_request(self):
+        monitor = object.__new__(gain.Gain)
+        count = gain.HEALTH_FIELDS.index("queue_cursor") + 1
+        raw = struct.pack(f'<{count}I', 1, *([0] * (count - 1)))
+        with patch.object(gain.Gain, 'read', side_effect=[RuntimeError('stalled'), raw]) as read:
+            self.assertEqual(monitor.health()['version'], 1)
+            self.assertEqual(read.call_args_list[1].args, (0x73, count * 4))
+
     def test_connect_closes_stale_handles_before_retrying(self):
         with (patch.object(gain.Gain, '__init__', return_value=None),
               patch.object(gain.Gain, 'status', side_effect=[RuntimeError('detached'), {}]),

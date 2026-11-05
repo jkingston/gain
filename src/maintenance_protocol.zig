@@ -2,7 +2,7 @@
 //! completed ACK publishes it to the application owner.
 const std = @import("std");
 
-pub const Action = enum(u8) { quick = 1, verify = 2, play = 3, stop = 4, reconnect = 5, rom = 6, flush = 7, rebuild = 8, input = 9, input_sample = 10 };
+pub const Action = enum(u8) { quick = 1, verify = 2, play = 3, stop = 4, reconnect = 5, rom = 6, flush = 7, rebuild = 8, input = 9, input_sample = 10, toggle_lock = 11 };
 
 pub const Command = struct { action: Action, value: u16 = 0 };
 
@@ -61,7 +61,7 @@ test "unknown requests, host ownership, OUT direction and malformed lengths cann
         var state: State = .{};
         const bytes = [_]u8{ 0xc0, @intCast(request), 0, 0, 0, 0, length, 0 };
         const proposed = state.begin(bytes, true);
-        if (proposed != null) try std.testing.expect(length == 4 and request >= 0x61 and request <= 0x6a);
+        if (proposed != null) try std.testing.expect(length == 4 and request >= 0x61 and request <= 0x6b);
         try std.testing.expect(state.begin(bytes, false) == null);
         state.ack(bytes);
         try std.testing.expect(state.take() == null);
@@ -88,4 +88,18 @@ test "raw input development samples reject power and malformed levels and permit
         std.mem.writeInt(u16, request[2..4], value, .little);
         try std.testing.expect(state.begin(request, true) == null);
     }
+}
+
+test "pocket-lock diagnostics require player ownership, zero arguments and a completed ACK" {
+    var state = State{};
+    const request = [_]u8{ 0xc0, 0x6b, 0, 0, 0, 0, 4, 0 };
+    try std.testing.expect(state.begin(request, false) == null);
+    try std.testing.expectEqual(Action.toggle_lock, state.begin(request, true).?.action);
+    try std.testing.expect(state.take() == null);
+    state.ack(request);
+    try std.testing.expectEqual(Action.toggle_lock, state.take().?.action);
+    try std.testing.expect(state.take() == null);
+    var invalid = request;
+    invalid[2] = 1;
+    try std.testing.expect(state.begin(invalid, true) == null);
 }

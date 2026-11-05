@@ -512,11 +512,11 @@ pause on Now Playing. Previous/Next scroll menus with hold-repeat and accelerati
 On Now Playing, a tap skips on release; a 400 ms hold previews an accelerating
 seek, committed once on release. Paused seeks remain paused. Holding Back for
 500 ms opens the captured Queue directly; a short Back retains normal navigation.
-The selected queue row includes the artist. Volume buttons repeat after 240 ms,
-then every 90 ms, without catching up missed repeats in a burst. A tap adjusts
+The selected queue row includes the artist. Volume buttons repeat after 200 ms,
+then every 50 ms, without catching up missed repeats in a burst. A tap adjusts
 0.5 dB; rapid same-direction taps within 250 ms ramp to 1 dB, then cap at 2 dB.
 Pausing or reversing restores fine adjustment. A held button uses 1 dB repeats,
-reaching the 2 dB cap after 500 ms. A full-range hold takes about three seconds. The volume bar has no numeric
+reaching the 2 dB cap after 350 ms. A full-range hold takes about two seconds. The volume bar has no numeric
 percentage. Its 113 fine positions span -64 dB to -8 dB; fractional animation
 targets preserve a distinct bar position for every half-decibel code.
 

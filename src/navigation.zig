@@ -14,8 +14,8 @@ const wheel_reset_ms = 180;
 const menu_hold_ms = 500;
 const seek_hold_ms = 400;
 const seek_repeat_ms = 120;
-const volume_first_repeat_ms = 240;
-const volume_repeat_ms = 90;
+const volume_first_repeat_ms = 200;
+const volume_repeat_ms = 50;
 const navigation_mask = Button.previous.mask() | Button.next.mask();
 const volume_mask = Button.volume_up.mask() | Button.volume_down.mask();
 
@@ -196,7 +196,7 @@ pub const Policy = struct {
         if (now >= self.volume_at and (volume == Button.volume_up.mask() or volume == Button.volume_down.mask())) {
             self.volume_at = now +| volume_repeat_ms;
             const age = now -| self.volume_started_at;
-            const step: i8 = if (age < 500) 2 else 4;
+            const step: i8 = if (age < 350) 2 else 4;
             return .{ .adjust_volume = if (volume == Button.volume_up.mask()) step else -step };
         }
         if (self.transport_button) |button| {
@@ -319,8 +319,8 @@ test "transport taps skip only on release and held seeking accelerates without s
 test "volume holds are bounded and release or cancellation withdraws repeats" {
     var policy = Policy{};
     try std.testing.expectEqual(Action{ .adjust_volume = 1 }, policy.edge(.volume_up, true, 0, .list, 3));
-    try std.testing.expectEqual(Action.none, policy.tick(239, .list, 3, Button.volume_up.mask()));
-    try std.testing.expectEqual(Action{ .adjust_volume = 2 }, policy.tick(240, .list, 3, Button.volume_up.mask()));
+    try std.testing.expectEqual(Action.none, policy.tick(199, .list, 3, Button.volume_up.mask()));
+    try std.testing.expectEqual(Action{ .adjust_volume = 2 }, policy.tick(200, .list, 3, Button.volume_up.mask()));
     try std.testing.expectEqual(Action{ .adjust_volume = 4 }, policy.tick(10000, .list, 3, Button.volume_up.mask()));
     try std.testing.expectEqual(Action.none, policy.tick(10000, .list, 3, Button.volume_up.mask()));
     try std.testing.expectEqual(Action.none, policy.tick(10100, .list, 3, 0));
@@ -351,7 +351,7 @@ test "a capped volume hold traverses the full range in a few seconds at differen
         var policy = Policy{};
         var level: i32 = policy.edge(.volume_up, true, 0, .transport, 0).adjust_volume;
         var now: u64 = cadence;
-        while (level < 112 and now <= 3300) : (now += cadence) {
+        while (level < 112 and now <= 2200) : (now += cadence) {
             const action = policy.tick(now, .transport, 0, Button.volume_up.mask());
             if (action == .adjust_volume) {
                 try std.testing.expect(action.adjust_volume <= 4);
