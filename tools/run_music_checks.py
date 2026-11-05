@@ -16,6 +16,7 @@ import hashlib
 import os
 import shutil
 from gain_metrics import Gain
+from pack_firmware import FIRMWARE_LIMIT
 from prepare_usb import prepare
 from run_usb_checks import mounted_volume
 from analyse_display_trace import analyse, qualify
@@ -205,7 +206,7 @@ def inputs(monitor, buttons, delay):
 def deploy(usbboot, output):
     image = ROOT / "zig-out/bin/gain-instrumented.bin"
     data = image.read_bytes()
-    if not 0 < len(data) <= 0x200000 - 0x4000:
+    if not 0 < len(data) <= FIRMWARE_LIMIT:
         raise RuntimeError("Image exceeds its reserved firmware RAM")
     prepare(usbboot, ROOT / "zig-out/bin/gain-spl.bin")
 

@@ -118,6 +118,9 @@ pub fn build(b: *std.Build) void {
     const stage2 = b.addExecutable(.{ .name = "gain-stage2.elf", .root_module = stage2_module });
     stage2.entry = .disabled;
     stage2.setLinkerScript(b.path("stage2.ld"));
+    const core_check = b.addSystemCommand(&.{ "python3", "tools/check_firmware.py" });
+    core_check.addArtifactArg(stage2);
+    b.getInstallStep().dependOn(&core_check.step);
     const stage2_raw = stage2.addObjCopy(.{ .format = .binary, .basename = "gain-stage2.bin" });
 
     b.getInstallStep().dependOn(text_step);
@@ -145,8 +148,11 @@ pub fn build(b: *std.Build) void {
     const instrumented = b.addExecutable(.{ .name = "gain-instrumented.elf", .root_module = instrumented_module });
     instrumented.entry = .disabled;
     instrumented.setLinkerScript(b.path("stage2.ld"));
+    const instrumented_check = b.addSystemCommand(&.{ "python3", "tools/check_firmware.py" });
+    instrumented_check.addArtifactArg(instrumented);
     const instrumented_raw = instrumented.addObjCopy(.{ .format = .binary, .basename = "gain-instrumented.bin" });
     const instrumented_step = b.step("instrumented", "Build the complete player with RAM-only maintenance controls");
+    instrumented_step.dependOn(&instrumented_check.step);
     instrumented_step.dependOn(&b.addInstallArtifact(instrumented, .{}).step);
     instrumented_step.dependOn(&b.addInstallFileWithDir(instrumented_raw.getOutput(), .bin, "gain-instrumented.bin").step);
     const player_check_api = b.createModule(.{ .root_source_file = b.path("src/f20.zig"), .target = target, .optimize = .ReleaseFast });

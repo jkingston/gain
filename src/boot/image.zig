@@ -8,7 +8,7 @@ pub const target_name: [32]u8 = blk: {
     break :blk bytes;
 };
 pub const address = 0x80004000;
-pub const limit = 0x80200000 - address;
+pub const limit = 0x80280000 - address;
 pub const Error = error{ Truncated, BadMagic, HeaderChecksum, WrongTarget, InvalidSize, PayloadChecksum, UnexpectedEnd };
 pub const Header = struct { size: u32, checksum: u32 };
 

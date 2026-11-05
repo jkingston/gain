@@ -2,7 +2,7 @@
     .set noat
     .set mips32r2
     .set fp=32
-    .equ context, 0xa0204000
+    .equ context, 0xa02e4000
     .section .startup, "ax", @progbits
     .global _start
 _start:

@@ -7,7 +7,7 @@
     .extern _bss_start
     .extern _bss_end
     # Keep saved ROM state in the dedicated reservation below all stacks.
-    .equ saved_context, 0xa0204000
+    .equ saved_context, 0xa02e4000
     .equ benchmark_stack, 0x81fff000
 _start:
     li    $k0, saved_context

@@ -69,7 +69,7 @@ class UploadTests(unittest.TestCase):
 
     def test_oversized_image_is_rejected_before_contacting_the_device(self):
         with self.image.open("wb") as stream:
-            stream.truncate(0x200000)
+            stream.truncate(runner.FIRMWARE_LIMIT + 1)
         with self.assertRaisesRegex(RuntimeError, "reserved firmware RAM"):
             self.deploy()
         self.assertEqual([], self.commands)

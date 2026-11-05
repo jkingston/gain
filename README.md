@@ -680,7 +680,9 @@ boundaries remain imperative. Opaque panel and DRAM values are kept together
 as named, board-specific profiles.
 
 The SPL has a 10 KiB code limit imposed by both the linker and image packer.
-Stage two has a 2 MiB link region. `src/f20_memory.zig` owns the physical RAM
+Stage two has a 2.5 MiB code region and a separate 128 KiB zero-initialized
+globals region. The 8192-frame conversion batch and twelve Cover Flow cache
+slots have explicit, independent reservations. `src/f20_memory.zig` owns the physical RAM
 reservations for firmware, display, storage, decoder scratch, PCM and task stacks.
 Linker assertions reject code/BSS overflow; compile-time region checks reject
 overlap, including cached/uncached aliases.

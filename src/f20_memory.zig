@@ -32,14 +32,17 @@ pub const Region = struct {
     }
 };
 
-pub const firmware = Region{ .start = 0x4000, .bytes = 0x200000 - 0x4000 };
-pub const lcd_descriptors = Region{ .start = 0x201000, .bytes = 0x1000 };
-pub const sd_control = Region{ .start = 0x202000, .bytes = 0x1000 };
-pub const filesystem_sector = Region{ .start = 0x203000, .bytes = 512 };
-pub const read_ahead = Region{ .start = 0x210000, .bytes = 2 * 64 * 1024 };
-pub const audio_descriptors = Region{ .start = 0x230000, .bytes = 4096 };
+pub const firmware = Region{ .start = 0x4000, .bytes = 0x280000 - 0x4000 };
+// Zero-initialized globals occupy the gap after USB DMA and before read-ahead.
+// Kept separate from the SD boot payload; every startup zeros this region.
+pub const firmware_bss = Region{ .start = 0x2a0000, .bytes = 0x20000 };
+pub const lcd_descriptors = Region{ .start = 0x2e0000, .bytes = 0x1000 };
+pub const sd_control = Region{ .start = 0x2e1000, .bytes = 0x1000 };
+pub const filesystem_sector = Region{ .start = 0x2e2000, .bytes = 512 };
+pub const read_ahead = Region{ .start = 0x2c0000, .bytes = 2 * 64 * 1024 };
+pub const audio_descriptors = Region{ .start = 0x2e5000, .bytes = 4096 };
 // Two uncached identity-mapped pages, owned by the USB controller.
-pub const usb_dma = Region{ .start = 0x240000, .bytes = @import("x1000_dma.zig").window_bytes };
+pub const usb_dma = Region{ .start = 0x280000, .bytes = @import("x1000_dma.zig").window_bytes };
 pub const canvas = Region{ .start = 0x300000, .bytes = 320 * 240 * 2 };
 pub const display_snapshot = Region{ .start = 0x340000, .bytes = 320 * 240 * 2 };
 pub const display_next = Region{ .start = 0x3a0000, .bytes = 320 * 240 * 2 };
@@ -51,7 +54,9 @@ pub const decoder_arena = Region{ .start = 0x500000, .bytes = 2 * 1024 * 1024 };
 pub const fault_capsule = Region{ .start = 0x700000, .bytes = 4096 };
 pub const compressed_ring = Region{ .start = 0x800000, .bytes = 4 * 1024 * 1024 };
 pub const pcm_reservoir = Region{ .start = 0xc00000, .bytes = 192000 * 8 };
-pub const decoded_frames = Region{ .start = 0xe00000, .bytes = 65535 * 8 };
+// The producer publishes at most 8192 frames per callback. FLAC keeps its
+// full 65535-sample left/right planes and converts large blocks in batches.
+pub const decoded_frames = Region{ .start = 0xe00000, .bytes = 8192 * 8 };
 // Every supported fixed-quantum period fits in 16 KiB, including 192 kHz
 // stereo 24-bit output. Font memory never aliases active DMA payloads.
 pub const audio_buffer_capacity = 16 * 1024;
@@ -78,7 +83,7 @@ pub const codec_float_pcm = Region{ .start = compressed_ring.start + 192 * 1024,
 pub const stream_input = Region{ .start = codec_float_pcm.end(), .bytes = compressed_ring.end() - codec_float_pcm.end() };
 pub const interrupt_stack = Region{ .start = 0x1fdc000, .bytes = 8192 };
 // Keep ROM recovery state below all stacks so an overflow cannot destroy it.
-pub const rom_context = Region{ .start = 0x204000, .bytes = 4096 };
+pub const rom_context = Region{ .start = 0x2e4000, .bytes = 4096 };
 pub const boot_stack = Region{ .start = 0x1fe0000, .bytes = 0x1f000 };
 // Concurrent scanner owns these gaps; none alias decoder or playback input.
 // Separate temporary locator maps keep the 1.5 MiB scanner workspace below
@@ -89,9 +94,10 @@ pub const scan_scratch = Region{ .start = 0xe80000, .bytes = 0x180000 };
 pub const scan_io = Region{ .start = 0x740000, .bytes = 0x20000 };
 pub const scan_views = Region{ .start = 0x780000, .bytes = 0x80000 };
 pub const scan_artwork = Region{ .start = 0x704000, .bytes = 0x3c000 };
-pub const cover_cache = Region{ .start = 0x280000, .bytes = 0x80000 };
+pub const cover_cache = Region{ .start = 0xe10000, .bytes = 0x70000 };
 pub const regions = [_]Region{
     firmware,
+    firmware_bss,
     lcd_descriptors,
     sd_control,
     filesystem_sector,

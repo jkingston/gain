@@ -100,7 +100,7 @@ relocated_start:
 payload_enter:
     sync
     li $t0, 0x80004000
-    li $t1, 0x80200000
+    li $t1, 0x80280000
 5:  cache 0x15, 0($t0)
     cache 0x10, 0($t0)
     addiu $t0, $t0, 32

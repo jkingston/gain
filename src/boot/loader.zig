@@ -68,8 +68,8 @@ var began: u32 = 0;
 
 fn loadCard(output: []u8, request: *const Request) !image.Header {
     var card = ReadOnlyCard{ .inner = try storage.Controller.initialize(.{
-        .descriptor = @ptrFromInt(0xa0202000),
-        .switch_status = @ptrFromInt(0xa0202100),
+        .descriptor = @ptrFromInt(platform.memory.sd_control.uncached()),
+        .switch_status = @ptrFromInt(platform.memory.sd_control.uncached() + 0x100),
     }) };
     defer {
         // DMA has completed before each read returns; mask MSC0 interrupts and stop DMA
@@ -78,13 +78,13 @@ fn loadCard(output: []u8, request: *const Request) !image.Header {
         register(0xb3450028).* = 0xffff_ffff;
         register(0xb3450044).* = 0;
     }
-    var volume = try Volume.mount(&card, @ptrFromInt(0xa0203000));
+    var volume = try Volume.mount(&card, @ptrFromInt(platform.memory.filesystem_sector.uncached()));
     report.stage = 3;
     const path_end = std.mem.indexOfScalar(u8, &request.path, 0) orelse return error.InvalidPath;
     if (path_end == 0) return error.InvalidPath;
     const file = try (try volume.findPath(request.path[0..path_end])).file();
     var inner = try volume.reader(file);
-    var reader = try storage.BufferedReader(Volume.Reader).init(&inner, @as([*]u8, @ptrFromInt(0xa0210000))[0..32768]);
+    var reader = try storage.BufferedReader(Volume.Reader).init(&inner, @as([*]u8, @ptrFromInt(platform.memory.storage_burst.uncached()))[0..32768]);
     return image.load(&reader, file.size, output);
 }
 
