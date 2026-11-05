@@ -32,6 +32,9 @@ pub const Snapshot = extern struct {
     ui_appearance: u32 = 0,
     ui_attenuation: u32 = 0,
     ui_backlight_active: u32 = 0,
+    theme_state: u32 = 0,
+    theme_source_bytes: u32 = 0,
+    theme_error_crc: u32 = 0,
 };
 pub var snapshot: Snapshot = .{};
 pub fn charger(configuration: @import("axp192.zig").ChargerConfiguration) void {
