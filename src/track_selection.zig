@@ -11,7 +11,7 @@ pub const Store = struct {
     pending: bool = false,
 
     pub fn init(bytes: []u8) Store {
-        const queue_bytes = @min(8192 * 8, bytes.len / 2) & ~@as(usize, 7);
+        const queue_bytes = (if (bytes.len >= 8192 * 16 + 8192) 8192 * 16 else bytes.len / 2) & ~@as(usize, 15);
         const metadata = bytes[queue_bytes..];
         const half = metadata.len / 2;
         return .{ .order = .init(bytes[0..queue_bytes]), .allocators = .{ std.heap.FixedBufferAllocator.init(metadata[0..half]), std.heap.FixedBufferAllocator.init(metadata[half..]) } };
