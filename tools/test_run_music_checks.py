@@ -1,9 +1,12 @@
 """RAM image verification must finish before the music qualification can start."""
 
+import ctypes
 import hashlib
 from pathlib import Path
+import struct
 import subprocess
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -73,6 +76,49 @@ class UploadTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "reserved firmware RAM"):
             self.deploy()
         self.assertEqual([], self.commands)
+
+
+class TraceTests(unittest.TestCase):
+    def read(self, first, end, corrupt=False):
+        ring = bytearray(struct.pack("<4I", 0, 0, 1, 0) * 2048)
+        span = (end - first) & 0xFFFFFFFF
+        for delta in range(min(span, 2048)):
+            sequence = (first + delta) & 0xFFFFFFFF
+            struct.pack_into(
+                "<4I", ring, (sequence % 2048) * 16,
+                sequence, delta * 6000, 9, delta,
+            )
+        if corrupt:
+            struct.pack_into(
+                "<I", ring, (first % 2048) * 16, (first + 2048) & 0xFFFFFFFF
+            )
+        calls = []
+
+        def transfer(handle, kind, request, chunk, index, data, length, timeout):
+            calls.append(chunk)
+            ctypes.memmove(data, bytes(ring[chunk * 1024:chunk * 1024 + length]), length)
+            return length
+
+        monitor = SimpleNamespace(handle=None, lib=SimpleNamespace(libusb_control_transfer=transfer))
+        return runner.read_trace(monitor, first, end), calls
+
+    def test_startup_unused_slots_do_not_duplicate_sequence_zero(self):
+        result, calls = self.read(0, 3)
+        self.assertEqual([0, 1, 2], [record["sequence"] for record in result])
+        self.assertEqual(32, len(calls))
+
+    def test_sequence_wrap_preserves_order_and_membership(self):
+        result, _ = self.read(0xFFFFFFFE, 2)
+        self.assertEqual([0xFFFFFFFE, 0xFFFFFFFF, 0, 1], [r["sequence"] for r in result])
+        self.assertEqual([0, 1, 2, 3], [r["value"] for r in result])
+
+    def test_overwritten_record_is_rejected(self):
+        with self.assertRaisesRegex(RuntimeError, "Incomplete timing trace"):
+            self.read(100, 104, corrupt=True)
+
+    def test_oversized_range_is_rejected_before_usb_reads(self):
+        with self.assertRaisesRegex(RuntimeError, "Timing trace overflow"):
+            runner.read_trace(None, 0, 2049)
 
 
 if __name__ == "__main__":

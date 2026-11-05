@@ -105,6 +105,11 @@ def percentile(values, q):
 
 
 def read_trace(monitor, start, end):
+    if not 0 <= start < 2**32 or not 0 <= end < 2**32:
+        raise ValueError("Invalid timing trace sequence")
+    span = (end - start) & 0xFFFFFFFF
+    if span > 2048:
+        raise RuntimeError("Timing trace overflow")
     raw = bytearray()
     for offset in range(0, 2048 * 16, 1024):
         data = ctypes.create_string_buffer(1024)
@@ -114,16 +119,16 @@ def read_trace(monitor, start, end):
         if count != 1024:
             raise RuntimeError(f"Timing trace read: {count}")
         raw.extend(data.raw)
-    if end - start > 2048:
-        raise RuntimeError("Timing trace overflow")
+    # Sequence zero also occupies every unused slot after startup. Accept a
+    # record only in its physical ring slot, including after counter wrap.
     entries = [
         dict(sequence=s, at=t, kind=k, value=v)
-        for s, t, k, v in struct.iter_unpack("<4I", raw)
-        if start <= s < end
+        for slot, (s, t, k, v) in enumerate(struct.iter_unpack("<4I", raw))
+        if slot == s % 2048 and ((s - start) & 0xFFFFFFFF) < span
     ]
-    if len(entries) != end - start:
+    if len(entries) != span:
         raise RuntimeError("Incomplete timing trace")
-    return sorted(entries, key=lambda e: e["sequence"])
+    return sorted(entries, key=lambda e: (e["sequence"] - start) & 0xFFFFFFFF)
 
 
 def profile(monitor, out, name, replay):
