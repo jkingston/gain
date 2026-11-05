@@ -526,15 +526,15 @@ export fn gain_player_ui_text_status(output: *TextStatus) callconv(.c) void {
 
 /// Application-only hardware fixtures; the generic simulator does not interpret
 /// battery or USB states. USB 0 resumes the preserved player, 1..3 show handoff.
-export fn gain_player_environment(millivolts: u32, charging: u32, usb: u32) callconv(.c) bool {
-    if (millivolts > 5000 or charging > 1 or usb > 3) return false;
+export fn gain_player_environment(millivolts: u32, charging: u32, usb: u32, external_power: u32) callconv(.c) bool {
+    if (millivolts > 5000 or charging > 1 or usb > 3 or external_power > 1) return false;
     lock();
     defer unlock();
     if (usb != 0) state.cancelInput(0);
-    power = gain.battery.Status.fromVoltage(millivolts, charging != 0);
+    power = gain.battery.Status.fromPower(millivolts, charging != 0, external_power != 0);
     usb_phase = if (usb == 0) null else @fromBackingInt(@intCast(usb - 1));
     usb_dirty = true;
-    state.refreshBattery(millivolts, charging != 0, milliseconds);
+    state.refreshBattery(millivolts, charging != 0, external_power != 0, milliseconds);
     state.dirty = true;
     state.major = true;
     return true;

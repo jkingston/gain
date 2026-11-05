@@ -66,11 +66,16 @@ pub fn batteryIcon(c: draw.Canvas, status: battery.Status) void {
     } else {
         c.fill(left + 2, top + 2, 1, 6, color);
     }
-    if (status.charging) {
+    if (status.badge() == .charging) {
         // The bolt has its own fixed space; neither icon nor title shifts.
         const offsets = [_]u8{ 4, 3, 2, 1, 0, 3, 2, 2, 1, 1 };
         const widths = [_]u8{ 2, 2, 3, 4, 6, 3, 3, 2, 2, 1 };
         for (offsets, widths, 0..) |offset, width, row| c.fill(left - 10 + @as(i32, offset), top + @as(i32, @intCast(row)), width, 1, accent);
+    } else if (status.badge() == .plugged) {
+        c.fill(left - 9, top, 2, 3, accent);
+        c.fill(left - 5, top, 2, 3, accent);
+        c.rounded(left - 10, top + 3, 8, 4, 1, accent);
+        c.fill(left - 7, top + 7, 2, 3, accent);
     }
 }
 

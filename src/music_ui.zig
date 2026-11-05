@@ -104,6 +104,7 @@ pub fn Controller(comptime Platform: type) type {
         last_active: u32 = 0,
         battery_mv: u32 = 0,
         charging: bool = false,
+        external_power: bool = false,
         failure: bool = false,
         rendered_surface: usize = 0,
         rendered_screen: ?Screen = null,
@@ -112,6 +113,7 @@ pub fn Controller(comptime Platform: type) type {
         rendered_count: usize = 0,
         rendered_battery: u32 = 0,
         rendered_charging: bool = false,
+        rendered_external_power: bool = false,
         rendered_scan_active: u32 = 0,
         rendered_scan_width: u16 = 0,
         rendered_flow: f32 = 0,
@@ -504,14 +506,15 @@ pub fn Controller(comptime Platform: type) type {
             return (self.screen == .albums and @abs(self.flow - @as(f32, @floatFromInt(self.selection))) > 0.005) or (self.screen == .player and self.animation.isAnimating(now));
         }
 
-        pub fn refreshBattery(self: *State, millivolts: u32, charging: bool, now: u64) void {
+        pub fn refreshBattery(self: *State, millivolts: u32, charging: bool, external_power: bool, now: u64) void {
             // A header-only change must not replace a region transfer during
             // the short volume fade. A stable volume hold can refresh normally.
             if (self.screen == .player and self.animation.isAnimating(now)) return;
-            const previous = battery_status.Status.fromVoltage(self.battery_mv, self.charging);
+            const previous = battery_status.Status.fromPower(self.battery_mv, self.charging, self.external_power);
             self.battery_mv = millivolts;
             self.charging = charging;
-            if (std.meta.eql(previous, battery_status.Status.fromVoltage(millivolts, charging))) return;
+            self.external_power = external_power;
+            if (std.meta.eql(previous, battery_status.Status.fromPower(millivolts, charging, external_power))) return;
             self.dirty = true;
             self.major = true;
         }
@@ -639,7 +642,7 @@ pub fn Controller(comptime Platform: type) type {
         }
 
         fn header(self: *State, c: C, title: []const u8, detail: []const u8) void {
-            chrome.header(c, title, detail, battery_status.Status.fromVoltage(self.battery_mv, self.charging));
+            chrome.header(c, title, detail, battery_status.Status.fromPower(self.battery_mv, self.charging, self.external_power));
         }
 
         fn highlightRow(c: C, top: i32) void {
@@ -753,7 +756,7 @@ pub fn Controller(comptime Platform: type) type {
                 }
                 scene_changed = scene_changed or visible_count != self.rendered_cover_count;
             }
-            const header_changed = !retained or self.rendered_selection != self.selection or self.rendered_count != view.album_count or self.rendered_battery != self.battery_mv or self.rendered_charging != self.charging or self.rendered_scan_active != diag.report.scan_active or self.rendered_scan_width != scan_width;
+            const header_changed = !retained or self.rendered_selection != self.selection or self.rendered_count != view.album_count or self.rendered_battery != self.battery_mv or self.rendered_charging != self.charging or self.rendered_external_power != self.external_power or self.rendered_scan_active != diag.report.scan_active or self.rendered_scan_width != scan_width;
             const caption_changed = !retained or self.rendered_selection != self.selection or self.rendered_revision != view.revision;
             if (!retained) c.clear(paper) else if (scene_changed) c.fill(0, Layout.row_top, 320, 193 - Layout.row_top, paper);
             var buf: [96]u8 = undefined;
@@ -916,6 +919,7 @@ pub fn Controller(comptime Platform: type) type {
             self.rendered_count = view.album_count;
             self.rendered_battery = self.battery_mv;
             self.rendered_charging = self.charging;
+            self.rendered_external_power = self.external_power;
             self.rendered_scan_active = diag.report.scan_active;
             self.rendered_scan_width = scan_width;
             self.rendered_flow = self.flow;
@@ -1224,7 +1228,8 @@ test "retained carousel bands match a fresh render through selection and scan ch
     const old_report = test_diag.report;
     defer test_diag.report = old_report;
     for (0..41) |step| {
-        state.charging = step % 2 != 0;
+        state.charging = step % 3 == 1;
+        state.external_power = step % 3 != 0;
         state.battery_mv = if (step < 10) 0 else if (step < 20) 3300 else if (step < 30) 3800 else 4200;
         state.selection = if (step < 20) 0 else 1;
         state.flow = @as(f32, @floatFromInt(step)) / 40;
@@ -1365,11 +1370,11 @@ test "cosmetic header refresh waits for volume movement without waiting through 
     state.animation.request(100, 75);
     state.dirty = false;
     state.major = false;
-    state.refreshBattery(3799, false, 120);
+    state.refreshBattery(3799, false, false, 120);
     try std.testing.expectEqual(4100, state.battery_mv);
     try std.testing.expect(!state.major);
     _ = state.animation.tick(240);
-    state.refreshBattery(3799, false, 240);
+    state.refreshBattery(3799, false, false, 240);
     try std.testing.expectEqual(3799, state.battery_mv);
     try std.testing.expect(state.major and state.dirty);
 }

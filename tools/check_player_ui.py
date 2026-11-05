@@ -100,7 +100,7 @@ class Player:
         self.module = c.CDLL(str(app))
         self.module.gain_app_api.restype = c.POINTER(Api)
         self.module.gain_player_ui_status.argtypes = [c.POINTER(Status)]
-        self.module.gain_player_environment.argtypes = [c.c_uint32] * 3
+        self.module.gain_player_environment.argtypes = [c.c_uint32] * 4
         self.module.gain_player_environment.restype = c.c_bool
         self.api = self.module.gain_app_api().contents
         if (
@@ -176,7 +176,7 @@ def qualify(app, root, synthetic=False):
         # generic simulator remains unaware of these device states.
         environment = player.module.gain_player_environment
         for millivolts in (0, 3300, 3600, 3800, 4200):
-            assert environment(millivolts, 0, 0)
+            assert environment(millivolts, 0, 0, 0)
             player.frame()
             if millivolts == 4200:
                 fill = player.pixels[22 * 320 + 282]
@@ -188,7 +188,7 @@ def qualify(app, root, synthetic=False):
                 )
         before_usb = player.status()
         for phase in (1, 2, 3):
-            assert environment(3800, 1, phase)
+            assert environment(3800, 1, phase, 1)
             player.frame()
             assert not player.api.frame(c.byref(player.pixels), player.now + 1)
             player.tap("next", "select")
@@ -196,10 +196,10 @@ def qualify(app, root, synthetic=False):
             assert (after_usb["screen"], after_usb["selection"]) == (
                 before_usb["screen"], before_usb["selection"]
             )
-        assert environment(4140, 0, 0)
+        assert environment(4140, 0, 0, 0)
         player.frame()
-        assert not environment(6000, 0, 0)
-        assert not environment(4000, 2, 0)
+        assert not environment(6000, 0, 0, 0)
+        assert not environment(4000, 2, 0, 0)
         if synthetic:
             assert (initial["tracks"], initial["albums"], initial["artists"]) == (
                 192,

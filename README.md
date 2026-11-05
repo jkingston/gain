@@ -353,11 +353,12 @@ zig-out/bin/gain-sim --app /absolute/path/app.dylib --watch
 prefix on macOS. `mise run sim` also runs an app when `GAIN_SIM_APP` is set.
 Firmware builds and the ordinary host tests do not require SDL3.
 
-The player app also exports `gain_player_environment(millivolts, charging, usb)`
+The player app also exports `gain_player_environment(millivolts, charging, usb, external_power)`
 for UI fixtures: `0` mV means unknown; USB `0` resumes music and `1..3` select
 connecting, connected and finishing. This belongs to the player app, not the
 simulator host. Battery fill uses four coarse voltage levels, not a calibrated
-percentage; charging is indicated separately.
+percentage. A bolt indicates charging; a plug indicates external power without
+active charging. External power is supplied independently of USB storage mode.
 
 The framebuffer uses the production UI's geometry and RGB565 representation.
 The host chooses the largest integer scale fitting the **physical renderer

@@ -529,7 +529,7 @@ fn runUsbMode(pmic: *@import("f20_power.zig").Controller) void {
             .ejecting => .ejecting,
             else => .connected,
         };
-        const power = @import("battery.zig").Status.fromVoltage(if (diag.report.power_valid & 1 != 0) diag.report.battery_mv else 0, diag.report.power_valid & (1 << 5) != 0);
+        const power = @import("battery.zig").Status.fromPower(if (diag.report.power_valid & 1 != 0) diag.report.battery_mv else 0, diag.report.power_valid & (1 << 5) != 0, diag.report.power_valid & (1 << 3) != 0);
         if (previous_phase == null or previous_phase.? != phase or !std.meta.eql(previous_power, power)) {
             view.render(@import("canvas.zig").Canvas.init(LcdDma.framebuffer), phase, power);
             _ = Display.present();
@@ -803,7 +803,7 @@ const MusicSession = struct {
                 return .stop;
             }
         } else self.power_started = null;
-        self.state.refreshBattery(if (diag.report.power_valid & 1 != 0) diag.report.battery_mv else 0, diag.report.power_valid & (1 << 5) != 0, now_ms);
+        self.state.refreshBattery(if (diag.report.power_valid & 1 != 0) diag.report.battery_mv else 0, diag.report.power_valid & (1 << 5) != 0, diag.report.power_valid & (1 << 3) != 0, now_ms);
         self.state.frame(self.now());
         if (self.state.failure) return .stop;
         return result;

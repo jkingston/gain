@@ -1,12 +1,26 @@
 //! Coarse battery presentation. Voltage is an estimate, not a calibrated gauge.
 const std = @import("std");
 
+pub const Badge = enum { none, charging, plugged };
+
 pub const Kind = enum { unknown, empty, low, normal, full };
 
 pub const Status = struct {
     kind: Kind = .unknown,
     level: u3 = 0,
     charging: bool = false,
+    external_power: bool = false,
+
+    pub fn fromPower(millivolts: u32, charging: bool, external_power: bool) Status {
+        var value = fromVoltage(millivolts, charging);
+        value.external_power = external_power;
+        return value;
+    }
+
+    pub fn badge(self: Status) Badge {
+        if (self.charging) return .charging;
+        return if (self.external_power) .plugged else .none;
+    }
 
     pub fn fromVoltage(millivolts: u32, charging: bool) Status {
         if (millivolts == 0) return .{ .charging = charging };
@@ -65,4 +79,13 @@ test "first sample is immediate with bounded ADC warmup retries and steady sampl
     try std.testing.expect(sampling.due(10_500, true));
     try std.testing.expect(!sampling.due(10_501, true));
     try std.testing.expect(sampling.due(10_750, false));
+}
+
+test "external power and active charging remain distinct from voltage level" {
+    try std.testing.expectEqual(Badge.none, Status.fromPower(4200, false, false).badge());
+    try std.testing.expectEqual(Badge.plugged, Status.fromPower(4200, false, true).badge());
+    try std.testing.expectEqual(Badge.charging, Status.fromPower(3800, true, true).badge());
+    // A plug means external power without active charging, not proof of 100%.
+    try std.testing.expectEqual(Badge.plugged, Status.fromPower(3800, false, true).badge());
+    try std.testing.expectEqual(Kind.unknown, Status.fromPower(0, false, true).kind);
 }
