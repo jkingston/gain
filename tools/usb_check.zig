@@ -217,7 +217,7 @@ export fn player_check_main() callconv(.c) void {
     }
 }
 
-fn verifyFile(volume: *gain.storage.fat32.Volume(gain.storage.Controller)) !void {
+fn verifyFile(volume: *gain.storage.filesystem.Volume(gain.storage.Controller)) !void {
     var root = try volume.iterate(volume.rootDirectory());
     while (try root.next()) |folder| {
         if (!std.mem.eql(u8, folder.name(), ".gain-usb-check")) continue;
@@ -253,7 +253,7 @@ fn verifyFile(volume: *gain.storage.fat32.Volume(gain.storage.Controller)) !void
     }
 }
 
-const Volume = gain.storage.fat32.Volume(gain.storage.Controller);
+const Volume = gain.storage.filesystem.Volume(gain.storage.Controller);
 
 fn firstTrack(volume: *Volume, directory: gain.storage.fat32.Directory, depth: usize) anyerror!?gain.storage.fat32.DirectoryEntry {
     if (depth == 7) return null;

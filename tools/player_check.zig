@@ -94,7 +94,7 @@ const Ui = struct {
     }
 };
 
-const Volume = gain.storage.fat32.Volume(gain.storage.Controller);
+const Volume = gain.storage.filesystem.Volume(gain.storage.Controller);
 
 const CardReader = struct {
     reader: Volume.Reader,

@@ -30,6 +30,16 @@ pub fn build(b: *std.Build) void {
         const boot_tests = b.addTest(.{ .root_module = boot_module });
         boot_tests_step.dependOn(&b.addRunArtifact(boot_tests).step);
     }
+    const filesystem_tests_step = b.step("test-filesystems", "Test FAT32 and sparse 256 GiB exFAT cards");
+    for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseSafe, .ReleaseFast }) |mode| {
+        const module = b.createModule(.{ .root_source_file = b.path("src/filesystem_tests.zig"), .target = b.graph.host, .optimize = mode });
+        const unit = b.addTest(.{ .root_module = module });
+        filesystem_tests_step.dependOn(&b.addRunArtifact(unit).step);
+    }
+    const filesystem_check_module = b.createModule(.{ .root_source_file = b.path("tools/check_filesystem.zig"), .target = b.graph.host, .optimize = .ReleaseSafe });
+    filesystem_check_module.addImport("gain", b.createModule(.{ .root_source_file = b.path("src/f20.zig"), .target = b.graph.host, .optimize = .ReleaseSafe }));
+    const filesystem_check = b.addExecutable(.{ .name = "check-filesystem", .root_module = filesystem_check_module });
+    b.step("build-filesystem-check", "Build the read-only raw-card filesystem inspector").dependOn(&b.addInstallArtifact(filesystem_check, .{}).step);
     const text_target = target;
     const text_module = b.createModule(.{
         .root_source_file = b.path("src/text_engine.zig"),
@@ -668,6 +678,7 @@ pub fn build(b: *std.Build) void {
         library_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = library_test_module })).step);
     }
     const test_step = b.step("test", "Run host-side tests");
+    test_step.dependOn(filesystem_tests_step);
     test_step.dependOn(boot_tests_step);
     test_step.dependOn(library_step);
     test_step.dependOn(text_test_step);

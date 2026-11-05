@@ -143,3 +143,7 @@ run = "zig build build-loader --summary all"
 [tasks.test-boot]
 description = "Test SD boot envelope, current/previous fallback and fresh recovery"
 run = "zig build test-boot --summary all"
+
+[tasks.test-filesystems]
+description = "Test FAT32 and exFAT on sparse 256 GiB MBR/GPT cards"
+run = "zig build test-filesystems --summary all"

@@ -1,5 +1,5 @@
 //! Folder navigation shared by the F20 application and device qualification.
-const fat32 = @import("fat32.zig");
+const fat32 = @import("filesystem.zig");
 const player_view = @import("player_view.zig");
 
 const maximum_depth = 8;

@@ -34,7 +34,7 @@ SPL/U-Boot and a Gain SD loader in the normal kernel slot. The build provides:
 - identified AXP192 power, battery/USB voltage, current telemetry and power-off;
 - configured headphone/line jack inputs with debouncing support;
 - native SD initialization, raw sector reads and host-exclusive writes at up to 50 MHz;
-- allocation-free FAT32 traversal, seeking, long names, WAV and AIFF parsing;
+- allocation-free FAT32/exFAT traversal, seeking, long names, WAV and AIFF parsing;
 - native FLAC decoding and bounded C backends for MP3, AAC, ALAC, Vorbis and Opus;
 - identified ES9018K2M, filters, de-emphasis, mute and output routing;
 - linked-PDMA PCM playback with source-validated buffer ownership;
@@ -116,9 +116,41 @@ preparation. The player uses screen cuts and prepares its initial full snapshot
 before audio starts. UI work is preemptible by the output task. Rendering and
 DMA-source ownership remain independently tested portable policies.
 
+## SD filesystems
+
+The player and SD loader read FAT32 and exFAT on 512-byte-sector cards, including
+256 GB SDXC cards. Superfloppy, MBR and checksummed GPT layouts are supported.
+exFAT supports FAT-chained and contiguous streams, UTF-16 names, its on-volume
+case mapping, boot-region fallback and zero-filled reads beyond valid data.
+Only revision 1.00, one FAT and the existing 32-bit media-file offsets are supported;
+files larger than 4 GiB and names exceeding 192 UTF-8 bytes are omitted. This is
+independent of card capacity. No formatting or filesystem allocation runs on Gain.
+
+Cache/log overwrites require existing, fully valid sector-aligned files. exFAT
+checks allocation bits, sets both boot-region dirty flags before data writes and
+clears them only after sync. A dirty/damaged mount or failed write disables
+further writes; playback can remain read-only. USB still grants the host exclusive
+raw-card ownership and remounts from fresh directory entries after eject.
+
+`mise run test-filesystems` exercises sparse 256 GiB images, MBR/GPT checksums,
+cluster boundaries, fragmented/contiguous seek/read equivalence, valid lengths,
+write faults, allocation bits and boot payload validation in three build modes.
+A separate read-only inspector works with externally formatted raw images:
+
+```sh
+zig build build-filesystem-check
+zig-out/bin/check-filesystem /path/to/card.img "Music/Album/Track.flac"
+```
+
+The installed loader must also support exFAT before changing card format; updating
+the player SD image alone does not upgrade an older FAT32-only NAND loader.
+The native driver has also read checksum-verified multilingual synthetic files
+from an independently macOS-formatted 256 GiB exFAT image. Physical 256 GB card
+qualification is separate from these filesystem and addressing checks.
+
 ## Library and diagnostics
 
-The native application scans FAT32 after mounting the card or returning from USB.
+The native application scans FAT32 or exFAT after mounting the card or returning from USB.
 Quick refresh compares paths, sizes and FAT modification stamps; verify rereads
 metadata and artwork. FAT timestamps are coarse: use verify for edits that keep
 both size and timestamp. Scans publish first at 32 tracks, then in batches of 128, at most once every

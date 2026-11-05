@@ -63,7 +63,7 @@ const ReadOnlyCard = struct {
         report.sd_sectors += @intCast(bytes.len / 512);
     }
 };
-const Volume = storage.fat32.Volume(ReadOnlyCard);
+const Volume = storage.filesystem.Volume(ReadOnlyCard);
 var began: u32 = 0;
 
 fn loadCard(output: []u8, request: *const Request) !image.Header {

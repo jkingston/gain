@@ -6,6 +6,7 @@ const builtin = @import("builtin");
 pub const Controller = sd.Controller(board.storage);
 pub const Waiter = sd.Waiter;
 pub const DmaDescriptor = x1000.Msc0.DmaDescriptor;
+pub const filesystem = @import("filesystem.zig");
 pub const fat32 = @import("fat32.zig");
 pub const wav = @import("wav.zig");
 

@@ -17,12 +17,16 @@ pub const Error = error{
 pub const File = struct {
     first_cluster: u32,
     size: u32,
+    contiguous: bool = false,
+    valid_length: u32 = @import("std").math.maxInt(u32),
 };
 
 pub const maximum_name_bytes = 192;
 
 pub const Directory = struct {
     first_cluster: u32,
+    contiguous: bool = false,
+    data_length: u64 = @import("std").math.maxInt(u64),
 };
 
 pub const EntryKind = enum { file, directory };
@@ -35,6 +39,8 @@ pub const DirectoryEntry = struct {
     size: u32,
     attributes: u8,
     modified: u32 = 0,
+    contiguous: bool = false,
+    valid_length: u32 = @import("std").math.maxInt(u32),
 
     pub fn name(self: *const DirectoryEntry) []const u8 {
         return self.name_bytes[0..self.name_length];
@@ -42,13 +48,13 @@ pub const DirectoryEntry = struct {
 
     pub fn file(self: DirectoryEntry) Error!File {
         if (self.kind != .file) return error.IsDirectory;
-        return .{ .first_cluster = self.first_cluster, .size = self.size };
+        return .{ .first_cluster = self.first_cluster, .size = self.size, .contiguous = self.contiguous, .valid_length = self.valid_length };
     }
 
     pub fn directory(self: DirectoryEntry) Error!Directory {
         if (self.kind != .directory) return error.NotDirectory;
         if (self.first_cluster < first_data_cluster) return error.CorruptFilesystem;
-        return .{ .first_cluster = self.first_cluster };
+        return .{ .first_cluster = self.first_cluster, .contiguous = self.contiguous, .data_length = self.size };
     }
 };
 
@@ -87,6 +93,12 @@ pub fn Volume(comptime Device: type) type {
                 try device.readBlocks(partition_lba, scratch);
             }
 
+            return mountAt(device, scratch, partition_lba, partition_sectors);
+        }
+
+        pub fn mountAt(device: *Device, scratch: *[sector_bytes]u8, partition_lba: u32, sectors: u32) !Self {
+            var partition_sectors = sectors;
+            try device.readBlocks(partition_lba, scratch);
             if (!hasBootSignature(scratch)) return error.InvalidBootSector;
             if (read16(scratch, 11) != sector_bytes) return error.UnsupportedSectorSize;
 
@@ -452,7 +464,7 @@ pub fn Volume(comptime Device: type) type {
             }
         };
 
-        fn clusterLba(self: Self, cluster: u32) Error!u32 {
+        pub fn clusterLba(self: Self, cluster: u32) Error!u32 {
             if (!self.validCluster(cluster)) return error.BadCluster;
             const relative = @as(u64, cluster - first_data_cluster) * self.sectors_per_cluster;
             const lba = @as(u64, self.data_lba) + relative;
@@ -460,7 +472,7 @@ pub fn Volume(comptime Device: type) type {
             return @intCast(lba);
         }
 
-        fn nextCluster(self: *Self, cluster: u32) !u32 {
+        pub fn nextCluster(self: *Self, cluster: u32) !u32 {
             return (try self.nextClusterOrEnd(cluster)) orelse error.UnexpectedEndOfChain;
         }
 
@@ -482,7 +494,7 @@ pub fn Volume(comptime Device: type) type {
             return next;
         }
 
-        fn validCluster(self: Self, cluster: u32) bool {
+        pub fn validCluster(self: Self, cluster: u32) bool {
             return cluster >= first_data_cluster and
                 @as(u64, cluster) < @as(u64, self.cluster_count) + first_data_cluster;
         }
