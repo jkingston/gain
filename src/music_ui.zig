@@ -889,8 +889,8 @@ pub fn Controller(comptime Platform: type) type {
                     if (view.album_count == 0) centered(c, 105, 288, "No albums yet", .reading, muted);
                     diag.report.cover_caption_max = @max(diag.report.cover_caption_max, benchmarkClock() -% caption_started);
                     if (diag.report.scan_active != 0) {
-                        c.rounded(Layout.scan_indicator_left, Layout.header_center - 1, 3, 3, 1, accent);
-                        if (scan_width > 0) c.fill(Layout.left, 54, scan_width, 1, accent);
+                        c.rounded(Layout.scan_indicator_left, Layout.header_rule_top - 1, 3, 3, 1, accent);
+                        if (scan_width > 0) c.fill(Layout.left, Layout.header_rule_top, scan_width, 1, accent);
                     }
                 },
                 .artists, .artist, .tracks => {

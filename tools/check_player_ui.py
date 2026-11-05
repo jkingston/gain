@@ -179,12 +179,12 @@ def qualify(app, root, synthetic=False):
             assert environment(millivolts, 0, 0, 0)
             player.frame()
             if millivolts == 4200:
-                fill = player.pixels[22 * 320 + 282]
-                assert fill != player.pixels[21 * 320 + 281]
+                fill = player.pixels[25 * 320 + 288]
+                assert fill != player.pixels[20 * 320 + 275]
                 assert all(
                     player.pixels[y * 320 + x] == fill
-                    for y in range(22, 28)
-                    for x in range(282, 299)
+                    for y in range(21, 29)
+                    for x in range(276, 300)
                 )
         before_usb = player.status()
         for phase in (1, 2, 3):
