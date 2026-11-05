@@ -23,8 +23,8 @@ separate `f20-v27-archive` repository.
 
 ## Current state
 
-The first native hardware milestone is verified on a physical F20 V2.7. The
-current RAM-only build provides:
+The native player boots on a physical F20 V2.7 through the preserved factory
+SPL/U-Boot and a Gain SD loader in the normal kernel slot. The build provides:
 
 - an X1000 ROM-loadable Zig SPL;
 - LPDDR initialization and a gain-owned stage-two handoff;
@@ -259,8 +259,8 @@ PMIC telemetry does not fabricate measurements when an ADC is disabled or I2C
 fails. Jack GPIOs are explicitly configured as inputs before their levels are
 used. The charge-current API can only reduce the existing setting; it does not
 negotiate a USB current budget or change battery voltage settings. Bluetooth
-transport/A2DP, native USB mass storage/audio, RTC, PWM brightness and suspend
-are not implemented. USB development currently uses the X1000 ROM interface.
+transport/A2DP, USB audio, RTC, PWM brightness and suspend are not implemented.
+Automatic native USB mass storage is described below.
 
 ## Player qualification
 
@@ -699,6 +699,45 @@ other work.
 
 The tests do not emulate the X1000. MMIO sequencing is checked by compiling
 the concrete F20 specializations and by RAM-only tests on the physical device.
+
+## SD boot and recovery
+
+Normal boot preserves the factory ROM, SPL/U-Boot and recovery. U-Boot starts
+`gain-loader.uimage` from the normal kernel slot; the native, read-only loader
+then validates and runs `.gain/firmware.f20` on the card. Hold Back while booting
+to prefer `.gain/previous.f20`. A missing or invalid candidate falls back to the
+other slot. Board, addresses, lengths and both CRCs must pass before execution.
+This detects corruption; it is not a signed-image security system.
+
+`mise run build` produces `firmware.f20`, `gain-loader.bin` and
+`gain-loader.uimage`. `mise run test-boot` tests partial copies, mutation,
+fragmented reads, fallback and boot-attempt acknowledgement in three build modes.
+The loader relocates above the player, preserves active DRAM training, clears
+only the factory boot-attempt marker after validation and owns fresh ROM recovery.
+It cannot write the card or NAND. On SD boot failure it displays the reason and
+allows Play to retry; MENU held during reset retains processor USB recovery.
+
+Ordinary player updates replace only the SD image. Keep a validated previous
+image, write and flush a temporary current image, verify it, then rename it to
+`firmware.f20` and eject the card cleanly. Never leave `update.upt` at the root
+for an ordinary SD update.
+
+For initial installation, the packaging tool can create a kernel-only factory
+update, using `version.txt` from the matching F20 V2.7 stock firmware package:
+
+```sh
+python3 tools/pack_firmware.py update zig-out/bin/gain-loader.uimage /tmp/gain.upt \
+  --version-file /path/to/stock/version.txt
+python3 tools/pack_firmware.py restore /path/to/stock/uimage.bin /tmp/restore.upt \
+  --version-file /path/to/stock/version.txt
+```
+
+Packaging requires `xorriso`. It writes host artifacts only; it never installs,
+stages or flashes them. The manifest targets only the normal kernel partition.
+The factory bootloader, recovery, logo, root filesystem and data are excluded.
+Keep the matching stock package and independent device archive available for
+recovery. The installed kernel path has been read back and cold-boot tested on
+F20 V2.7; other board revisions are not qualified.
 
 ## RAM boot
 

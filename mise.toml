@@ -135,3 +135,11 @@ run = "python3 tools/build_font_pack.py"
 [tasks.fuzz-text]
 description = "Fuzz font pack and text request boundaries with 100,000 cases"
 run = "zig build fuzz-text --fuzz=100K --summary all"
+
+[tasks.build-loader]
+description = "Build the factory-kernel-path SD loader and validated firmware envelope"
+run = "zig build build-loader --summary all"
+
+[tasks.test-boot]
+description = "Test SD boot envelope, current/previous fallback and fresh recovery"
+run = "zig build test-boot --summary all"

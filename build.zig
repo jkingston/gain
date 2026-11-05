@@ -7,6 +7,29 @@ pub fn build(b: *std.Build) void {
         .abi = .none,
         .cpu_model = .{ .explicit = &std.Target.mips.cpu.mips32r2 },
     });
+    const loader_api = b.createModule(.{ .root_source_file = b.path("src/f20.zig"), .target = target, .optimize = .ReleaseSafe });
+    const loader_module = b.createModule(.{ .root_source_file = b.path("src/boot/loader.zig"), .target = target, .optimize = .ReleaseSafe });
+    loader_module.addImport("platform", loader_api);
+    loader_module.addAssemblyFile(b.path("src/boot/start.S"));
+    loader_module.addAssemblyFile(b.path("src/boot/fresh_rom.S"));
+    const loader = b.addExecutable(.{ .name = "gain-loader.elf", .root_module = loader_module });
+    loader.entry = .disabled;
+    loader.setLinkerScript(b.path("loader.ld"));
+    const loader_raw = loader.addObjCopy(.{ .format = .binary, .basename = "gain-loader.bin" });
+    const loader_pack = b.addSystemCommand(&.{ "python3", "tools/pack_firmware.py", "loader" });
+    loader_pack.addFileArg(loader_raw.getOutput());
+    const loader_image = loader_pack.addOutputFileArg("gain-loader.uimage");
+    const loader_step = b.step("build-loader", "Build the read-only SD loader for the factory kernel boot path");
+    loader_step.dependOn(&b.addInstallArtifact(loader, .{}).step);
+    loader_step.dependOn(&b.addInstallFileWithDir(loader_raw.getOutput(), .bin, "gain-loader.bin").step);
+    loader_step.dependOn(&b.addInstallFileWithDir(loader_image, .bin, "gain-loader.uimage").step);
+    b.getInstallStep().dependOn(loader_step);
+    const boot_tests_step = b.step("test-boot", "Test boot validation, fallback, recovery and filesystem loading");
+    for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseSafe, .ReleaseFast }) |mode| {
+        const boot_module = b.createModule(.{ .root_source_file = b.path("src/boot_tests.zig"), .target = b.graph.host, .optimize = mode });
+        const boot_tests = b.addTest(.{ .root_module = boot_module });
+        boot_tests_step.dependOn(&b.addRunArtifact(boot_tests).step);
+    }
     const text_target = target;
     const text_module = b.createModule(.{
         .root_source_file = b.path("src/text_engine.zig"),
@@ -93,6 +116,11 @@ pub fn build(b: *std.Build) void {
     b.getInstallStep().dependOn(&b.addInstallFileWithDir(spl_raw.getOutput(), .bin, "gain-spl.raw").step);
     b.getInstallStep().dependOn(&b.addInstallFileWithDir(spl_image, .bin, "gain-spl.bin").step);
     b.getInstallStep().dependOn(&b.addInstallFileWithDir(stage2_raw.getOutput(), .bin, "gain-stage2.bin").step);
+
+    const firmware_pack = b.addSystemCommand(&.{ "python3", "tools/pack_firmware.py", "firmware" });
+    firmware_pack.addFileArg(stage2_raw.getOutput());
+    const firmware_image = firmware_pack.addOutputFileArg("firmware.f20");
+    b.getInstallStep().dependOn(&b.addInstallFileWithDir(firmware_image, .bin, "firmware.f20").step);
 
     const instrumented_module = b.createModule(.{ .root_source_file = b.path("src/main.zig"), .target = target, .optimize = .ReleaseFast });
     instrumented_module.addAssemblyFile(b.path("src/recovery_start.S"));
@@ -640,6 +668,7 @@ pub fn build(b: *std.Build) void {
         library_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = library_test_module })).step);
     }
     const test_step = b.step("test", "Run host-side tests");
+    test_step.dependOn(boot_tests_step);
     test_step.dependOn(library_step);
     test_step.dependOn(text_test_step);
     test_step.dependOn(usb_tests_step);
