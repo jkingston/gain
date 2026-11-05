@@ -88,6 +88,7 @@ pub const Flags = struct {
     pub const scan_phase = 16;
     pub const playback_phase = 32;
     pub const track_metadata = 64;
+    pub const transport_artwork = 128;
 };
 
 pub const no_widget = std.math.maxInt(u16);
@@ -391,7 +392,10 @@ fn prepareSpan(plan: *const Plan, input: Span) Span {
             const scene = plan.ops[span.covers].rect;
             if (op.rect.y < @as(i32, scene.y) + scene.h and @as(i32, op.rect.y) + op.rect.h > scene.y) span.covers_mask |= @as(u32, 1) << @intCast(i);
         }
-        if (span.transport != no_widget and op.rect.y < @as(i32, plan.transport.y) + plan.transport.h and @as(i32, op.rect.y) + op.rect.h > plan.transport.y) span.transport_mask |= @as(u32, 1) << @intCast(i);
+        if (span.transport != no_widget and op.rect.y < @as(i32, plan.transport.y) + plan.transport.h and @as(i32, op.rect.y) + op.rect.h > plan.transport.y) {
+            span.transport_mask |= @as(u32, 1) << @intCast(i);
+            if (op.kind == .artwork) span.flags |= Flags.transport_artwork;
+        }
         if (op.rect.y < span.progress_bottom and @as(i32, op.rect.y) + op.rect.h > span.progress_top) span.progress_mask |= @as(u32, 1) << @intCast(i);
     }
     return span;

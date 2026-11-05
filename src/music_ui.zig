@@ -1377,7 +1377,9 @@ pub fn Controller(comptime Platform: type) type {
         pub fn renderTimelineInto(self: *State, pixels: *[320 * 240]u16, now: u64) void {
             var items: [12]@import("music_widgets.zig").Item = undefined;
             var detail: [96]u8 = undefined;
-            @import("music_widgets.zig").render(self.theme_store.current(), pixels, self.context(now, &items, &detail, false), self.text_cache, true, false);
+            const plan = self.theme_store.current();
+            const artwork = plan.pages[@backingInt(self.page())].flags & theme.Flags.transport_artwork != 0;
+            @import("music_widgets.zig").render(plan, pixels, self.context(now, &items, &detail, artwork), self.text_cache, true, false);
         }
 
         fn render(self: *State, now: u64) void {
@@ -2820,10 +2822,11 @@ test "custom overlapping layers survive transport and Cover Flow partial redraws
     defer parsed.deinit();
     var document = parsed.value;
     const overlay = theme.Node{ .kind = .text, .rect = .{ .x = 10, .y = 195, .w = 100, .h = 20 }, .value = "Overlay", .color = .accent };
-    const player = try std.testing.allocator.alloc(theme.Node, document.screens.player.len + 1);
+    const player = try std.testing.allocator.alloc(theme.Node, document.screens.player.len + 2);
     defer std.testing.allocator.free(player);
-    @memcpy(player[0 .. player.len - 1], document.screens.player);
-    player[player.len - 1] = overlay;
+    @memcpy(player[0 .. player.len - 2], document.screens.player);
+    player[player.len - 2] = overlay;
+    player[player.len - 1] = .{ .kind = .artwork, .rect = .{ .x = 125, .y = 194, .w = 24, .h = 24 } };
     document.screens.player = player;
     const albums = try std.testing.allocator.alloc(theme.Node, document.screens.albums.len + 1);
     defer std.testing.allocator.free(albums);
@@ -2839,6 +2842,11 @@ test "custom overlapping layers survive transport and Cover Flow partial redraws
     state.theme_store.using_custom = true;
     const tracks = [_]core.Track{.{ .id = 1, .path = "Album/one.flac", .stamp = .{}, .meta = .{ .title = "One", .album = "Album", .artist = "Artist" } }};
     try fixture.pair.publish(&.{}, &tracks, 1, true);
+    const album = state.snapshot().albums[0];
+    const load = covers.Cache.Load{ .slot = 0, .request = .{ .id = album.id, .art = album.art } };
+    fixture.cache.begin(load);
+    fixture.cache.tiles[0] = .{ .width = 128, .height = 128, .pixels = @splat(0x07e0) };
+    fixture.cache.publish(load);
     state.playing_track = &tracks[0];
     state.status = .{ .phase = .playing, .sample_rate = 48000, .output_format = .signed_24_in_u32, .total_frames = 480000, .played_frames = 48000 };
     var retained: [320 * 240]u16 = undefined;
