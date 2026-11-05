@@ -52,7 +52,7 @@ const documents = [_]theme.Document{
             .{
                 .kind = .text,
                 .rect = .{
-                    .x = 184,
+                    .x = 164,
                     .y = 21,
                     .w = 84,
                     .h = 18,
@@ -627,7 +627,7 @@ const documents = [_]theme.Document{
             .{
                 .kind = .text,
                 .rect = .{
-                    .x = 184,
+                    .x = 164,
                     .y = 21,
                     .w = 84,
                     .h = 18,
@@ -1202,7 +1202,7 @@ const documents = [_]theme.Document{
             .{
                 .kind = .text,
                 .rect = .{
-                    .x = 184,
+                    .x = 164,
                     .y = 21,
                     .w = 84,
                     .h = 18,
@@ -1778,7 +1778,7 @@ const documents = [_]theme.Document{
             .{
                 .kind = .text,
                 .rect = .{
-                    .x = 184,
+                    .x = 164,
                     .y = 21,
                     .w = 84,
                     .h = 18,
@@ -2354,7 +2354,7 @@ const documents = [_]theme.Document{
             .{
                 .kind = .text,
                 .rect = .{
-                    .x = 184,
+                    .x = 164,
                     .y = 18,
                     .w = 84,
                     .h = 18,
@@ -2931,7 +2931,7 @@ const documents = [_]theme.Document{
             .{
                 .kind = .text,
                 .rect = .{
-                    .x = 184,
+                    .x = 164,
                     .y = 18,
                     .w = 84,
                     .h = 18,
