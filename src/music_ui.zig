@@ -823,7 +823,7 @@ pub fn Controller(comptime Platform: type) type {
             for (&self.covers.requested) |*request| request.* = .{};
             switch (self.screen) {
                 .home => {
-                    self.header(c, "Music", std.fmt.bufPrint(&buf, "{d} tracks", .{view.track_count}) catch "");
+                    self.header(c, "Music", "");
                     for (self.first..@min(home_items.len, self.first + self.visibleRows())) |i| {
                         const name = home_items[i].name;
                         const y: i32 = Layout.row_top + @as(i32, @intCast(i - self.first)) * Layout.row_height;

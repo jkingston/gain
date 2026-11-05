@@ -18,11 +18,12 @@ pub const Layout = struct {
     pub const footer_top = 216;
     pub const timeline_top = 192;
     pub const header_center = 25;
-    pub const battery_width = 28;
-    pub const battery_height = 12;
+    pub const battery_width = 24;
+    pub const battery_height = 14;
     pub const battery_left = right - battery_width - 2;
     pub const battery_top = header_center - battery_height / 2;
-    pub const power_badge_left = right - 44;
+    pub const power_badge_height = 12;
+    pub const power_badge_left = right - 40;
     pub const detail_right = right - 48;
     pub const header_rule_top = 54;
     pub const scan_indicator_left = right - 3;
@@ -68,7 +69,7 @@ pub fn batteryIcon(c: draw.Canvas, status: battery.Status) void {
     c.pixel(left, top + Layout.battery_height - 1, paper);
     c.pixel(left + Layout.battery_width - 1, top + Layout.battery_height - 1, paper);
     c.fill(left + 1, top + 1, Layout.battery_width - 2, Layout.battery_height - 2, paper);
-    c.fill(Layout.right - 2, top + 4, 2, 4, muted);
+    c.fill(Layout.right - 2, top + (Layout.battery_height - 4) / 2, 2, 4, muted);
     const fill_width = Layout.battery_width - 4;
     const fill_height = Layout.battery_height - 4;
     if (status.kind == .unknown) {
@@ -80,18 +81,19 @@ pub fn batteryIcon(c: draw.Canvas, status: battery.Status) void {
         c.fill(left + 2, top + 2, 1, fill_height, color);
     }
     const badge_left = Layout.power_badge_left;
+    const badge_top = top + (Layout.battery_height - Layout.power_badge_height) / 2;
     if (status.badge() == .charging) {
         // The bolt has its own fixed space; neither icon nor title shifts.
         const offsets = [_]u8{ 6, 5, 4, 3, 2, 1, 4, 4, 3, 2, 2, 1 };
         const widths = [_]u8{ 2, 2, 2, 2, 6, 7, 3, 2, 2, 2, 1, 1 };
-        for (offsets, widths, 0..) |offset, width, row| c.fill(badge_left + 1 + @as(i32, offset), top + @as(i32, @intCast(row)), width, 1, accent);
+        for (offsets, widths, 0..) |offset, width, row| c.fill(badge_left + 1 + @as(i32, offset), badge_top + @as(i32, @intCast(row)), width, 1, accent);
     } else if (status.badge() == .plugged) {
-        c.fill(badge_left + 2, top, 2, 3, accent);
-        c.fill(badge_left + 6, top, 2, 3, accent);
-        c.fill(badge_left + 1, top + 3, 8, 4, accent);
-        c.fill(badge_left + 2, top + 7, 6, 1, accent);
-        c.fill(badge_left + 3, top + 8, 4, 1, accent);
-        c.fill(badge_left + 4, top + 9, 2, 3, accent);
+        c.fill(badge_left + 2, badge_top, 2, 3, accent);
+        c.fill(badge_left + 6, badge_top, 2, 3, accent);
+        c.fill(badge_left + 1, badge_top + 3, 8, 4, accent);
+        c.fill(badge_left + 2, badge_top + 7, 6, 1, accent);
+        c.fill(badge_left + 3, badge_top + 8, 4, 1, accent);
+        c.fill(badge_left + 4, badge_top + 9, 2, 3, accent);
     }
 }
 
@@ -102,15 +104,15 @@ test "full battery fills its entire inset and unknown cannot resemble empty" {
     const c = draw.Canvas.init(&pixels);
     c.clear(paper);
     batteryIcon(c, battery.Status.fromVoltage(4200, false));
-    for (21..29) |y| for (276..300) |x| try std.testing.expectEqual(accent, pixels[y * 320 + x]);
+    for (20..30) |y| for (280..300) |x| try std.testing.expectEqual(accent, pixels[y * 320 + x]);
     c.clear(paper);
     batteryIcon(c, battery.Status.fromVoltage(0, false));
-    try std.testing.expectEqual(muted, pixels[24 * 320 + 286]);
-    try std.testing.expectEqual(paper, pixels[21 * 320 + 276]);
+    try std.testing.expectEqual(muted, pixels[24 * 320 + 288]);
+    try std.testing.expectEqual(paper, pixels[20 * 320 + 280]);
     c.clear(paper);
     batteryIcon(c, battery.Status.fromVoltage(3300, false));
-    try std.testing.expect(pixels[21 * 320 + 276] != paper);
-    try std.testing.expectEqual(paper, pixels[24 * 320 + 286]);
+    try std.testing.expect(pixels[20 * 320 + 280] != paper);
+    try std.testing.expectEqual(paper, pixels[24 * 320 + 288]);
 }
 
 test "power transitions preserve capacity, erase old badges and stay inside the header slot" {
