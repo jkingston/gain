@@ -12,6 +12,11 @@ const Fake = struct {
     metadata_error: bool = false,
     missing_leaf: []const u8 = "",
     other_leaf: []const u8 = "",
+    reuse_metadata: bool = true,
+
+    pub fn canReuseMetadata(self: *@This(), _: core.Metadata) bool {
+        return self.reuse_metadata;
+    }
 
     pub fn enumerate(self: *@This(), a: std.mem.Allocator) !core.Enumeration {
         if (self.fail) return error.Disconnected;
@@ -38,6 +43,27 @@ const Fake = struct {
         return error.NoPlaylist;
     }
 };
+
+test "parser upgrades refresh unchanged records while preserving stable identity" {
+    const entries = [_]core.Entry{.{ .path = "Album/1.mp3", .kind = .audio, .stamp = .{ .size = 100, .modified = 10 } }};
+    var backend = Fake{ .entries = &entries, .title = "Legacy filename" };
+    var observer = Observer{};
+    var first = try core.scan(std.testing.allocator, &backend, &.{}, .quick, &observer);
+    defer first.deinit();
+    backend.reuse_metadata = false;
+    backend.title = "Fresh metadata";
+    var second = try core.scan(std.testing.allocator, &backend, &first.value, .quick, &observer);
+    defer second.deinit();
+    try std.testing.expectEqual(1, second.value.stats.parsed);
+    try std.testing.expectEqual(0, second.value.stats.reused);
+    try std.testing.expectEqual(first.value.tracks[0].id, second.value.tracks[0].id);
+    try std.testing.expectEqualStrings("Fresh metadata", second.value.tracks[0].meta.title);
+    backend.reuse_metadata = true;
+    var third = try core.scan(std.testing.allocator, &backend, &second.value, .quick, &observer);
+    defer third.deinit();
+    try std.testing.expectEqual(0, third.value.stats.parsed);
+    try std.testing.expectEqual(1, third.value.stats.reused);
+}
 
 test "an untagged neighbour follows unanimous retags but never guesses in an ambiguous folder" {
     var entries = [_]core.Entry{

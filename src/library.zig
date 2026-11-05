@@ -392,7 +392,11 @@ pub fn scanWithScratch(allocator: A, scratch: A, backend: anytype, previous: *co
             }
         }
         var track: Track = undefined;
-        if (old != null and entry.stamp.same(old.?.stamp) and mode == .quick and old.?.error_name.len == 0) {
+        var reusable = true;
+        if (comptime @hasDecl(@typeInfo(@TypeOf(backend)).pointer.child, "canReuseMetadata")) {
+            reusable = if (old) |value| backend.canReuseMetadata(value.meta) else false;
+        }
+        if (old != null and entry.stamp.same(old.?.stamp) and mode == .quick and old.?.error_name.len == 0 and reusable) {
             track = old.?;
             track.path = entry.path;
             track.meta = try clone(a, old.?.meta);

@@ -1,7 +1,11 @@
-//! Streaming baseline JPEG to a bounded RGB565 tile. Upstream owns entropy/
+//! Streaming JPEG/PNG to a bounded RGB565 tile. Upstream owns entropy/
 //! IDCT decoding; Zig owns input bounds, aspect ratio and area accumulation.
 const std = @import("std");
 const c = @import("c_jpeg");
+
+comptime {
+    _ = @import("png_artwork.zig");
+}
 
 pub const edge = @import("artwork_tile.zig").edge;
 pub const pixel_count = edge * edge;
@@ -9,8 +13,13 @@ pub const sum_words = pixel_count * 4;
 
 pub const Tile = @import("artwork_tile.zig").Tile;
 
-pub fn decode(source: anytype, offset: u64, length: u32, sums: []u32, tile: *Tile, observer: anytype) !void {
+pub fn decode(source: anytype, offset: u64, length: u32, sums: []u32, scratch: []u8, tile: *Tile, observer: anytype) !void {
     if (sums.len < sum_words or offset > source.length or length > source.length - offset) return error.InvalidArtwork;
+    if (length >= 8) {
+        var signature: [8]u8 = undefined;
+        try source.read(offset, &signature);
+        if (std.mem.eql(u8, &signature, "\x89PNG\x0d\x0a\x1a\x0a")) return @import("png_artwork.zig").decode(source, offset, length, sums, scratch, tile, observer);
+    }
     const S = @TypeOf(source);
 
     const Feed = struct {
@@ -101,9 +110,12 @@ const TestSource = struct {
 
 const TestObserver = struct {
     cancel: bool = false,
+    calls: usize = 0,
+    limit: usize = std.math.maxInt(usize),
 
-    fn cancelled(self: *@This()) bool {
-        return self.cancel;
+    pub fn cancelled(self: *@This()) bool {
+        self.calls += 1;
+        return self.cancel or self.calls >= self.limit;
     }
 };
 
@@ -115,7 +127,7 @@ test "JPEG bridge handles MCU sampling modes, reduction, aspect fit and cancella
     for (fixtures, 0..) |bytes, i| {
         var source = TestSource{ .bytes = bytes, .length = bytes.len };
         var tile: Tile = undefined;
-        try decode(&source, 0, @intCast(bytes.len), sums, &tile, &observer);
+        try decode(&source, 0, @intCast(bytes.len), sums, &.{}, &tile, &observer);
         try std.testing.expectEqual(if (i == 2) @as(u16, 112) else @as(u16, 64), tile.width);
         try std.testing.expectEqual(if (i == 2) @as(u16, 112) else @as(u16, 32), tile.height);
         for (0..edge) |y| for (0..edge) |x| {
@@ -127,12 +139,49 @@ test "JPEG bridge handles MCU sampling modes, reduction, aspect fit and cancella
             } else try std.testing.expectEqual(0, pixel);
         };
         observer.cancel = true;
-        try std.testing.expectError(error.Cancelled, decode(&source, 0, @intCast(bytes.len), sums, &tile, &observer));
+        try std.testing.expectError(error.Cancelled, decode(&source, 0, @intCast(bytes.len), sums, &.{}, &tile, &observer));
         observer.cancel = false;
         source.bytes = bytes[0 .. bytes.len / 2];
-        if (decode(&source, 0, @intCast(bytes.len), sums, &tile, &observer)) |_| return error.AcceptedTruncatedArtwork else |_| {}
-        try std.testing.expectError(error.InvalidArtwork, decode(&source, bytes.len, 1, sums, &tile, &observer));
+        if (decode(&source, 0, @intCast(bytes.len), sums, &.{}, &tile, &observer)) |_| return error.AcceptedTruncatedArtwork else |_| {}
+        try std.testing.expectError(error.InvalidArtwork, decode(&source, bytes.len, 1, sums, &.{}, &tile, &observer));
     }
+}
+
+test "fuzz bounded artwork decoding and PNG chunk mutations" {
+    try std.testing.fuzz({}, fuzz, .{ .corpus = &.{
+        "\xff\xff\xff\xff" ++ @embedFile("testdata/art-alpha.png"),
+        "\xff\xff\xff\xff" ++ @embedFile("testdata/art-adam7.png"),
+        "\xff\xff\xff\xff" ++ @embedFile("testdata/art444.jpg"),
+    } });
+}
+
+fn fuzz(_: void, smith: *std.testing.Smith) !void {
+    var bytes: [4096]u8 = undefined;
+    const input = bytes[0..smith.slice(&bytes)];
+    var sums: [sum_words]u32 = undefined;
+    var scratch: [256 * 1024]u8 align(16) = undefined;
+    var tile: Tile = undefined;
+    var source = TestSource{ .bytes = input, .length = input.len };
+    var observer = TestObserver{ .limit = 256 };
+    decode(&source, 0, @intCast(input.len), &sums, &scratch, &tile, &observer) catch {};
+
+    const seed = @embedFile("testdata/art-adam7.png");
+    var mutated: [seed.len]u8 = seed.*;
+    if (input.len < 2) return;
+    mutated[input[0] % mutated.len] ^= input[1];
+    // Keep valid chunk checksums to exercise PNG fields and DEFLATE states.
+    // Length mutations still have to pass the ordinary chunk bounds checks.
+    var at: usize = 8;
+    while (at + 12 <= mutated.len) {
+        const length = std.mem.readInt(u32, mutated[at..][0..4], .big);
+        if (length > mutated.len - at - 12) break;
+        const crc = std.hash.Crc32.hash(mutated[at + 4 ..][0 .. length + 4]);
+        std.mem.writeInt(u32, mutated[at + 8 + length ..][0..4], crc, .big);
+        at += length + 12;
+    }
+    observer = .{ .limit = 256 };
+    source = .{ .bytes = &mutated, .length = mutated.len };
+    decode(&source, 0, mutated.len, &sums, &scratch, &tile, &observer) catch {};
 }
 
 test "JPEG MCU blocks retain their spatial arrangement and channel order" {
@@ -142,7 +191,7 @@ test "JPEG MCU blocks retain their spatial arrangement and channel order" {
     defer std.testing.allocator.free(sums);
     var observer: TestObserver = .{};
     var tile: Tile = undefined;
-    try decode(&source, 0, bytes.len, sums, &tile, &observer);
+    try decode(&source, 0, bytes.len, sums, &.{}, &tile, &observer);
     for (0..64) |y| for (0..64) |x| {
         // Exclude JPEG chroma filtering at the quadrant edges.
         if (x % 32 < 2 or x % 32 > 29 or y % 32 < 2 or y % 32 > 29) continue;
@@ -171,9 +220,45 @@ test "caller-owned tile and accumulation workspaces preserve their guards" {
     defer std.testing.allocator.free(sums);
     @memset(sums, 0xdeadbeef);
     var observer: TestObserver = .{};
-    try decode(&source, 0, bytes.len, sums[0..sum_words], &guarded.tile, &observer);
+    try decode(&source, 0, bytes.len, sums[0..sum_words], &.{}, &guarded.tile, &observer);
     for (guarded.before) |value| try std.testing.expectEqual(0xa5, value);
     for (guarded.after) |value| try std.testing.expectEqual(0x5a, value);
     for (sums[sum_words..]) |value| try std.testing.expectEqual(0xdeadbeef, value);
     try std.testing.expectEqual(64, guarded.tile.width);
+}
+
+test "PNG scanlines retain Adam7 coordinates, alpha, palette and 16-bit grayscale" {
+    const fixtures = [_][]const u8{ @embedFile("testdata/art-alpha.png"), @embedFile("testdata/art-adam7.png"), @embedFile("testdata/art-gray16.png"), @embedFile("testdata/art-palette.png") };
+    const a = std.testing.allocator;
+    const sums = try a.alloc(u32, sum_words + 16);
+    defer a.free(sums);
+    const scratch = try a.alignedAlloc(u8, .@"16", 512 * 1024);
+    defer a.free(scratch);
+    var observer: TestObserver = .{};
+    for (fixtures, 0..) |bytes, fixture| {
+        var source = TestSource{ .bytes = bytes, .length = bytes.len };
+        var tile: Tile = undefined;
+        @memset(sums, 0xdeadbeef);
+        try decode(&source, 0, @intCast(bytes.len), sums[0..sum_words], scratch, &tile, &observer);
+        for (sums[sum_words..]) |value| try std.testing.expectEqual(0xdeadbeef, value);
+        try std.testing.expectEqual(if (fixture < 2) @as(u16, 64) else 16, tile.width);
+        for (0..tile.height) |y| for (0..tile.width) |x| {
+            const expected: u16 = if (fixture < 2) ([_]u16{ 0xf800, 0x07e0, 0x001f, 0xffff })[@as(usize, @intFromBool(y >= 16)) * 2 + @intFromBool(x >= 32)] else if (fixture == 2 or x % 2 == 0) 0xffff else 0xf800;
+            try std.testing.expectEqual(expected, tile.pixels[(y + tile.y) * edge + x + tile.x]);
+        };
+        observer.cancel = true;
+        try std.testing.expectError(error.Cancelled, decode(&source, 0, @intCast(bytes.len), sums, scratch, &tile, &observer));
+        observer.cancel = false;
+        try std.testing.expectError(error.ArtworkMemory, decode(&source, 0, @intCast(bytes.len), sums, scratch[0..32], &tile, &observer));
+        for (0..bytes.len) |length| {
+            source.length = length;
+            if (decode(&source, 0, @intCast(length), sums, scratch, &tile, &observer)) |_| return error.AcceptedTruncatedPng else |_| {}
+        }
+        source.length = bytes.len;
+        const corrupt = try a.dupe(u8, bytes);
+        defer a.free(corrupt);
+        corrupt[corrupt.len - 1] ^= 1;
+        source.bytes = corrupt;
+        if (decode(&source, 0, @intCast(bytes.len), sums, scratch, &tile, &observer)) |_| return error.AcceptedCorruptPng else |_| {}
+    }
 }

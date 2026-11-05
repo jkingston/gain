@@ -1,4 +1,5 @@
-//! RAM-only bootloader spike. No NAND interface and no SD write capability.
+//! Read-only SD loader for the factory kernel path, with RAM qualification
+//! entries. It has no NAND interface or SD write capability.
 const std = @import("std");
 const platform = @import("platform");
 const storage = platform.storage;

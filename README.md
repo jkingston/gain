@@ -169,11 +169,19 @@ sort tags and ReplayGain. Missing tags use filename/folder fallbacks. Metadata
 parsers bound text, tag size and traversal work; malformed files retain previous
 known tags. MPEG properties require consecutive compatible frame headers;
 duration remains unknown without a frame count rather than guessing from size.
+Quick refresh also rereads legacy extension-only metadata for the newly supported
+formats once; unchanged MP4/FLAC records remain reusable.
 Opus R128 gains use the ReplayGain reference (+5 dB relative to R128); the codec
 already applies OpusHead gain. Album grouping uses album artist, release identity and
 edition folders; multi-disc folders share an album. Sidecar/embedded baseline
-JPEG covers are streamed to bounded 112 × 112 RGB565 tiles. Progressive JPEG,
-PNG, EXIF orientation and colour-profile conversion are not implemented by the
+JPEG and PNG covers are streamed to bounded 112 × 112 RGB565 tiles. PNG supports
+palette, grayscale, 16-bit samples, transparency and Adam7 interlacing. It uses
+bounded row/pool storage and checks checksums; source dimensions are limited to
+4096 × 4096, compressed input to 16 MiB, retained ancillary data to 256 KiB and
+chunk traversal to 1024. Transparent pixels use a white matte in the opaque
+RGB565 atlas. The upstream PNG decoder is libspng 0.7.4 with zlib 1.4; all custom
+stream/allocation/resizing code is Zig. Progressive JPEG,
+EXIF orientation and colour-profile conversion are not implemented by the
 native artwork path. Playback codec support is listed separately below.
 
 The catalogue has two checksummed generations, with payload committed before its
@@ -858,7 +866,7 @@ or Korean Han forms; automatic uses Japanese forms where available, then the
 coverage fallback. This affects glyph forms, not metadata or sorting.
 
 The native text engine is a separate, fixed-address SD component. The core boot
-image stays within its existing 2 MiB reservation. The loader validates the
+image stays within its 2.5 MiB reservation. The loader validates the
 component version, addresses, length and CRC before execution. The build gate
 checks the ELF for memory bounds, OS syscalls, TLS and constructors. No OS
 startup runs. All authored adapters and runtime helpers are Zig. Missing or

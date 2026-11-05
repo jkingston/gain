@@ -151,3 +151,7 @@ run = "zig build test-filesystems --summary all"
 [tasks.fuzz-metadata]
 description = "Fuzz bounded native metadata readers with 100,000 cases"
 run = "zig build fuzz-metadata --fuzz=100K --summary all"
+
+[tasks.fuzz-artwork]
+description = "Fuzz bounded image decoding and PNG chunk mutations"
+run = "zig build fuzz-artwork --fuzz=100K --summary all"

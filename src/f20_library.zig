@@ -154,6 +154,10 @@ pub const Backend = struct {
         }
     };
 
+    pub fn canReuseMetadata(_: *Backend, previous: core.Metadata) bool {
+        return media.canReuse(previous);
+    }
+
     pub fn metadata(self: *Backend, a: A, entry: core.Entry) !core.Metadata {
         const began = x.Timer.now();
         defer {
@@ -254,7 +258,9 @@ pub const Backend = struct {
             }
             const workspace = memory.decoder_arena.cachedSlice(u32);
             const tile: *art.Tile = @ptrCast(@alignCast(workspace[art.sum_words..].ptr));
-            try art.decode(&source, range.offset, range.length, workspace[0..art.sum_words], tile, self);
+            const scratch_offset = std.mem.alignForward(usize, art.sum_words * 4 + @sizeOf(art.Tile), 16);
+            const scratch = std.mem.sliceAsBytes(workspace)[scratch_offset..];
+            try art.decode(&source, range.offset, range.length, workspace[0..art.sum_words], scratch, tile, self);
             const slot = try pack.append(key, tile);
             self.metrics.art_prepared += 1;
             break :prepare slot;

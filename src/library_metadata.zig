@@ -6,6 +6,21 @@ const tags = @import("mp4_tags.zig");
 
 const A = std.mem.Allocator;
 
+/// Earlier builds stored extension-only fallbacks for these formats. Refresh
+/// them once even if FAT size/timestamp is unchanged; current records have a
+/// canonical codec name without the leading dot. MP4/FLAC caches remain valid.
+pub fn canReuse(previous: catalog.Metadata) bool {
+    for ([_][]const u8{ ".mp3", ".mp2", ".mp1", ".ogg", ".opus", ".wav", ".wave", ".aiff", ".aif", ".aifc" }) |extension| {
+        if (std.ascii.eqlIgnoreCase(previous.codec, extension)) return false;
+    }
+    return true;
+}
+
+test "new tag readers refresh legacy fallbacks without invalidating current records" {
+    for ([_][]const u8{ ".mp3", ".MP2", ".ogg", ".opus", ".WAV", ".aiff" }) |codec| try std.testing.expect(!canReuse(.{ .codec = codec }));
+    for ([_][]const u8{ "aac", "alac", "flac", "mp3", "opus", "vorbis", "wave", "aiff" }) |codec| try std.testing.expect(canReuse(.{ .codec = codec }));
+}
+
 fn number(text: []const u8) u32 {
     var parts = std.mem.tokenizeAny(u8, text, "/ ");
     return std.fmt.parseInt(u32, parts.next() orelse "", 10) catch 0;

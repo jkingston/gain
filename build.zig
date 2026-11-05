@@ -589,7 +589,7 @@ pub fn build(b: *std.Build) void {
     }
     const pipeline_tests_step = b.step("test-pipeline", "Run shared executive, session and PCM pipeline regressions");
     for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |mode| {
-        for ([_][]const u8{ "src/replay_gain.zig", "src/transport.zig", "src/sd_arming.zig", "src/deadline_timer.zig", "src/scan_admission.zig", "src/track_selection.zig", "tools/player_check_report.zig", "tools/player_pcm_checksum.zig", "src/file_browser.zig", "src/player_screen.zig", "src/f20_player.zig", "src/buffer_regions.zig", "src/executive.zig", "src/task_context.zig", "src/task_stack.zig", "src/task_dispatch.zig", "src/byte_ring.zig", "src/input_stream.zig", "src/codec_pool.zig", "src/codec_runtime.zig", "src/media_source.zig", "src/f20_memory.zig", "src/pcm_reservoir.zig", "src/audio_output.zig" }) |source| {
+        for ([_][]const u8{ "src/replay_gain.zig", "src/transport.zig", "src/sd_arming.zig", "src/deadline_timer.zig", "src/scan_admission.zig", "src/track_selection.zig", "tools/player_check_report.zig", "tools/player_pcm_checksum.zig", "src/file_browser.zig", "src/player_screen.zig", "src/f20_player.zig", "src/buffer_regions.zig", "src/executive.zig", "src/task_context.zig", "src/task_stack.zig", "src/task_dispatch.zig", "src/byte_ring.zig", "src/input_stream.zig", "src/codec_pool.zig", "src/codec_runtime.zig", "src/codec_math.zig", "src/media_source.zig", "src/f20_memory.zig", "src/pcm_reservoir.zig", "src/audio_output.zig" }) |source| {
             const tests = b.addTest(.{
                 .root_module = b.createModule(.{ .root_source_file = b.path(source), .target = b.graph.host, .optimize = mode }),
             });
@@ -698,6 +698,9 @@ pub fn build(b: *std.Build) void {
         library_test_module.addImport("library", library_module);
         library_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = library_test_module })).step);
     }
+    const art_fuzz_module = b.createModule(.{ .root_source_file = b.path("src/artwork.zig"), .target = b.graph.host, .optimize = .ReleaseSafe, .link_libc = true });
+    @import("build_art.zig").add(b, art_fuzz_module, b.graph.host, .ReleaseSafe, false);
+    b.step("fuzz-artwork", "Fuzz bounded image decoding and PNG chunk mutations").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = art_fuzz_module })).step);
     const test_step = b.step("test", "Run host-side tests");
     test_step.dependOn(filesystem_tests_step);
     test_step.dependOn(boot_tests_step);
