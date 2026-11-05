@@ -4,7 +4,7 @@ const std = @import("std");
 const capture = @import("input_capture.zig");
 pub const Button = capture.Button;
 pub const Context = enum { list, covers, transport };
-pub const Action = union(enum) { none, move: i32, select, back, home, menu, queue, jump, previous, next, scrub: i32, commit_seek, volume_up, volume_down };
+pub const Action = union(enum) { none, move: i32, select, back, home, menu, queue, jump, previous, next, scrub: i32, commit_seek, adjust_volume: i8, volume_up, volume_down };
 
 const first_repeat_ms = 320;
 const travel_start_ms = 900;
@@ -14,7 +14,8 @@ const wheel_reset_ms = 180;
 const menu_hold_ms = 500;
 const seek_hold_ms = 400;
 const seek_repeat_ms = 120;
-const volume_repeat_ms = 100;
+const volume_first_repeat_ms = 240;
+const volume_repeat_ms = 90;
 const navigation_mask = Button.previous.mask() | Button.next.mask();
 const volume_mask = Button.volume_up.mask() | Button.volume_down.mask();
 
@@ -39,6 +40,10 @@ pub const Policy = struct {
     transport_button: ?Button = null,
     seeking: bool = false,
     volume_at: u64 = 0,
+    volume_started_at: u64 = 0,
+    volume_press_at: ?u64 = null,
+    volume_direction: i2 = 0,
+    volume_presses: u8 = 0,
     wheel_at: ?u64 = null,
     wheel_direction: i32 = 0,
     wheel_interval: u64 = wheel_reset_ms,
@@ -95,9 +100,23 @@ pub const Policy = struct {
             return .{ .move = self.direction };
         }
         if (button == .volume_up or button == .volume_down) {
-            self.volume_at = now +| first_repeat_ms;
-            if (!pressed or self.held & volume_mask == volume_mask) return .none;
-            return if (button == .volume_up) .volume_up else .volume_down;
+            self.volume_at = now +| volume_first_repeat_ms;
+            if (!pressed) return .none;
+            if (self.held & volume_mask == volume_mask) {
+                self.volume_press_at = null;
+                self.volume_presses = 0;
+                return .none;
+            }
+            const direction: i2 = if (button == .volume_up) 1 else -1;
+            const rapid = self.volume_direction == direction and if (self.volume_press_at) |at| now -| at <= 250 else false;
+            self.volume_presses = if (rapid) self.volume_presses +| 1 else 1;
+            self.volume_press_at = now;
+            self.volume_direction = direction;
+            self.volume_started_at = now;
+            // Same-direction taps ramp 0.5, 1, then at most 2 dB. A pause or
+            // reversal immediately restores half-decibel control.
+            const step: i8 = if (self.volume_presses == 1) 1 else if (self.volume_presses == 2) 2 else 4;
+            return .{ .adjust_volume = @as(i8, direction) * step };
         }
         if (button == .back) {
             if (pressed) {
@@ -176,7 +195,9 @@ pub const Policy = struct {
         const volume = self.held & raw_held & ~self.suppressed & volume_mask;
         if (now >= self.volume_at and (volume == Button.volume_up.mask() or volume == Button.volume_down.mask())) {
             self.volume_at = now +| volume_repeat_ms;
-            return if (volume == Button.volume_up.mask()) .volume_up else .volume_down;
+            const age = now -| self.volume_started_at;
+            const step: i8 = if (age < 500) 2 else 4;
+            return .{ .adjust_volume = if (volume == Button.volume_up.mask()) step else -step };
         }
         if (self.transport_button) |button| {
             if (context == .transport and raw_held & button.mask() != 0 and now >= self.repeat_at) {
@@ -297,14 +318,48 @@ test "transport taps skip only on release and held seeking accelerates without s
 
 test "volume holds are bounded and release or cancellation withdraws repeats" {
     var policy = Policy{};
-    try std.testing.expectEqual(Action.volume_up, policy.edge(.volume_up, true, 0, .list, 3));
-    try std.testing.expectEqual(Action.none, policy.tick(319, .list, 3, Button.volume_up.mask()));
-    try std.testing.expectEqual(Action.volume_up, policy.tick(320, .list, 3, Button.volume_up.mask()));
-    try std.testing.expectEqual(Action.volume_up, policy.tick(10000, .list, 3, Button.volume_up.mask()));
+    try std.testing.expectEqual(Action{ .adjust_volume = 1 }, policy.edge(.volume_up, true, 0, .list, 3));
+    try std.testing.expectEqual(Action.none, policy.tick(239, .list, 3, Button.volume_up.mask()));
+    try std.testing.expectEqual(Action{ .adjust_volume = 2 }, policy.tick(240, .list, 3, Button.volume_up.mask()));
+    try std.testing.expectEqual(Action{ .adjust_volume = 4 }, policy.tick(10000, .list, 3, Button.volume_up.mask()));
     try std.testing.expectEqual(Action.none, policy.tick(10000, .list, 3, Button.volume_up.mask()));
     try std.testing.expectEqual(Action.none, policy.tick(10100, .list, 3, 0));
     _ = policy.edge(.volume_down, true, 10200, .list, 3);
     try std.testing.expectEqual(Action.none, policy.tick(11000, .list, 3, volume_mask));
     policy.cancel(volume_mask);
     try std.testing.expectEqual(Action.none, policy.tick(20000, .list, 3, volume_mask));
+}
+
+test "rapid volume tapping accelerates modestly and pauses or reversals restore fine adjustment" {
+    var policy = Policy{};
+    for (0..8) |i| {
+        const now = i * 100;
+        try std.testing.expectEqual(Action{ .adjust_volume = if (i == 0) 1 else if (i == 1) 2 else 4 }, policy.edge(.volume_up, true, now, .list, 3));
+        _ = policy.edge(.volume_up, false, now + 30, .list, 3);
+    }
+    try std.testing.expectEqual(Action{ .adjust_volume = -1 }, policy.edge(.volume_down, true, 800, .list, 3));
+    _ = policy.edge(.volume_down, false, 830, .list, 3);
+    try std.testing.expectEqual(Action{ .adjust_volume = 1 }, policy.edge(.volume_up, true, 900, .list, 3));
+    _ = policy.edge(.volume_up, false, 930, .list, 3);
+    try std.testing.expectEqual(Action{ .adjust_volume = 1 }, policy.edge(.volume_up, true, 1300, .list, 3));
+    policy.cancel(Button.volume_up.mask());
+    try std.testing.expectEqual(Action.none, policy.tick(6000, .list, 3, Button.volume_up.mask()));
+}
+
+test "a capped volume hold traverses the full range in a few seconds at different polling cadences" {
+    for ([_]u64{ 5, 16, 33, 50 }) |cadence| {
+        var policy = Policy{};
+        var level: i32 = policy.edge(.volume_up, true, 0, .transport, 0).adjust_volume;
+        var now: u64 = cadence;
+        while (level < 112 and now <= 3300) : (now += cadence) {
+            const action = policy.tick(now, .transport, 0, Button.volume_up.mask());
+            if (action == .adjust_volume) {
+                try std.testing.expect(action.adjust_volume <= 4);
+                level += action.adjust_volume;
+            }
+        }
+        try std.testing.expect(level >= 112);
+        _ = policy.edge(.volume_up, false, now, .transport, 0);
+        try std.testing.expectEqual(Action.none, policy.tick(now + 10000, .transport, 0, 0));
+    }
 }

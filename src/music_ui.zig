@@ -20,8 +20,8 @@ pub const Input = enum(u3) { select, back, home, up, down, volume_up, volume_dow
 
 pub const Screen = enum { home, albums, tracks, player, library, artists, artist, settings, music, folders, themes };
 pub const TrackScope = enum { album, artist, all, queue, folder };
-const MusicItem = enum { albums, artists, songs, folders, shuffle_all };
-const music_items = [_]MusicItem{ .albums, .artists, .songs, .folders, .shuffle_all };
+const MusicItem = enum { albums, artists, songs, shuffle_all };
+const music_items = [_]MusicItem{ .albums, .artists, .songs, .shuffle_all };
 const Collection = struct { scope: TrackScope, album: u64 = 0, artist: u64 = 0, directory: []const u8 = "" };
 const ContextMenu = struct {
     kind: enum { collection, player },
@@ -689,6 +689,7 @@ pub fn Controller(comptime Platform: type) type {
                     self.dirty = true;
                     return .none;
                 },
+                .adjust_volume => |delta| return self.changeVolume(delta, now),
                 .commit_seek => {
                     const target = self.seek_frame orelse return .none;
                     self.seek_frame = null;
@@ -735,6 +736,20 @@ pub fn Controller(comptime Platform: type) type {
             self.major = true;
         }
 
+        fn changeVolume(self: *State, steps: i8, now: u64) media.PlaybackCommand {
+            // ES9018K2M volume codes are half-decibel attenuation. Preserve
+            // the established -64..-8 dB range; every isolated tap is one code.
+            const minimum_attenuation = 16;
+            const maximum_attenuation = 128;
+            const next: u8 = @intCast(std.math.clamp(@as(i16, self.attenuation) - steps, minimum_attenuation, maximum_attenuation));
+            if (next == self.attenuation) return .none;
+            self.attenuation = next;
+            if (self.screen == .player) self.dirty = true;
+            const level = @as(f32, @floatFromInt(maximum_attenuation - next)) * 100 / (maximum_attenuation - minimum_attenuation);
+            self.animation.request(now, level);
+            return .{ .set_attenuation = next };
+        }
+
         pub fn handle(self: *State, event: Input, now: u64, playing: bool) media.PlaybackCommand {
             self.reconcile();
             if (event != .volume_up and event != .volume_down) self.dirty = true;
@@ -756,14 +771,7 @@ pub fn Controller(comptime Platform: type) type {
             }
             switch (event) {
                 .menu => unreachable,
-                .volume_up, .volume_down => {
-                    const attenuation = @max(16, if (event == .volume_up) self.attenuation -| 4 else @min(128, self.attenuation +| 4));
-                    if (attenuation == self.attenuation) return .none;
-                    self.attenuation = attenuation;
-                    if (self.screen == .player) self.dirty = true;
-                    self.animation.request(now, @as(u32, 128 - self.attenuation) * 100 / 112);
-                    return .{ .set_attenuation = self.attenuation };
-                },
+                .volume_up, .volume_down => return self.changeVolume(if (event == .volume_up) 1 else -1, now),
                 .home => {
                     self.history_count = 0;
                     self.navigate(.home);
@@ -785,10 +793,6 @@ pub fn Controller(comptime Platform: type) type {
                         .songs => {
                             self.push(.tracks);
                             self.track_scope = .all;
-                        },
-                        .folders => {
-                            self.push(.folders);
-                            self.refreshFolder();
                         },
                         .shuffle_all => {
                             self.startCollection(.{ .scope = .all }, null, true, now);
@@ -1213,10 +1217,9 @@ pub fn Controller(comptime Platform: type) type {
             const caption_top = Layout.capTop(212, .caption);
             if (mix < 0.5) {
                 label(c, Layout.left, caption_top, 80, clock(&buf, (self.seek_frame orelse self.status.played_frames) / @max(1, self.status.sample_rate)), .caption, draw.blend(muted, paper, @intFromFloat(mix * 2 * 255)));
-                c.right(Layout.right, caption_top, clock(&buf, self.status.total_frames / @max(1, self.status.sample_rate)), .caption, muted);
+                c.right(Layout.right, caption_top, clock(&buf, self.status.total_frames / @max(1, self.status.sample_rate)), .caption, draw.blend(muted, paper, @intFromFloat(mix * 2 * 255)));
             } else {
                 label(c, Layout.left, caption_top, 80, "Volume", .caption, draw.blend(paper, muted, @intFromFloat((mix - 0.5) * 2 * 255)));
-                c.right(Layout.right, caption_top, std.fmt.bufPrint(&buf, "{d}", .{@as(u32, 128 - self.attenuation) * 100 / 112}) catch "", .caption, muted);
             }
         }
 
@@ -1340,7 +1343,6 @@ pub fn Controller(comptime Platform: type) type {
                             .albums => "Albums",
                             .artists => "Artists",
                             .songs => "Songs",
-                            .folders => "Folders",
                             .shuffle_all => "Shuffle All",
                         };
                         self.menuRow(c, i - self.first, name, "", i == self.selection, self.screen == .home or music_items[i] != .shuffle_all);
@@ -2739,4 +2741,27 @@ test "pocket lock suppresses controls and frames, consumes unlock, and preserves
     _ = state.button(.power, true, 13000, true);
     _ = state.button(.power, false, 15000, true);
     try std.testing.expect(!state.locked);
+}
+
+test "fine volume steps reach all 113 positions with distinct bar targets and bounded endpoints" {
+    var fixture: Fixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    var state = fixture.state();
+    state.attenuation = 128;
+    state.animation.reduced_motion = true;
+    var last_width: u16 = 0;
+    for (0..112) |i| {
+        const command = state.handle(.volume_up, i * 500, true);
+        try std.testing.expectEqual(media.PlaybackCommand{ .set_attenuation = @intCast(127 - i) }, command);
+        const width: u16 = @intFromFloat(state.animation.value(i * 500) * 288 / 100);
+        try std.testing.expect(width > last_width);
+        last_width = width;
+    }
+    try std.testing.expectEqual(288, last_width);
+    try std.testing.expectEqual(media.PlaybackCommand.none, state.handle(.volume_up, 60000, true));
+    try std.testing.expectEqual(media.PlaybackCommand{ .set_attenuation = 17 }, state.handle(.volume_down, 60500, true));
+    state.attenuation = 127;
+    try std.testing.expectEqual(media.PlaybackCommand{ .set_attenuation = 128 }, state.act(.{ .adjust_volume = -4 }, 61000, true));
+    try std.testing.expectEqual(media.PlaybackCommand.none, state.handle(.volume_down, 61500, true));
 }

@@ -36,12 +36,12 @@ pub const Transition = struct {
         return self.mix(now) > 0 and self.from_value != self.to_value and now -| self.value_at < value_ms;
     }
 
-    pub fn request(self: *Transition, now: u64, value_percent: u32) void {
+    pub fn request(self: *Transition, now: u64, value_percent: f32) void {
         self.from_mix = self.mix(now);
         self.to_mix = 1;
         self.mix_at = now;
         self.from_value = self.value(now);
-        self.to_value = @floatFromInt(@min(100, value_percent));
+        self.to_value = std.math.clamp(value_percent, 0, 100);
         self.value_at = now;
         self.until = now + hold_ms;
     }

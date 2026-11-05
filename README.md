@@ -501,8 +501,8 @@ module ABI is desktop development tooling, independent of any future firmware
 extension system.
 
 The player opens at Home with Music, Settings and, once a listening session
-exists, Now Playing. Music offers Albums, Artists, Songs, Folders and Shuffle
-All. Artists retain both their complete song list and individual albums.
+exists, Now Playing. Music offers Albums, Artists, Songs and Shuffle All. Artists
+retain both their complete song list and individual albums.
 
 Press Menu for actions; hold it for 500 ms to return Home. Back closes actions
 or restores the preceding screen and selection. Collection actions offer Play
@@ -512,8 +512,13 @@ pause on Now Playing. Previous/Next scroll menus with hold-repeat and accelerati
 On Now Playing, a tap skips on release; a 400 ms hold previews an accelerating
 seek, committed once on release. Paused seeks remain paused. Holding Back for
 500 ms opens the captured Queue directly; a short Back retains normal navigation.
-The selected queue row includes the artist. Volume buttons repeat after 320 ms,
-then every 100 ms, without catching up missed repeats in a burst.
+The selected queue row includes the artist. Volume buttons repeat after 240 ms,
+then every 90 ms, without catching up missed repeats in a burst. A tap adjusts
+0.5 dB; rapid same-direction taps within 250 ms ramp to 1 dB, then cap at 2 dB.
+Pausing or reversing restores fine adjustment. A held button uses 1 dB repeats,
+reaching the 2 dB cap after 500 ms. A full-range hold takes about three seconds. The volume bar has no numeric
+percentage. Its 113 fine positions span -64 dB to -8 dB; fractional animation
+targets preserve a distinct bar position for every half-decibel code.
 
 Settings > Themes offers Light and Dark appearances of the current production
 layout. Theme colours are per-controller values, with no parsing in drawing or
@@ -535,7 +540,8 @@ song, and disabling it restores canonical order. Repeat All wraps that queue;
 Repeat One affects automatic completion, while manual skips still advance.
 Browsing and progressive library updates do not replace a listening session.
 
-Folders use filesystem names from the scanner's directory snapshot, with
+The retained folder-browser component uses filesystem names from the scanner's
+directory snapshot, with
 folders first and natural filename sorting. Preview tracks can introduce new
 folders before a scan finishes. Folder playback includes only direct children;
 subfolders are not played recursively. All browsing and context-menu rendering

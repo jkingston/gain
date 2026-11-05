@@ -365,17 +365,7 @@ def qualify(app, root, synthetic=False):
         player.tap("next", "select")
         assert player.queue() == original
         player.home()
-        player.tap("select", "next", "next", "next", "select")  # Folders
-        # Each generated directory is traversed by raw filesystem names. Files
-        # use the same player and queue rather than a second playback screen.
-        if synthetic:
-            for _ in range(3):
-                player.tap("select")
-            player.tap("menu", "select")
-            assert player.status()["playing"]
-            assert player.playback()["count"] == 47  # one deleted synthetic file
-        player.home()
-        player.tap("select", "next", "next", "next", "next", "select")
+        player.tap("select", "next", "next", "next", "select")  # Shuffle All
         assert player.playback()["shuffle"] == 1
         assert len(player.queue()) == initial["tracks"] - (1 if synthetic else 0)
         assert len(set(player.queue())) == len(player.queue())
