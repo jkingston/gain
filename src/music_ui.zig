@@ -22,11 +22,11 @@ const selected = chrome.selected;
 
 pub const Input = enum(u3) { select, back, home, up, down, volume_up, volume_down };
 
-pub const Screen = enum { home, albums, tracks, player, library, artists, artist };
+pub const Screen = enum { home, albums, tracks, player, library, artists, artist, settings };
 pub const TrackScope = enum { album, artist, all };
 const HomeItem = struct {
     name: []const u8,
-    target: enum { player, albums, artists, songs, library, folders },
+    target: enum { player, albums, artists, songs, library, folders, settings },
 };
 const home_items = [_]HomeItem{
     .{ .name = "Now Playing", .target = .player },
@@ -35,6 +35,7 @@ const home_items = [_]HomeItem{
     .{ .name = "All Songs", .target = .songs },
     .{ .name = "Library", .target = .library },
     .{ .name = "Folders", .target = .folders },
+    .{ .name = "Settings", .target = .settings },
 };
 const visible_rows = 5;
 
@@ -79,9 +80,13 @@ pub fn Controller(comptime Platform: type) type {
         text_revision: u32 = 0,
         track_store: @import("track_selection.zig").Store,
         requested_track: ?*const core.Track = null,
+        requested_start_frame: u64 = 0,
+        resume_paused: bool = false,
+        last_playback_phase: media.PlaybackPhase = .preparing,
         requested_folders: bool = false,
         playing_track: ?*const core.Track = null,
         attenuation: u8 = 64,
+        replay_gain: @import("replay_gain.zig").Settings = .{},
         animation: @import("volume_transition.zig").Transition = .{},
         status: media.PlaybackStatus = .{
             .phase = .preparing,
@@ -135,6 +140,8 @@ pub fn Controller(comptime Platform: type) type {
         }
 
         pub fn queue(self: *State, track: *const core.Track) void {
+            self.requested_start_frame = 0;
+            self.resume_paused = false;
             self.requested_track = self.track_store.queue(track) catch |failure| {
                 self.fail(failure);
                 return;
@@ -174,9 +181,43 @@ pub fn Controller(comptime Platform: type) type {
             return if (self.revision == self.snapshot().revision) self.artist_rank else self.snapshot().artistIndex(self.artist_id);
         }
 
-        pub fn neighbouringTrack(self: *const State, direction: i2) ?*const core.Track {
+        fn startContext(self: *State, track: *const core.Track) void {
+            const count = self.rows();
+            if (count > self.track_store.order.capacity()) {
+                self.fail(error.QueueFull);
+                return;
+            }
+            self.track_store.order.clear();
+            for (0..count) |i| {
+                const item = self.trackAt(i) orelse {
+                    self.fail(error.InvalidSelection);
+                    return;
+                };
+                self.track_store.order.append(item.id) catch |failure| {
+                    self.fail(failure);
+                    return;
+                };
+            }
+            _ = self.track_store.order.select(track.id);
+            self.queue(track);
+        }
+
+        pub fn neighbouringTrack(self: *State, direction: i2) ?*const core.Track {
             const current = self.playing_track orelse return null;
             const view = self.snapshot();
+            const Resolver = struct {
+                view: *const views.Snapshot,
+                pub fn contains(resolver: @This(), id: u64) bool {
+                    for (resolver.view.tracks[0..resolver.view.track_count]) |track| if (track.id == id) return true;
+                    return false;
+                }
+            };
+            if (self.track_store.order.select(current.id)) {
+                const id = self.track_store.order.adjacent(direction, Resolver{ .view = view }) orelse return null;
+                for (view.tracks[0..view.track_count]) |track| if (track.id == id) return track;
+                return null;
+            }
+            // Direct maintenance/folder selections have no captured list.
             for (view.track_order[0..view.track_count], 0..) |index_value, rank| {
                 if (view.tracks[index_value].id != current.id) continue;
                 const next = if (direction < 0) rank -| 1 else rank + 1;
@@ -200,6 +241,7 @@ pub fn Controller(comptime Platform: type) type {
                     .all => self.snapshot().track_count,
                 },
                 .library => 2,
+                .settings => 1,
                 .player => 0,
             };
         }
@@ -232,17 +274,17 @@ pub fn Controller(comptime Platform: type) type {
 
         pub fn button(self: *State, key: navigation.Button, pressed: bool, now: u64, playing: bool) media.PlaybackCommand {
             self.reconcile();
-            return self.act(self.input_policy.edge(key, pressed, now, self.inputContext(), if (self.jump_position != null) 21 else self.rows()), now, playing);
+            return self.act(self.input_policy.edge(key, pressed, now, self.inputContext(), if (self.jump_position != null or (self.screen == .player and self.status.total_frames != 0)) 21 else self.rows()), now, playing);
         }
 
         pub fn wheel(self: *State, direction: i2, now: u64, playing: bool) media.PlaybackCommand {
             self.reconcile();
-            return self.act(self.input_policy.wheel(direction, now, self.inputContext(), if (self.jump_position != null) 8 else self.rows()), now, playing);
+            return self.act(self.input_policy.wheel(direction, now, self.inputContext(), if (self.jump_position != null) 8 else if (self.screen == .player and self.status.total_frames != 0) 21 else self.rows()), now, playing);
         }
 
         pub fn repeat(self: *State, now: u64, held: u8, playing: bool) media.PlaybackCommand {
             self.reconcile();
-            return self.act(self.input_policy.tick(now, self.inputContext(), if (self.jump_position != null) 8 else self.rows(), held), now, playing);
+            return self.act(self.input_policy.tick(now, self.inputContext(), if (self.jump_position != null) 8 else if (self.screen == .player and self.status.total_frames != 0) 21 else self.rows(), held), now, playing);
         }
 
         fn act(self: *State, action: navigation.Action, now: u64, playing: bool) media.PlaybackCommand {
@@ -257,6 +299,7 @@ pub fn Controller(comptime Platform: type) type {
                     self.jump_position = null;
                     self.cancelInput(self.input_policy.held);
                     if (action == .select) {
+                        if (self.screen == .player and self.status.total_frames != 0) return .{ .seek_to = self.status.total_frames * position / 20 };
                         const target = (self.rows() -| 1) * position / 20;
                         self.moveBy(@as(i32, @intCast(target)) - @as(i32, @intCast(self.selection)), now);
                     }
@@ -274,7 +317,7 @@ pub fn Controller(comptime Platform: type) type {
                     return .none;
                 },
                 .jump => {
-                    self.jump_position = if (self.rows() > 1) self.selection * 20 / (self.rows() - 1) else 0;
+                    self.jump_position = if (self.screen == .player and self.status.total_frames != 0) @intCast(@min(20, self.status.played_frames * 20 / self.status.total_frames)) else if (self.rows() > 1) self.selection * 20 / (self.rows() - 1) else 0;
                     self.cancelInput(self.input_policy.held);
                     self.dirty = true;
                     self.major = true;
@@ -390,6 +433,7 @@ pub fn Controller(comptime Platform: type) type {
                                 .artists => .artists,
                                 .songs => .tracks,
                                 .library => .library,
+                                .settings => .settings,
                                 .folders => unreachable,
                             });
                         }
@@ -411,16 +455,21 @@ pub fn Controller(comptime Platform: type) type {
                         self.navigate(.tracks);
                     },
                     .tracks => if (self.trackAt(self.selection)) |track| {
-                        self.queue(track);
+                        self.startContext(track);
                         self.navigate(.player);
                         if (playing) return .stop;
                     },
                     .player => if (playing) {
-                        return .stop;
+                        return .toggle_pause;
                     } else if (self.playing_track) |track| {
                         self.queue(track);
                     },
                     .library => self.index.request(self.selection == 1),
+                    .settings => self.replay_gain.mode = switch (self.replay_gain.mode) {
+                        .off => .track,
+                        .track => .album,
+                        .album => .off,
+                    },
                 },
             }
             return .none;
@@ -553,6 +602,11 @@ pub fn Controller(comptime Platform: type) type {
             }
             if ((self.screen == .library or (diag.report.scan_active != 0 and self.screen != .player and self.screen != .albums)) and !std.mem.eql(u8, self.last_scan_phase, self.index.phase)) {
                 self.last_scan_phase = self.index.phase;
+                self.dirty = true;
+            }
+            if (self.screen == .player and self.last_playback_phase != self.status.phase) {
+                self.last_playback_phase = self.status.phase;
+                self.major = true;
                 self.dirty = true;
             }
             if (self.screen == .player and self.last_second != self.status.played_frames / @max(1, self.status.sample_rate)) {
@@ -859,8 +913,18 @@ pub fn Controller(comptime Platform: type) type {
                         label(c, Layout.left, Layout.rowText(y, .reading), Layout.width, name, .reading, if (i == self.selection) accent else ink);
                     }
                 },
+                .settings => {
+                    self.header(c, "Settings", "");
+                    highlightRow(c, Layout.row_top);
+                    label(c, Layout.left, Layout.rowText(Layout.row_top, .reading), 180, "ReplayGain", .reading, accent);
+                    c.right(Layout.right, Layout.rowText(Layout.row_top, .reading), switch (self.replay_gain.mode) {
+                        .off => "Off",
+                        .track => "Track",
+                        .album => "Album",
+                    }, .reading, accent);
+                },
                 .player => {
-                    self.header(c, "Now Playing", "");
+                    self.header(c, if (self.status.phase == .paused) "Paused" else "Now Playing", "");
                     if (self.playing_track) |track| {
                         var album: views.Album = .{
                             .id = 0,
@@ -897,7 +961,7 @@ pub fn Controller(comptime Platform: type) type {
             if (self.screen == .player and diag.report.scan_active != 0) c.rounded(266, 22, 4, 4, 2, accent);
             if (self.jump_position) |position| {
                 c.clear(paper);
-                self.header(c, "Jump", "");
+                self.header(c, if (self.screen == .player) "Seek" else "Jump", "");
                 centered(c, 86, 288, std.fmt.bufPrint(&buf, "{d}%", .{position * 5}) catch "", .serif, ink);
                 c.rounded(16, 139, 288, 8, 3, line);
                 const width: u16 = @intCast(position * 288 / 20);
@@ -907,6 +971,7 @@ pub fn Controller(comptime Platform: type) type {
                     .albums => if (self.rows() > 0) view.albums[target].title else "",
                     .artists => if (self.rows() > 0) view.artists[target].name else "",
                     .tracks => if (self.trackAt(target)) |track| track.meta.title else "",
+                    .player => clock(&buf, self.status.total_frames * position / 20 / @max(1, self.status.sample_rate)),
                     else => "",
                 };
                 centered(c, 167, 288, text, .reading, muted);
@@ -1680,4 +1745,72 @@ test "a scheduled display launch cannot be delayed by painting the next canvas" 
     state.frame(40);
     try std.testing.expectEqual(@as(u64, 40), state.pending_frame.last_render);
     try std.testing.expectEqual(submissions + 1, TestPlatform.Display.submissions);
+}
+
+test "chosen all-song order survives browsing another album and progressive insertions" {
+    var fixture: Fixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    var state = fixture.state();
+    const tracks = [_]core.Track{
+        .{ .id = 1, .path = "A/1", .stamp = .{}, .meta = .{ .title = "Alpha", .album = "First" } },
+        .{ .id = 2, .path = "B/1", .stamp = .{}, .meta = .{ .title = "Beta", .album = "Second" } },
+        .{ .id = 3, .path = "C/1", .stamp = .{}, .meta = .{ .title = "Gamma", .album = "Third" } },
+        .{ .id = 4, .path = "D/1", .stamp = .{}, .meta = .{ .title = "Delta", .album = "Fourth" } },
+    };
+    try fixture.pair.publish(&.{}, tracks[0..3], 42, true);
+    state.navigate(.tracks);
+    state.track_scope = .all;
+    state.selection = 1;
+    _ = state.handle(.select, 0, false);
+    state.playing_track = state.track_store.begin();
+    state.requested_track = null;
+    try std.testing.expectEqual(2, state.playing_track.?.id);
+    state.navigate(.albums);
+    try fixture.pair.publish(&.{}, &tracks, 42, true);
+    const next = state.neighbouringTrack(1).?;
+    try std.testing.expectEqual(3, next.id);
+    state.queue(next);
+    state.playing_track = state.track_store.begin();
+    try std.testing.expectEqual(null, state.neighbouringTrack(1));
+    try std.testing.expectEqual(2, state.neighbouringTrack(-1).?.id);
+}
+
+test "play toggles pause and seeking previews without changing the queue" {
+    var fixture: Fixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    var state = fixture.state();
+    state.navigate(.player);
+    state.status = .{ .phase = .playing, .sample_rate = 48000, .output_format = .signed_24_in_u32, .total_frames = 48000 * 100, .played_frames = 48000 * 20 };
+    try std.testing.expectEqual(media.PlaybackCommand.toggle_pause, state.handle(.select, 0, true));
+    _ = state.act(.jump, 10, true);
+    try std.testing.expectEqual(4, state.jump_position.?);
+    _ = state.act(.{ .move = 2 }, 20, true);
+    try std.testing.expectEqual(0, state.track_store.order.count);
+    try std.testing.expectEqual(media.PlaybackCommand{ .seek_to = 48000 * 30 }, state.act(.select, 30, true));
+    try std.testing.expectEqual(null, state.jump_position);
+    _ = state.act(.jump, 40, true);
+    _ = state.act(.back, 50, true);
+    try std.testing.expectEqual(48000 * 20, state.status.played_frames);
+}
+
+test "physical Menu hold enters seek exactly once and release cannot go Home" {
+    var fixture: Fixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    var state = fixture.state();
+    state.navigate(.player);
+    state.status = .{ .phase = .playing, .sample_rate = 48000, .output_format = .signed_24_in_u32, .total_frames = 48000 * 100, .played_frames = 48000 * 20 };
+    _ = state.button(.menu, true, 0, true);
+    _ = state.repeat(499, @import("navigation.zig").Button.menu.mask(), true);
+    try std.testing.expectEqual(null, state.jump_position);
+    _ = state.repeat(500, @import("navigation.zig").Button.menu.mask(), true);
+    try std.testing.expectEqual(4, state.jump_position.?);
+    _ = state.button(.menu, false, 510, true);
+    try std.testing.expectEqual(Screen.player, state.screen);
+    _ = state.button(.next, true, 520, true);
+    _ = state.button(.next, false, 530, true);
+    try std.testing.expectEqual(5, state.jump_position.?);
+    try std.testing.expectEqual(media.PlaybackCommand{ .seek_to = 48000 * 25 }, state.button(.play, true, 540, true));
 }

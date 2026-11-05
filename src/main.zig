@@ -418,7 +418,7 @@ fn playSelection(
         const direction: i2 = switch (result.exit) {
             .next => 1,
             .previous => -1,
-            .completed, .stopped => return,
+            .completed, .stopped, .seek => return,
         };
         entry = (try browser.adjacentTrack(volume, direction)) orelse return;
     }
@@ -784,6 +784,9 @@ const MusicSession = struct {
             .flush => self.flush_pending = true,
         };
         self.state.status = status;
+        @import("health.zig").snapshot.playback_phase = @backingInt(status.phase);
+        @import("health.zig").snapshot.queue_count = @intCast(self.state.track_store.order.count);
+        @import("health.zig").snapshot.queue_cursor = @intCast(self.state.track_store.order.cursor);
         const now_ms = self.now();
         const at = Timer.now();
         const sample = self.input.injected;
@@ -915,6 +918,10 @@ fn browseMusic(volume: *Volume, browser: *Browser, battery_mv: u32, attenuation:
             diag.report.stage = 2;
             const result = player.playFile(&reader, entry.size, volume.device, .{
                 .attenuation = state.attenuation,
+                .force_output_24 = true,
+                .gain_q24 = state.replay_gain.gain(state.playing_track.?.meta.gain),
+                .start_frame = state.requested_start_frame,
+                .initially_paused = state.resume_paused,
                 .measure_stacks = options.maintenance,
                 .report_out = &measured,
                 .background = .{ .context = pmic, .poll = playbackPower },
@@ -931,7 +938,13 @@ fn browseMusic(volume: *Volume, browser: *Browser, battery_mv: u32, attenuation:
             if (state.failure and diag.report.failure != 0) diag.failed(9, @errorFromInt(@as(u16, @intCast(diag.report.failure))));
             diag.playback(result);
             state.attenuation = result.playback.attenuation;
-            if (result.playback.exit == .next or result.playback.exit == .previous) {
+            if (result.playback.exit == .seek) {
+                const paused = state.status.phase == .paused;
+                if (state.playing_track) |current| state.queue(current);
+                state.requested_start_frame = result.playback.seek_frame;
+                state.resume_paused = paused;
+            }
+            if (result.playback.exit == .next or result.playback.exit == .previous or (result.playback.exit == .completed and result.playback.frames != 0 and state.requested_track == null)) {
                 if (state.neighbouringTrack(if (result.playback.exit == .previous) -1 else 1)) |next| state.queue(next);
             }
             index.finish();

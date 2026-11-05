@@ -15,6 +15,7 @@ const info = @import("media_info.zig");
 const playback = @import("playback.zig");
 const input_stream = @import("input_stream.zig");
 const codec_pool = @import("codec_pool.zig");
+const transport = @import("transport.zig");
 const stack = @import("task_stack.zig");
 
 const stacks = [_]memory.Region{ memory.output_stack, memory.ui_stack, memory.control_stack, memory.codec_stack, memory.storage_stack };
@@ -34,6 +35,10 @@ pub const StorageService = struct {
 };
 
 pub const Config = struct {
+    start_frame: u64 = 0,
+    initially_paused: bool = false,
+    force_output_24: bool = false,
+    gain_q24: u32 = output.unity_gain_q24,
     descriptor_count: u8 = 120,
     buffer_count: u8 = 3,
     attenuation: u8 = 64,
@@ -45,7 +50,7 @@ pub const Config = struct {
     storage_work: ?struct { context: *anyopaque, run: *const fn (*anyopaque, StorageService) void } = null,
 
     pub fn valid(self: Config) bool {
-        return (playback.Config{
+        return self.gain_q24 <= output.maximum_gain_q24 and (playback.Config{
             .descriptor_count = self.descriptor_count,
             .buffer_count = self.buffer_count,
             .total_chunks = std.math.maxInt(u32),
@@ -156,11 +161,15 @@ fn Player(comptime Reader: type) type {
         started_tick: u32 = 0,
         attenuation: u8 = 0,
         quantizer: @import("pcm.zig").Sample.Quantizer = .{},
+        timeline: transport.Timeline = .{},
+        paused: std.atomic.Value(bool) = .init(false),
+        requested_seek: u64 = 0,
 
         pub fn play(self: *Self) !Report {
             if (!self.config.valid()) return error.InvalidConfig;
             if (active != null or self.workspace.burst.len < storage.fat32.sector_bytes + dma_word_bytes - 1) return error.InvalidWorkspace;
             self.started_tick = x.Timer.now();
+            self.paused.store(self.config.initially_paused, .release);
             for (stacks) |region| stack.prepare(region.cachedSlice(u8), self.config.measure_stacks);
             defer if (self.config.report_out) |out| {
                 out.* = self.snapshot();
@@ -239,6 +248,7 @@ fn Player(comptime Reader: type) type {
                     .stopped = self.requested_exit.load(.acquire) != 0,
                     .exit = @fromBackingInt(@intCast(self.requested_exit.load(.acquire))),
                     .attenuation = self.attenuation,
+                    .seek_frame = self.requested_seek,
                 },
                 .runtime = self.runtime.metrics,
                 .heap_peak = self.workspace.decoder.packet.pool.statistics.peak,
@@ -250,7 +260,7 @@ fn Player(comptime Reader: type) type {
                 .maximum_ui_ticks = self.maximum_ui_ticks,
                 .maximum_ui_gap_ticks = self.maximum_ui_gap_ticks,
                 .stack_used = stack_used,
-                .played_frames = if (self.state) |state| @as(u64, state.chunks_completed) * self.plan.frames else 0,
+                .played_frames = self.timeline.played.load(),
             };
         }
 
@@ -288,7 +298,9 @@ fn Player(comptime Reader: type) type {
             for ([_]port.Task{ .output, .codec, .storage, .control }) |task| self.runtime.notify(task, event);
         }
 
-        pub fn configure(self: *Self, information: info.Information) !void {
+        pub fn configure(self: *Self, incoming: info.Information) !void {
+            var information = incoming;
+            if (self.config.force_output_24 or self.config.gain_q24 != output.unity_gain_q24) information.output_format = .signed_24_in_u32;
             if (self.cancelled()) return error.Cancelled;
             if (self.header_ready.load(.acquire)) {
                 if (information.sample_rate != self.information.sample_rate or information.channels != self.information.channels or information.output_format != self.information.output_format) return error.FormatChanged;
@@ -322,7 +334,7 @@ fn Player(comptime Reader: type) type {
 
         fn codecEntry() callconv(.c) noreturn {
             const self = current();
-            _ = decoder.run(&self.input, self.length, Self, self, self.workspace.decoder, 0) catch |failure| {
+            _ = decoder.run(&self.input, self.length, Self, self, self.workspace.decoder, self.config.start_frame) catch |failure| {
                 if (failure != error.Cancelled) self.fail(failure);
             };
             self.codec_done.store(true, .release);
@@ -382,7 +394,8 @@ fn Player(comptime Reader: type) type {
         fn render(self: *Self, slot: u8) !void {
             const started = x.Timer.now();
             const bytes = @as([*]u8, @ptrFromInt(self.resources.buffers[slot].address))[0..self.plan.bytes];
-            const result = if (self.information.source_bits > 24) try output.renderPeriodDithered(&self.reservoir, bytes, self.plan, output.unity_gain_q24, &self.quantizer) else try output.renderPeriod(&self.reservoir, bytes, self.plan, output.unity_gain_q24);
+            const result = try transport.render(&self.reservoir, bytes, self.plan, self.config.gain_q24, &self.quantizer, self.information.source_bits > 24, self.paused.load(.acquire));
+            self.timeline.queue(slot, result.frames);
             if (result.underrun and !self.codec_done.load(.acquire)) return error.AudioUnderrun;
             self.worst_fill_ticks = @max(self.worst_fill_ticks, x.Timer.elapsed(started));
             self.periods += 1;
@@ -390,9 +403,8 @@ fn Player(comptime Reader: type) type {
         }
 
         fn boundEnd(self: *Self) !void {
-            if (self.end_bounded or !self.codec_done.load(.acquire)) return;
-            const data_chunks = std.math.divCeil(u64, self.produced_frames, self.plan.frames) catch return error.InvalidDuration;
-            const total_chunks = data_chunks + self.config.buffer_count;
+            if (self.end_bounded or !self.codec_done.load(.acquire) or self.reservoir.available() != 0) return;
+            const total_chunks = @as(u64, self.periods) + self.config.buffer_count;
             if (total_chunks > std.math.maxInt(u32)) return error.InvalidDuration;
             // Three drained silence periods guarantee cyclic DMA/FIFO cannot
             // replay old samples while the control task performs orderly shutdown.
@@ -418,6 +430,7 @@ fn Player(comptime Reader: type) type {
                         self.runtime.wait(event, null);
                         continue;
                     }
+                    self.timeline.played.store(self.information.start_frame);
                     const eof = self.codec_done.load(.acquire);
                     if (eof and self.produced_frames == 0) {
                         self.fail(error.EmptyChunk);
@@ -483,11 +496,13 @@ fn Player(comptime Reader: type) type {
 
                     var failed = false;
                     for (0..completions) |_| {
+                        const released_slot: u8 = @intCast(self.state.?.chunks_completed % self.config.buffer_count);
                         const transition = self.state.?.advance(self.state.?.nextDescriptor()) catch |failure| {
                             self.fail(failure);
                             failed = true;
                             break;
                         };
+                        self.timeline.complete(released_slot);
                         if (transition.refill) |refill| {
                             self.render(refill.slot) catch |failure| {
                                 self.fail(failure);
@@ -579,7 +594,7 @@ fn Player(comptime Reader: type) type {
                 diagnostics.report.control_ticks = @truncate(self.runtime.metrics.task_ticks[2]);
                 diagnostics.report.storage_task_ticks = @truncate(self.runtime.metrics.task_ticks[4]);
                 diagnostics.report.idle_ticks = @truncate(self.runtime.metrics.task_ticks[5]);
-                diagnostics.report.live_played_frames = if (self.state) |state| @truncate(@as(u64, state.chunks_completed) * self.plan.frames) else 0;
+                diagnostics.report.live_played_frames = @truncate(self.timeline.played.load());
                 diagnostics.report.live_underruns = if (self.engine) |engine| engine.underrun_count else 0;
                 diagnostics.report.live_ui_gap = self.maximum_ui_gap_ticks;
                 diagnostics.report.live_fill = self.worst_fill_ticks;
@@ -594,12 +609,12 @@ fn Player(comptime Reader: type) type {
                 if (self.control) |control| {
                     const ready = self.header_ready.load(.acquire);
                     const total = if (ready) self.information.total_frames orelse if (self.codec_done.load(.acquire)) self.produced_frames else 0 else 0;
-                    const played = if (self.state) |state| @as(u64, state.chunks_completed) * self.plan.frames else 0;
+                    const played = self.timeline.played.load();
                     const ui_started = x.Timer.now();
                     if (self.previous_ui_tick) |previous| self.maximum_ui_gap_ticks = @max(self.maximum_ui_gap_ticks, ui_started -% previous);
                     self.previous_ui_tick = ui_started;
                     const command = control.poll(control.context, .{
-                        .phase = if (self.started) .playing else .preparing,
+                        .phase = if (!self.started) .preparing else if (self.paused.load(.acquire)) .paused else .playing,
                         .sample_rate = if (ready) self.information.sample_rate else 0,
                         .output_format = if (ready) self.information.output_format else .signed_24_in_u32,
                         .total_frames = total,
@@ -609,6 +624,11 @@ fn Player(comptime Reader: type) type {
                     self.ui_polls += 1;
                     switch (command) {
                         .none => {},
+                        .toggle_pause => self.paused.store(!self.paused.load(.acquire), .release),
+                        .seek_to => |target| {
+                            self.requested_seek = if (total == 0) target else @min(total - 1, target);
+                            _ = self.requested_exit.cmpxchgStrong(0, @backingInt(media.PlaybackExit.seek), .acq_rel, .acquire);
+                        },
                         .set_attenuation => |value| self.requested_volume.store(@as(u32, @min(128, @max(16, value))) + 1, .release),
                         .stop, .next, .previous => {
                             const exit: media.PlaybackExit = switch (command) {

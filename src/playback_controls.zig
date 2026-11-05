@@ -16,6 +16,7 @@ pub const Button = enum(u3) {
 pub const Action = union(enum) {
     none,
     stop,
+    toggle_pause,
     next,
     previous,
     set_attenuation: u8,
@@ -49,9 +50,10 @@ pub const State = struct {
         self.last_buttons = buttons;
         if (pressed & Button.next.mask() != 0) return .next;
         if (pressed & Button.previous.mask() != 0) return .previous;
-        const stop_mask = Button.play.mask() | Button.back.mask() |
+        const stop_mask = Button.back.mask() |
             Button.menu.mask() | Button.power.mask();
         if (pressed & stop_mask != 0) return .stop;
+        if (pressed & Button.play.mask() != 0) return .toggle_pause;
         if (pressed & Button.volume_up.mask() != 0) {
             self.attenuation = self.attenuation -| attenuation_step;
             self.attenuation = @max(self.attenuation, minimum_attenuation);
@@ -70,14 +72,14 @@ fn clampAttenuation(value: u8) u8 {
     return @min(@max(value, minimum_attenuation), maximum_attenuation);
 }
 
-test "opening press is ignored and a held stop fires once" {
+test "opening press is ignored and a held pause fires once" {
     const testing = @import("std").testing;
 
     const play = Button.play.mask();
     var state = State.init(64);
     try testing.expectEqual(Action.none, state.update(play));
     try testing.expectEqual(Action.none, state.update(0));
-    try testing.expectEqual(Action.stop, state.update(play));
+    try testing.expectEqual(Action.toggle_pause, state.update(play));
     try testing.expectEqual(Action.none, state.update(play));
 }
 

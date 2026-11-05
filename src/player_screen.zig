@@ -19,6 +19,7 @@ pub const State = struct {
         const command: media.PlaybackCommand = switch (self.controls.update(buttons)) {
             .none => .none,
             .stop => .stop,
+            .toggle_pause => .toggle_pause,
             .next => .next,
             .previous => .previous,
             .set_attenuation => |value| .{ .set_attenuation = value },

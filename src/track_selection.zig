@@ -5,13 +5,16 @@ const core = @import("library.zig");
 
 pub const Store = struct {
     allocators: [2]std.heap.FixedBufferAllocator,
+    order: @import("play_queue.zig").Queue,
     tracks: [2]core.Track = undefined,
     playing: u1 = 0,
     pending: bool = false,
 
     pub fn init(bytes: []u8) Store {
-        const half = bytes.len / 2;
-        return .{ .allocators = .{ std.heap.FixedBufferAllocator.init(bytes[0..half]), std.heap.FixedBufferAllocator.init(bytes[half..]) } };
+        const queue_bytes = @min(8192 * 8, bytes.len / 2) & ~@as(usize, 7);
+        const metadata = bytes[queue_bytes..];
+        const half = metadata.len / 2;
+        return .{ .order = .init(bytes[0..queue_bytes]), .allocators = .{ std.heap.FixedBufferAllocator.init(metadata[0..half]), std.heap.FixedBufferAllocator.init(metadata[half..]) } };
     }
 
     pub fn queue(self: *Store, track: *const core.Track) !*const core.Track {

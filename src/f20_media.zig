@@ -11,13 +11,16 @@ pub const Result = struct {
     stopped: bool = false,
     exit: PlaybackExit = .completed,
     attenuation: u8 = 0,
+    seek_frame: u64 = 0,
 };
 
-pub const PlaybackExit = enum { completed, stopped, next, previous };
+pub const PlaybackExit = enum { completed, stopped, next, previous, seek };
 
 pub const PlaybackCommand = union(enum) {
     none,
     stop,
+    toggle_pause,
+    seek_to: u64,
     next,
     previous,
     set_attenuation: u8,
@@ -36,4 +39,4 @@ pub const PlaybackStatus = struct {
     played_frames: u64,
 };
 
-pub const PlaybackPhase = enum { preparing, playing };
+pub const PlaybackPhase = enum { preparing, playing, paused };

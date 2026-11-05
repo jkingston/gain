@@ -16,6 +16,7 @@ import zlib
 from run_usb_checks import Monitor, mounted_volume
 
 FIELDS = '''magic usb_state version stage failure boot_ticks index_ticks index_load_ticks index_save_ticks index_tracks index_albums index_parsed index_reused index_errors index_bytes index_heap index_metadata_ticks index_artwork_ticks index_directory_ticks art_prepared art_reused log_pages log_failures log_dropped codec_ticks idle_ticks played_frames playback_runs playback_frames underruns startup_ticks fill_ticks ui_ticks ui_gap_ticks irq_ticks battery_mv charge_ua discharge_ua usb_mv usb_ua power_valid coulomb_charge coulomb_discharge adc_rate coulomb_running charge_uah discharge_uah battery_energy_uwh sectors index_runs index_read_sectors index_written_sectors index_io_ticks index_io_failures index_stack_used scan_active scan_visited scan_total scan_publications scan_view_tracks scan_view_albums scan_cancelled scan_scratch_peak scan_worst_publication scan_played_start scan_played_end scan_complete live_played_frames live_underruns live_ui_gap live_fill live_storage_stack scan_deferred_artwork selected_album_low selected_album_high selected_album_rank scan_failure control_ticks ui_task_ticks storage_task_ticks scan_maps_peak build_id_low build_id_high ui_drawn ui_draw_max ui_animation_gap_max ui_animation_slow ui_animation_frames live_pcm_frames live_input_bytes live_decode_frames ui_trace_next raw_timer ui_clock_wraps power_samples_dropped ui_stack_used cover_header_max cover_scene_max cover_caption_max scan_last_command scan_last_status scan_last_flags'''.split()
+HEALTH_FIELDS = """version charger_valid charge_control charge_timing usb_path adc_enable adc_rate target_mv charge_ma usb_limit_ma temperature_adc text_initialized text_loaded text_result text_prepared text_worst_ticks text_bytes_low text_bytes_high text_heap_peak text_heap_failures text_page_reads text_page_hits text_labels text_glyphs playback_phase queue_count queue_cursor""".split()
 COMMANDS = dict(quick=0x61, verify=0x62, play=0x63, stop=0x64, reconnect=0x65, rom=0x66, flush=0x67, rebuild=0x68, input=0x69, input_sample=0x6a)
 ALLOCATIONS = {'catalog.bin': (1, 4096 + 2 * 6 * 1024 * 1024), 'artwork.bin': (2, 4096 + 16 * 1024 * 1024), 'diagnostics.bin': (3, 4096 + 8 * 1024 * 1024)}
 KINDS = {1: 'boot', 2: 'playback', 3: 'library', 4: 'power', 5: 'usb', 6: 'fault', 7: 'health', 8: 'task_times', 9: 'library_phases', 10: 'library_io', 11: 'library_changes'}
@@ -99,6 +100,15 @@ class Gain(Monitor):
         result.update(zip(FIELDS, struct.unpack(f'<{count}I', raw)))
         if result['magic'] != 0x474D4554 or result['version'] != 1:
             raise RuntimeError('Not a matching Gain development build')
+        return result
+
+    def health(self):
+        raw = self.read(0x73, len(HEALTH_FIELDS) * 4)
+        if len(raw) != len(HEALTH_FIELDS) * 4:
+            raise RuntimeError(f"Unexpected health snapshot size: {len(raw)}")
+        result = dict(zip(HEALTH_FIELDS, struct.unpack(f"<{len(HEALTH_FIELDS)}I", raw)))
+        if result["version"] != 1:
+            raise RuntimeError("Unsupported Gain health snapshot")
         return result
 
     def command(self, action, value=0):
@@ -235,6 +245,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest='action', required=True)
     commands.add_parser('status')
+    commands.add_parser('health')
     catalog = commands.add_parser('catalogue')
     catalog.add_argument('path', type=Path)
     provision_parser = commands.add_parser('provision')
@@ -255,10 +266,10 @@ def main():
     else:
         monitor = Gain()
         try:
-            if args.action != 'status':
+            if args.action not in ('status', 'health'):
                 monitor.command(args.action, args.value)
                 time.sleep(0.05)
-            result = monitor.status() if args.action != 'rom' else {'returning_to_rom': True}
+            result = monitor.health() if args.action == 'health' else monitor.status() if args.action != 'rom' else {'returning_to_rom': True}
         finally:
             monitor.close()
     print(json.dumps(result, indent=2))

@@ -113,7 +113,7 @@ pub const Policy = struct {
     /// Call after draining captured edges, so a queued release wins over a tick.
     pub fn tick(self: *Policy, now: u64, context: Context, count: usize, raw_held: u8) Action {
         if (self.menu_at) |at| {
-            if (!self.menu_consumed and raw_held & Button.menu.mask() != 0 and context != .transport and count > 8 and now -| at >= menu_hold_ms) {
+            if (!self.menu_consumed and raw_held & Button.menu.mask() != 0 and count > 8 and now -| at >= menu_hold_ms) {
                 self.menu_consumed = true;
                 self.direction = 0;
                 self.suppressed |= self.held & navigation_mask;

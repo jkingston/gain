@@ -9,6 +9,7 @@ const protocol = @import("maintenance_protocol.zig");
 
 var state: protocol.State = .{};
 var response: diag.Report = .{};
+var health: @import("health.zig").Snapshot = .{};
 
 pub fn pending() bool {
     return state.ready != null;
@@ -33,6 +34,10 @@ pub fn control(rhport: u8, stage: u8, request: ?*const c.tusb_control_request_t)
             response.ui_trace_next = @import("display_trace.zig").ring.next;
             response.usb_state = @backingInt(usb.session().state);
             return c.tud_control_xfer(rhport, request, &response, @sizeOf(diag.Report));
+        }
+        if (bytes[1] == 0x73 and length == @sizeOf(@import("health.zig").Snapshot) and std.mem.readInt(u16, bytes[2..4], .little) == 0) {
+            health = @import("health.zig").snapshot;
+            return c.tud_control_xfer(rhport, request, &health, @sizeOf(@import("health.zig").Snapshot));
         }
         if (bytes[1] == 0x70 and length > 0) {
             const offset = @as(usize, std.mem.readInt(u16, bytes[2..4], .little)) * pixels.len;

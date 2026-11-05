@@ -478,6 +478,11 @@ fn disableLog(failure: anyerror) void {
 pub fn samplePower(pmic: *@import("f20_power.zig").Controller) void {
     const ticks = now();
     if (!power_sampling.due(ticks / x.Timer.milliseconds(1), report.power_valid & 1 != 0)) return;
+    if (pmic.chargerConfiguration()) |configuration| {
+        const masks = x.Interrupts.disableCpu();
+        @import("health.zig").charger(configuration);
+        x.Interrupts.restoreCpu(masks);
+    } else |_| @import("health.zig").snapshot.charger_valid = 0;
     const telemetry = pmic.telemetry() catch |err| {
         report.power_valid = 0;
         report.coulomb_running = 0;

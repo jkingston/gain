@@ -22,11 +22,13 @@ extern fn fclose(*anyopaque) c_int;
 var milliseconds: u64 = 0;
 var projection: gain.progressive_view.Pair = .{};
 var cache: gain.cover_cache.Cache = .{};
-var track_memory: [32 * 1024]u8 = undefined;
+var track_memory: [240 * 1024]u8 = undefined;
 var state: State = undefined;
 var index: Platform.Index.State = .{};
 var catalogue: ?std.json.Parsed(core.Catalog) = null;
 var playing = false;
+var paused = false;
+var base_frames: u64 = 0;
 var usb_phase: ?gain.usb_view.Phase = null;
 var usb_dirty = true;
 var power = gain.battery.Status{};
@@ -338,6 +340,9 @@ fn init(at: u64) callconv(.c) void {
     usb_phase = null;
     usb_dirty = true;
     power = .{};
+    playing = false;
+    paused = false;
+    base_frames = 0;
     presented_revision = 0;
     Platform.Display.revision = 0;
     projection.publish(&.{}, &.{}, 0, true) catch unreachable;
@@ -353,7 +358,18 @@ fn init(at: u64) callconv(.c) void {
 fn apply(command: media.PlaybackCommand, at: u64) void {
     switch (command) {
         .none, .set_attenuation => {},
-        .stop => playing = false,
+        .stop => {
+            playing = false;
+            paused = false;
+        },
+        .toggle_pause => {
+            if (paused) started_at = at else base_frames = state.status.played_frames;
+            paused = !paused;
+        },
+        .seek_to => |target| {
+            base_frames = @min(state.status.total_frames, target);
+            started_at = at;
+        },
         .previous, .next => {
             if (state.neighbouringTrack(if (command == .previous) -1 else 1)) |track| state.queue(track);
         },
@@ -363,6 +379,8 @@ fn apply(command: media.PlaybackCommand, at: u64) void {
         state.playing_track = track;
         state.requested_track = null;
         started_at = at;
+        base_frames = state.requested_start_frame;
+        paused = state.resume_paused;
         playing = true;
     }
 }
@@ -419,11 +437,11 @@ fn frame(pixels: *api.Pixels, at: u64) callconv(.c) bool {
         const rate = @max(1, track.meta.sample_rate);
         const total = track.meta.duration_ms * rate / 1000;
         state.status = .{
-            .phase = if (playing) .playing else .preparing,
+            .phase = if (!playing) .preparing else if (paused) .paused else .playing,
             .sample_rate = rate,
             .output_format = .signed_24_in_u32,
             .total_frames = total,
-            .played_frames = if (playing) @min(total, (at -| started_at) * rate / 1000) else state.status.played_frames,
+            .played_frames = if (playing and !paused) @min(total, base_frames + (at -| started_at) * rate / 1000) else base_frames,
         };
     }
     state.frame(at);

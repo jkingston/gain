@@ -244,6 +244,29 @@ The check may update Gain's preallocated cache/log files. It does not modify mus
 or NAND. Display submissions are measured; panel scanout and acoustic quality
 still need separate observation.
 
+## Playback controls and queue
+
+Choosing a song captures the displayed album, artist or All Songs order as
+stable IDs and starts at that song. Browsing elsewhere or adding albums during a
+scan does not replace that queue. Next/previous and natural completion follow the
+captured order; removed tracks are skipped and retags use current metadata.
+Another explicit song choice replaces the queue. Direct development commands and
+folder playback retain their existing local navigation behavior.
+
+Play on Now Playing toggles pause. Pause retains decoder/PCM state while emitting
+silence to keep the DAC clock locked. Already queued periods complete before the
+hold; the displayed cursor advances only for completed audio frames, never paused
+wall time. Resume continues the retained stream. Worker ownership, cancellation
+and USB handoff are unchanged. Deterministic seeded tests cover paused periods,
+DMA wraps, frame order and cursor accounting.
+
+Settings offers optional Track/Album ReplayGain, disabled by default. Album mode
+falls back to track tags. Gain is computed once per track, applied in Q24 at final
+output and peak-limited; missing peak data never authorizes a digital boost.
+Hardware volume remains independent. Music playback uses 24-bit output to retain
+precision through normalization. Changes apply at the next track start; these
+settings are not yet persisted. Inter-track gapless playback is separate work.
+
 ## Media support
 
 | Format | Current native decoder |
@@ -261,7 +284,7 @@ still need separate observation.
 | DSD, multichannel downmix, resampling | Not implemented |
 
 The browser filters supported file extensions; the decoder detects content.
-Every format shares stop/previous/next/volume controls. Mono duplicates into
+Every format shares stop/pause/resume/previous/next/volume controls. Mono duplicates into
 stereo. Native integer sources up to 24-bit retain exact samples; higher
 precision is reduced to 24-bit with deterministic TPDF dither at final output.
 NaNs become silence and out-of-range float values clip. PCM conversion uses
@@ -281,9 +304,10 @@ buffers with silence before the output FIFO drains. Linked-descriptor interrupts
 wake output directly; a one-period watchdog bounds a missing notification.
 
 MP4 has direct sample lookup. MP3, FLAC and Ogg decoder seeking currently
-replays from the beginning; the player UI provides track navigation rather than
-scrubbing. MP4/Ogg title parsing is available to decoder callers. Full ID3,
-artist/album, ReplayGain and artwork integration remain incomplete. Analogue
+replays from the beginning. Hold Menu on Now Playing to preview a seek position,
+move with previous/next or the wheel, then Play to confirm or Back to cancel.
+Seeking joins the existing workers before restarting at the requested frame;
+pause remains paused across a seek. MP4 uses direct sample lookup. MP4/Ogg title parsing is available to decoder callers. Metadata and artwork support is described in the library section. Analogue
 noise/distortion, switching quality and battery savings require separate
 measurement or listening tests.
 

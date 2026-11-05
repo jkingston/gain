@@ -135,6 +135,24 @@ pub const Loader = struct {
         if (self.busy) return;
         self.busy = true;
         defer self.busy = false;
+        defer {
+            const masks = x.Interrupts.disableCpu();
+            defer x.Interrupts.restoreCpu(masks);
+            const health = &@import("health.zig").snapshot;
+            health.text_initialized = @intFromBool(self.initialized);
+            health.text_loaded = @intFromBool(self.api != null);
+            health.text_result = @backingInt(self.last_result);
+            health.text_prepared = self.prepared;
+            health.text_worst_ticks = self.worst_ticks;
+            health.text_bytes_low = @truncate(self.source_bytes);
+            health.text_bytes_high = @truncate(self.source_bytes >> 32);
+            health.text_heap_peak = self.statistics.heap_peak;
+            health.text_heap_failures = self.statistics.heap_failures;
+            health.text_page_reads = self.statistics.page_reads;
+            health.text_page_hits = self.statistics.page_hits;
+            health.text_labels = self.statistics.labels;
+            health.text_glyphs = self.statistics.glyphs;
+        }
         if (!self.initialized) {
             // Load lazily only when the screen actually needs a missing script.
             if (!self.cache.pending()) return;

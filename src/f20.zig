@@ -11,6 +11,7 @@ pub const dac = @import("es9018k2m.zig");
 pub const power = @import("f20_power.zig");
 pub const pmic = @import("axp192.zig");
 pub const audio = @import("f20_audio.zig");
+pub const transport = @import("transport.zig");
 pub const media = @import("f20_media.zig");
 pub const player = @import("f20_player.zig");
 pub const storage = @import("f20_storage.zig");

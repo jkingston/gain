@@ -4,6 +4,7 @@ const pcm_reservoir = @import("pcm_reservoir.zig");
 
 pub const period_microseconds: u32 = 10_000;
 pub const unity_gain_q24: u32 = 1 << 24;
+pub const maximum_gain_q24: u32 = 16 * unity_gain_q24;
 
 pub const Error = error{
     InvalidSampleRate,
@@ -93,7 +94,7 @@ fn render(
     gain_q24: u32,
     quantizer: ?*pcm.Sample.Quantizer,
 ) Error!Render {
-    if (gain_q24 > unity_gain_q24) return error.InvalidGain;
+    if (gain_q24 > maximum_gain_q24) return error.InvalidGain;
     if (output.len != plan.bytes or @intFromPtr(output.ptr) & 3 != 0) {
         return error.InvalidOutputBuffer;
     }
@@ -233,7 +234,7 @@ fn scaleSample(sample: i32, gain_q24: u32) i32 {
     const product = @as(i64, sample) * gain_q24;
     const magnitude: u64 = @intCast(if (product < 0) -product else product);
     const rounded: i64 = @intCast((magnitude + (1 << 23)) >> 24);
-    return @intCast(if (product < 0) -rounded else rounded);
+    return @intCast(std.math.clamp(if (product < 0) -rounded else rounded, std.math.minInt(i32), std.math.maxInt(i32)));
 }
 
 test "twenty millisecond periods are integral at every supported rate" {
@@ -380,7 +381,7 @@ test "zero gain silences a complete period and invalid buffers are rejected" {
     );
     try std.testing.expectError(
         error.InvalidGain,
-        renderPeriod(&ring, output[0..16], plan, unity_gain_q24 + 1),
+        renderPeriod(&ring, output[0..16], plan, maximum_gain_q24 + 1),
     );
 }
 
@@ -509,4 +510,22 @@ test "dither never changes drained padding or consumes rejected 16-bit output" {
     try std.testing.expectEqual(@as(usize, 1), ring.available());
     try std.testing.expectEqual(initial_seed, quantizer.random);
     for (output) |byte| try std.testing.expectEqual(@as(u8, 0xa5), byte);
+}
+
+test "bounded positive digital gain saturates rather than wrapping at either precision" {
+    const frames = [_]pcm_reservoir.StereoFrame{.{ .left = std.math.maxInt(i32), .right = std.math.minInt(i32) }};
+    var backing = frames;
+    var ring = try pcm_reservoir.Ring.initFilled(&backing, 1);
+    const plan = try Plan.initWithPeriod(1000, .signed_24_in_u32, 1000);
+    var bytes: [8]u8 align(4) = undefined;
+    _ = try renderPeriod(&ring, &bytes, plan, 2 * unity_gain_q24);
+    try std.testing.expectEqual(@as(u32, 0x7fffff), std.mem.readInt(u32, bytes[0..4], .little));
+    try std.testing.expectEqual(@as(u32, 0x800000), std.mem.readInt(u32, bytes[4..8], .little));
+    ring = try pcm_reservoir.Ring.initFilled(&backing, 1);
+    var quantizer: pcm.Sample.Quantizer = .{};
+    _ = try renderPeriodDithered(&ring, &bytes, plan, maximum_gain_q24, &quantizer);
+    const left = std.mem.readInt(u32, bytes[0..4], .little);
+    const right = std.mem.readInt(u32, bytes[4..8], .little);
+    try std.testing.expect(left >= 0x7ffffe and left <= 0x7fffff);
+    try std.testing.expect(right >= 0x800000 and right <= 0x800001);
 }

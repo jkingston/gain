@@ -8,6 +8,7 @@ pub const Register = enum(u8) {
     usb_path = 0x30,
     shutdown = 0x32,
     charge_control = 0x33,
+    charge_timing = 0x34,
     usb_voltage_high = 0x5a,
     usb_current_high = 0x5c,
     die_temperature_high = 0x5e,
@@ -85,6 +86,28 @@ pub const Coulomb = struct {
 
 const charge_currents_ma = [_]u16{ 100, 190, 280, 360, 450, 550, 630, 700, 780, 880, 960, 1000, 1080, 1160, 1240, 1320 };
 
+pub const ChargerConfiguration = struct {
+    charge_control: u8,
+    charge_timing: u8,
+    usb_path: u8,
+    adc_enable: u8,
+    adc_rate: u8,
+
+    pub fn targetMillivolts(self: @This()) u16 {
+        return ([_]u16{ 4100, 4150, 4200, 4360 })[(self.charge_control >> 5) & 3];
+    }
+    pub fn chargeMilliamps(self: @This()) u16 {
+        return if (self.charge_control & 0x80 != 0) charge_currents_ma[self.charge_control & 15] else 0;
+    }
+    pub fn usbLimitMilliamps(self: @This()) ?u16 {
+        return if (self.usb_path & 2 == 0) null else if (self.usb_path & 1 != 0) 100 else 500;
+    }
+    // ADC enable does not prove the board has a wired/calibrated cell NTC.
+    pub fn temperatureAdcEnabled(self: @This()) bool {
+        return self.adc_enable & 1 != 0;
+    }
+};
+
 pub fn Device(comptime Bus: type) type {
     return struct {
         const Self = @This();
@@ -98,6 +121,10 @@ pub fn Device(comptime Bus: type) type {
 
         pub fn identify(self: *Self) !void {
             if (try self.read(.identity) != 3) return error.UnsupportedDevice;
+        }
+
+        pub fn chargerConfiguration(self: *Self) !ChargerConfiguration {
+            return .{ .charge_control = try self.read(.charge_control), .charge_timing = try self.read(.charge_timing), .usb_path = try self.read(.usb_path), .adc_enable = try self.read(.adc_enable), .adc_rate = try self.read(.adc_rate) };
         }
 
         pub fn configureJackInputs(self: *Self) !void {
@@ -404,4 +431,16 @@ test "an enabled battery ADC is unknown until its first nonzero conversion" {
     bus.registers[0x78] = 0xeb;
     bus.registers[0x79] = 3;
     try std.testing.expect((try device.telemetry()).battery_mv.? > 4100);
+}
+
+test "charger audit distinguishes current target, USB input limit and unproven cell sensing" {
+    var config = ChargerConfiguration{ .charge_control = 0xc8, .charge_timing = 0, .usb_path = 0x40, .adc_enable = 0xfe, .adc_rate = 0xb2 };
+    try std.testing.expectEqual(4200, config.targetMillivolts());
+    try std.testing.expectEqual(780, config.chargeMilliamps());
+    try std.testing.expectEqual(null, config.usbLimitMilliamps());
+    try std.testing.expect(!config.temperatureAdcEnabled());
+    config.usb_path |= 2;
+    try std.testing.expectEqual(500, config.usbLimitMilliamps().?);
+    config.usb_path |= 1;
+    try std.testing.expectEqual(100, config.usbLimitMilliamps().?);
 }
