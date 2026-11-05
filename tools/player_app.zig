@@ -372,7 +372,7 @@ fn apply(command: media.PlaybackCommand, at: u64) void {
             started_at = at;
         },
         .previous, .next => {
-            if (state.neighbouringTrack(if (command == .previous) -1 else 1)) |track| state.queue(track);
+            state.playbackFinished(.{ .sample_rate = state.status.sample_rate, .output_format = state.status.output_format, .frames = state.status.played_frames, .chunks = 0, .underruns = 0, .minimum_fifo_level = 0, .exit = if (command == .previous) .previous else .next }, false);
         },
     }
     if (state.requested_track != null) {
@@ -450,8 +450,8 @@ fn frame(pixels: *api.Pixels, at: u64) callconv(.c) bool {
     apply(state.repeat(at, state.input_policy.held, playing), at);
     transportStatus(at);
     if (playing and !paused and state.status.total_frames != 0 and state.status.played_frames == state.status.total_frames) {
-        if (state.finishedTrack()) |track| {
-            state.queue(track);
+        state.playbackFinished(.{ .sample_rate = state.status.sample_rate, .output_format = state.status.output_format, .frames = state.status.played_frames, .chunks = 0, .underruns = 0, .minimum_fifo_level = 0 }, false);
+        if (state.requested_track != null) {
             apply(.none, at);
         } else {
             base_frames = state.status.total_frames;

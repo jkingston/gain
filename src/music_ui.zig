@@ -320,6 +320,7 @@ pub fn Controller(comptime Platform: type) type {
                 .artist => if (view.artistIndex(collection.artist)) |i| view.artists[i].track_count else 0,
                 .queue => self.track_store.order.count,
                 .folder => count: {
+                    Platform.trace(.library_work, benchmarkClock(), @intCast(view.track_count));
                     var count: usize = 0;
                     for (view.tracks[0..view.track_count]) |track| if (std.mem.eql(u8, std.fs.path.dirname(track.path) orelse "", collection.directory)) {
                         count += 1;
@@ -422,14 +423,15 @@ pub fn Controller(comptime Platform: type) type {
                 self.menu = .{ .kind = .player };
             } else if (self.currentCollection()) |source| {
                 if (self.screen == .home and self.selection != 0) return;
-                if (self.collectionCount(source) == 0 and self.screen != .folders) return;
+                const count = self.collectionCount(source);
+                if (count == 0 and self.screen != .folders) return;
                 var captured = source;
                 if (source.scope == .folder) {
                     if (source.directory.len > self.menu_directory.len) return;
                     @memcpy(self.menu_directory[0..source.directory.len], source.directory);
                     captured.directory = self.menu_directory[0..source.directory.len];
                 }
-                self.menu = .{ .kind = .collection, .collection = captured, .jump = self.rows() > 8, .empty = self.collectionCount(source) == 0 };
+                self.menu = .{ .kind = .collection, .collection = captured, .jump = self.rows() > 8, .empty = count == 0 };
             } else return;
             self.cancelInput(self.input_policy.held);
             if (self.menu != null) self.covers.clearRequests();
@@ -485,6 +487,26 @@ pub fn Controller(comptime Platform: type) type {
             self.dirty = true;
             self.major = true;
             return .none;
+        }
+
+        /// A newer explicit choice wins over a retiring worker's skip/seek.
+        /// Faults never masquerade as EOF and advance through the queue.
+        pub fn playbackFinished(self: *State, result: media.Result, failed: bool) void {
+            if (self.requested_track != null or failed) return;
+            switch (result.exit) {
+                .stopped => {},
+                .seek => if (self.playing_track) |track| {
+                    const paused = self.status.phase == .paused;
+                    self.queue(track);
+                    self.requested_start_frame = result.seek_frame;
+                    self.resume_paused = paused;
+                },
+                .next, .previous, .completed => {
+                    if (result.exit == .completed and result.frames == 0) return;
+                    const next = if (result.exit == .completed) self.finishedTrack() else self.neighbouringTrack(if (result.exit == .previous) -1 else 1);
+                    if (next) |track| self.queue(track);
+                },
+            }
         }
 
         pub fn finishedTrack(self: *State) ?*const core.Track {
@@ -783,6 +805,7 @@ pub fn Controller(comptime Platform: type) type {
                 const source = self.folderSource();
                 if (self.folder_revision != view.revision or self.folder_entries_address != @intFromPtr(source.entries.ptr) or self.folder_entries_count != source.entries.len) self.refreshFolder();
             }
+            if (view.revision == self.revision) return;
             if (self.menu) |*menu| if (menu.kind == .collection) {
                 const empty = self.collectionCount(menu.collection) == 0;
                 if (empty != menu.empty) {
@@ -791,7 +814,6 @@ pub fn Controller(comptime Platform: type) type {
                     self.dirty = true;
                 }
             };
-            if (view.revision == self.revision) return;
             self.artist_rank = view.artistIndex(self.artist_id);
             self.album_rank = view.albumIndex(self.album_id);
             self.revision = view.revision;
@@ -1429,10 +1451,13 @@ pub fn Controller(comptime Platform: type) type {
 // the same controller with a deterministic DMA completion schedule.
 const TestPlatform = struct {
     var milliseconds: u64 = 0;
+    var library_work: u64 = 0;
     pub fn now() u32 {
         return @truncate(milliseconds * 6000);
     }
-    pub fn trace(_: @import("display_trace.zig").Kind, _: u32, _: u32) void {}
+    pub fn trace(kind: @import("display_trace.zig").Kind, _: u32, value: u32) void {
+        if (kind == .library_work) library_work += value;
+    }
     pub const Index = struct {
         pub const State = struct {
             volume: *anyopaque = undefined,
@@ -2489,4 +2514,78 @@ test "open folder actions own their path across source mutation and reclamation"
     try std.testing.expect(state.requested_track == null);
     _ = state.handle(.back, 3, false);
     try std.testing.expect(state.menu == null);
+}
+
+test "unchanged folder actions leave decoder CPU available across repeated UI polls" {
+    var fixture: Fixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const tracks = try arena.allocator().alloc(core.Track, 4096);
+    for (tracks, 0..) |*track, i| track.* = .{ .id = i + 1, .path = try std.fmt.allocPrint(arena.allocator(), "Music/A/{d:0>4}.flac", .{i}), .stamp = .{}, .meta = .{ .title = "Synthetic", .album = "A" } };
+    try fixture.pair.publish(&.{}, tracks, 1, true);
+    var state = fixture.state();
+    state.navigate(.folders);
+    state.reconcile();
+    state.enterFolder("Music/A");
+    state.reconcile();
+    _ = state.handle(.menu, 0, true);
+    try std.testing.expect(state.menu != null);
+    TestPlatform.Display.reset();
+    defer TestPlatform.Display.reset();
+    const reservoir = @import("pcm_reservoir.zig");
+    const output = @import("audio_output.zig");
+    var samples: [8192]reservoir.StereoFrame = @splat(.{ .left = 0, .right = 0 });
+    var ring = try reservoir.Ring.initFilled(&samples, samples.len);
+    const plan = try output.Plan.init(48000, .signed_24_in_u32);
+    var bytes: [3840]u8 align(4) = undefined;
+    var produced: [144]reservoir.StereoFrame = @splat(.{ .left = 1, .right = 1 });
+    var elapsed_us: u64 = 0;
+    var output_at: u64 = 10000;
+    for (0..1000) |step| {
+        if (step == 300 or step == 600) try fixture.pair.publish(&.{}, tracks, 1, true);
+        const before = TestPlatform.library_work;
+        const now = elapsed_us / 1000;
+        _ = state.repeat(now, 0, true);
+        TestPlatform.milliseconds = now;
+        state.frame(now);
+        // Synthetic scheduling budget, not MIPS timing: catalogue visits use
+        // foreground CPU; a 1 ms decoder slice produces 3 ms of stereo PCM.
+        elapsed_us += 1000 + (TestPlatform.library_work - before) * 3;
+        _ = ring.write(&produced);
+        while (output_at <= elapsed_us) : (output_at += 10000) {
+            const rendered = try output.renderPeriod(&ring, &bytes, plan, output.unity_gain_q24);
+            try std.testing.expect(!rendered.underrun);
+        }
+        try std.testing.expect(!state.failure and !TestPlatform.Display.corrupted);
+    }
+    try std.testing.expect(state.menu != null);
+}
+
+test "retiring workers cannot override newer selections and faults cannot auto-advance" {
+    var fixture: Fixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const tracks = [_]core.Track{
+        .{ .id = 1, .path = "A/1.flac", .stamp = .{}, .meta = .{} },
+        .{ .id = 2, .path = "A/2.flac", .stamp = .{}, .meta = .{} },
+        .{ .id = 3, .path = "A/3.flac", .stamp = .{}, .meta = .{} },
+    };
+    try fixture.pair.publish(&.{}, &tracks, 1, true);
+    var state = fixture.state();
+    for (&tracks) |track| try state.track_store.order.append(track.id);
+    state.queue(&tracks[0]);
+    state.playing_track = state.track_store.begin().?;
+    state.requested_track = null;
+    for ([_]media.PlaybackExit{ .next, .previous, .seek, .completed }) |exit| {
+        state.queue(&tracks[2]);
+        state.playbackFinished(.{ .sample_rate = 48000, .output_format = .signed_24_in_u32, .frames = 1000, .chunks = 3, .underruns = 0, .minimum_fifo_level = 32, .exit = exit, .seek_frame = 900 }, false);
+        try std.testing.expectEqual(3, state.requested_track.?.id);
+        try std.testing.expectEqual(0, state.requested_start_frame);
+    }
+    state.requested_track = null;
+    state.playbackFinished(.{ .sample_rate = 48000, .output_format = .signed_24_in_u32, .frames = 1000, .chunks = 3, .underruns = 0, .minimum_fifo_level = 32 }, true);
+    try std.testing.expect(state.requested_track == null);
+    try std.testing.expectEqual(0, state.track_store.order.cursor);
 }

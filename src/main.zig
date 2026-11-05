@@ -571,6 +571,7 @@ fn browseMusic(volume: *Volume, battery_mv: u32, attenuation: *u8, input: *Input
             session.playing = true;
             index.playing = true;
             var measured = player.Report.empty();
+            var playback_failed = false;
             volume.device.keep_alive = null;
             covers.idle_yield = null;
             diag.report.stage = 2;
@@ -586,6 +587,7 @@ fn browseMusic(volume: *Volume, battery_mv: u32, attenuation: *u8, input: *Input
                 .storage_work = .{ .context = &index, .run = @import("f20_index.zig").State.run },
             }, .{ .context = &session, .poll = MusicSession.control }) catch |failure| failed: {
                 diag.failed(1, failure);
+                playback_failed = true;
                 break :failed measured;
             };
             diag.report.stage = 0;
@@ -596,16 +598,7 @@ fn browseMusic(volume: *Volume, battery_mv: u32, attenuation: *u8, input: *Input
             if (state.failure and diag.report.failure != 0) diag.failed(9, @errorFromInt(@as(u16, @intCast(diag.report.failure))));
             diag.playback(result);
             state.attenuation = result.playback.attenuation;
-            if (result.playback.exit == .seek) {
-                const paused = state.status.phase == .paused;
-                if (state.playing_track) |current| state.queue(current);
-                state.requested_start_frame = result.playback.seek_frame;
-                state.resume_paused = paused;
-            }
-            if (result.playback.exit == .next or result.playback.exit == .previous or (result.playback.exit == .completed and result.playback.frames != 0 and state.requested_track == null)) {
-                const next = if (result.playback.exit == .completed) state.finishedTrack() else state.neighbouringTrack(if (result.playback.exit == .previous) -1 else 1);
-                if (next) |track_next| state.queue(track_next);
-            }
+            state.playbackFinished(result.playback, playback_failed);
             const handoff_began = Timer.now();
             // A completed scan already published its new catalogue, and a
             // cancelled scan withdrew its preview before reclaiming memory.
