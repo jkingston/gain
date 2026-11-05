@@ -118,6 +118,18 @@ pub const Report = extern struct {
     scan_last_command: u32 = 0,
     scan_last_status: u32 = 0,
     scan_last_flags: u32 = 0,
+    // Aggregate scan-view preparation and post-playback handoff costs, in
+    // hardware timer ticks. No per-frame persistence or hot-path formatting.
+    view_builds: u32 = 0,
+    view_build_max: u32 = 0,
+    playback_handoff_max: u32 = 0,
+    cover_loads: u32 = 0,
+    cover_read_calls: u32 = 0,
+    cover_read_bytes: u32 = 0,
+    cover_cancelled: u32 = 0,
+    cover_load_max: u32 = 0,
+    cover_prepare_max: u32 = 0,
+    cover_evictions: u32 = 0,
 };
 
 var clocks: @import("executive.zig").Clock = .{ .previous = 0 };

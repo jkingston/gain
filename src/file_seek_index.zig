@@ -21,6 +21,14 @@ pub const Index = struct {
 
     pub fn seek(self: *Index, reader: anytype, target: u32, cluster_bytes: u32, observer: anytype) !void {
         if (reader.size > maximum_bytes or target > reader.size or cluster_bytes < 512 or !std.math.isPowerOfTwo(cluster_bytes)) return error.InvalidSeek;
+        if (comptime @hasField(@typeInfo(@TypeOf(reader)).pointer.child, "contiguous")) {
+            // exFAT NoFatChain streams already seek by arithmetic. Building a
+            // sparse FAT index would turn their constant-time seek into a walk.
+            if (reader.contiguous) {
+                if (observer.cancelled()) return error.Cancelled;
+                return reader.seekTo(target);
+            }
+        }
         if (self.count == 0 or self.first != reader.first_cluster or self.size != reader.size or self.cluster_bytes != cluster_bytes) {
             self.first = reader.first_cluster;
             self.size = reader.size;

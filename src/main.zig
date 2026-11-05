@@ -891,7 +891,7 @@ fn browseMusic(volume: *Volume, browser: *Browser, battery_mv: u32, attenuation:
             try browse(volume, browser, battery_mv, &state.attenuation, input, pmic);
             volume.device.keep_alive = MusicSession.keepIdleResponsive;
             covers.idle_yield = .{ .context = &session, .poll = MusicSession.idlePoll };
-            if (diag.catalog) |*catalogue| try index.projection.publish(&catalogue.value, catalogue.value.tracks, volume.serial, true);
+            if (diag.catalog) |*catalogue| try index.projection.publishCatalogue(&catalogue.value, volume.serial);
             covers.cache.clearRequests();
             input.resync();
             state.navigate(.home);
@@ -947,14 +947,18 @@ fn browseMusic(volume: *Volume, browser: *Browser, battery_mv: u32, attenuation:
             if (result.playback.exit == .next or result.playback.exit == .previous or (result.playback.exit == .completed and result.playback.frames != 0 and state.requested_track == null)) {
                 if (state.neighbouringTrack(if (result.playback.exit == .previous) -1 else 1)) |next| state.queue(next);
             }
+            const handoff_began = Timer.now();
+            // A completed scan already published its new catalogue, and a
+            // cancelled scan withdrew its preview before reclaiming memory.
+            // Track changes alone do not change library membership or order.
             index.finish();
-            if (diag.catalog) |*catalogue| try index.projection.publish(&catalogue.value, catalogue.value.tracks, volume.serial, true);
             diag.flush();
             input.resync();
             _ = LcdDma.resetForDirect();
             state.pending_frame.ready = false;
             state.major = true;
             state.dirty = true;
+            diag.report.playback_handoff_max = @max(diag.report.playback_handoff_max, Timer.elapsed(handoff_began));
             continue;
         }
         if (index.requested) @import("f20_index.zig").State.run(&index, .{ .context = &session, .poll = MusicSession.idlePoll });
@@ -972,7 +976,6 @@ fn browseMusic(volume: *Volume, browser: *Browser, battery_mv: u32, attenuation:
         }
         if (index.pending != null or index.error_pending != null) {
             index.finish();
-            if (diag.catalog) |*catalogue| try index.projection.publish(&catalogue.value, catalogue.value.tracks, volume.serial, true);
         }
         Timer.delayMicroseconds(1000);
     }

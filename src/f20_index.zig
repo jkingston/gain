@@ -35,7 +35,7 @@ pub const State = struct {
         const pair: *views.Pair = @ptrFromInt(memory.scan_views.cached());
         pair.* = .{};
         const baseline = if (diag.catalog) |*catalog| &catalog.value else &core.Catalog{};
-        try pair.publish(baseline, baseline.tracks, volume.serial, true);
+        try pair.publishCatalogue(baseline, volume.serial);
         return .{ .volume = volume, .projection = pair };
     }
 
@@ -100,15 +100,38 @@ pub const State = struct {
         diag.report.scan_total = stats.candidates;
     }
 
-    fn publishView(self: *State, baseline: *const core.Catalog, tracks: []const core.Track, complete: bool) !void {
-        const Observer = struct {
-            state: *State,
+    const ViewObserver = struct {
+        state: *State,
+        restoring: bool = false,
 
-            pub fn cancelled(observer: @This()) bool {
-                return State.poll(observer.state);
-            }
-        };
-        const revision = try self.projection.prepareCooperative(baseline, tracks, self.volume.serial, complete, Observer{ .state = self });
+        pub fn cancelled(observer: @This()) bool {
+            const interrupted = State.poll(observer.state);
+            // Withdrawal must finish before the abandoned scan arena is freed.
+            // Keep servicing UI/USB even when a new track is already requested.
+            return interrupted and !observer.restoring;
+        }
+    };
+
+    fn prepared(began: u32) void {
+        const elapsed = x.Timer.elapsed(began);
+        // Successful scan preview/final/rollback preparations only. This is
+        // wall time, including cooperative UI service; not pure sorting CPU.
+        diag.report.view_builds += 1;
+        diag.report.view_build_max = @max(diag.report.view_build_max, elapsed);
+        diag.report.scan_worst_publication = @max(diag.report.scan_worst_publication, elapsed);
+    }
+
+    fn publishPreview(self: *State, baseline: *const core.Catalog, tracks: []const core.Track) !void {
+        const began = x.Timer.now();
+        const revision = try self.projection.prepareCooperative(baseline, tracks, self.volume.serial, false, ViewObserver{ .state = self });
+        prepared(began);
+        self.projection.commit(revision);
+    }
+
+    fn publishCatalogue(self: *State, catalogue: *const core.Catalog) !void {
+        const began = x.Timer.now();
+        const revision = try self.projection.prepareCatalogueCooperative(catalogue, self.volume.serial, ViewObserver{ .state = self });
+        prepared(began);
         self.projection.commit(revision);
     }
 
@@ -117,12 +140,10 @@ pub const State = struct {
         if (poll(self)) return error.Cancelled;
         if (!self.cold and !views.previewNeeded(previous.source, self.volume.serial, tracks.len, stats)) return;
         if (!self.publication_cadence.due(x.Timer.now(), x.Timer.milliseconds(300))) return;
-        const began = x.Timer.now();
         const retained_art = core.Catalog{ .albums = if (diag.catalog) |catalog| catalog.value.albums else &.{} };
         const baseline = if (!self.cold and diag.catalog != null) &diag.catalog.?.value else &retained_art;
-        try self.publishView(baseline, tracks, false);
+        try self.publishPreview(baseline, tracks);
         self.publication_cadence.published(x.Timer.now());
-        diag.report.scan_worst_publication = @max(diag.report.scan_worst_publication, x.Timer.elapsed(began));
         diag.report.scan_publications += 1;
         diag.report.scan_view_tracks = @intCast(self.projection.current().track_count);
         diag.report.scan_view_albums = @intCast(self.projection.current().album_count);
@@ -131,9 +152,14 @@ pub const State = struct {
 
     fn aborted(context: *anyopaque, previous: *const core.Catalog) void {
         const self: *State = @ptrCast(@alignCast(context));
-        const revision = self.projection.prepare(previous, previous.tracks, self.volume.serial, true) catch empty: {
+        // An unchanged quick scan may have published nothing. Its live final
+        // view still belongs to the baseline, so there is nothing to withdraw.
+        if (self.projection.current().complete) return;
+        const began = x.Timer.now();
+        const revision = self.projection.prepareCatalogueCooperative(previous, self.volume.serial, ViewObserver{ .state = self, .restoring = true }) catch empty: {
             break :empty self.projection.prepare(&.{}, &.{}, self.volume.serial, true) catch unreachable;
         };
+        prepared(began);
         // The UI cannot republish old artwork paths between withdrawing its
         // preview and clearing requests. No allocation, I/O or drawing here.
         const status = x.Interrupts.disableCpu();
@@ -176,7 +202,7 @@ pub const State = struct {
             next.deinit();
         }
         if (diag.catalog) |old| next.value.generation = old.value.generation + 1;
-        try self.publishView(baseline, next.value.tracks, true);
+        try self.publishCatalogue(&next.value);
         self.pending = next;
         self.complete = true;
         self.phase = "Library updated";

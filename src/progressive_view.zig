@@ -378,6 +378,16 @@ pub const Pair = struct {
         self.commit(try self.prepare(baseline, visited, source, complete));
     }
 
+    pub fn publishCatalogue(self: *Pair, catalogue: *const core.Catalog, source: u64) !void {
+        self.commit(try self.prepareCatalogueCooperative(catalogue, source, Uninterrupted{}));
+    }
+
+    /// A final view borrows both tracks and artwork from its new owner. Mixing
+    /// new tracks with old artwork would retain the arena retired at handoff.
+    pub fn prepareCatalogueCooperative(self: *Pair, catalogue: *const core.Catalog, source: u64, observer: anytype) !u32 {
+        return self.prepareCooperative(catalogue, catalogue.tracks, source, true, observer);
+    }
+
     /// One storage writer may prepare while UI reads the published slot.
     pub fn prepare(self: *Pair, baseline: *const core.Catalog, visited: []const core.Track, source: u64, complete: bool) !u32 {
         return self.prepareCooperative(baseline, visited, source, complete, Uninterrupted{});
@@ -535,6 +545,75 @@ test "prepared replacement is invisible until its single commit" {
     try std.testing.expectEqual(2, pair.current().tracks[0].id);
 }
 
+test "authoritative publication survives retiring the old arena with changed artwork and removed tracks" {
+    const a = std.testing.allocator;
+    const pair = try a.create(Pair);
+    defer a.destroy(pair);
+    pair.* = .{};
+    const tracks = [_]core.Track{
+        .{ .id = 1, .path = "A/1.flac", .stamp = .{}, .meta = .{ .title = "Before", .album = "Album", .album_artist = "Artist" } },
+        .{ .id = 2, .path = "B/1.flac", .stamp = .{}, .meta = .{ .title = "Removed", .album = "Other", .album_artist = "Artist" } },
+    };
+    try pair.publish(&.{}, &tracks, 42, true);
+    const album_id = pair.current().albums[pair.current().track_groups[0]].id;
+    const album = core.Album{
+        .id = album_id,
+        .key = "album identity",
+        .title = "Album",
+        .artist = "Artist",
+        .directory = "A",
+        .tracks = &.{0},
+        .art = .{ .recipe = "rgb565", .source = "A/cover.jpg", .key = "old art", .cache_path = "atlas:1" },
+    };
+    var old_storage: [16 * 1024]u8 = undefined;
+    var old_allocator = std.heap.FixedBufferAllocator.init(&old_storage);
+    var old = core.Owned{ .arena = .init(old_allocator.allocator()), .value = .{} };
+    var old_live = true;
+    defer if (old_live) old.deinit();
+    old.value = try core.clone(old.arena.allocator(), core.Catalog{ .source = 42, .tracks = &tracks, .albums = &.{album} });
+    try pair.publishCatalogue(&old.value, 42);
+    const previous = pair.current();
+    var next = core.Owned{ .arena = .init(a), .value = .{} };
+    defer next.deinit();
+    var changed_track = tracks[0];
+    changed_track.meta.title = "After";
+    var changed_album = album;
+    changed_album.art.key = "new art";
+    changed_album.art.source = "A/cover.png";
+    changed_album.art.cache_path = "atlas:9";
+    next.value = try core.clone(next.arena.allocator(), core.Catalog{ .source = 42, .tracks = &.{changed_track}, .albums = &.{changed_album} });
+    const Observer = struct {
+        pair: *Pair,
+        previous: *const Snapshot,
+
+        pub fn cancelled(self: @This()) bool {
+            std.debug.assert(self.pair.current() == self.previous);
+            std.debug.assert(self.previous.trackById(2) != null);
+            return false;
+        }
+    };
+    const revision = try pair.prepareCatalogueCooperative(&next.value, 42, Observer{ .pair = pair, .previous = previous });
+    try std.testing.expect(pair.current() == previous);
+    pair.commit(revision);
+    // Model the fixed native arena being immediately reused after the join.
+    // Any accidentally borrowed old text now reads poison rather than valid art.
+    old.deinit();
+    old_live = false;
+    @memset(&old_storage, 0xa5);
+    const view = pair.current();
+    try std.testing.expectEqual(1, view.track_count);
+    try std.testing.expect(view.trackById(2) == null);
+    try std.testing.expectEqualStrings("After", view.trackById(1).?.meta.title);
+    try std.testing.expectEqualStrings("A/1.flac", view.trackById(1).?.path);
+    try std.testing.expectEqual(album_id, view.albums[0].id);
+    try std.testing.expectEqualStrings("Artist", view.albums[0].artist);
+    try std.testing.expectEqualStrings("Album", view.albums[0].title);
+    try std.testing.expectEqualStrings("rgb565", view.albums[0].art.recipe);
+    try std.testing.expectEqualStrings("A/cover.png", view.albums[0].art.source);
+    try std.testing.expectEqualStrings("new art", view.albums[0].art.key);
+    try std.testing.expectEqualStrings("atlas:9", view.albums[0].art.cache_path);
+}
+
 test "bucketed track orders match full comparison sorts for mixed and skewed libraries" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -604,7 +683,8 @@ test "cooperative rebuilds service readers without publishing partial sorts or c
         }
     };
     var observer = Observer{ .pair = pair, .old = old };
-    const revision = try pair.prepareCooperative(&.{}, tracks, 42, true, &observer);
+    const catalogue = core.Catalog{ .tracks = tracks };
+    const revision = try pair.prepareCatalogueCooperative(&catalogue, 42, &observer);
     const calls = observer.calls;
     try std.testing.expect(calls > max_tracks / tracks_between_service);
     const expected = try a.create(Snapshot);
@@ -617,11 +697,11 @@ test "cooperative rebuilds service readers without publishing partial sorts or c
     try std.testing.expectEqualSlices(u16, expected.id_order[0..max_tracks], prepared.id_order[0..max_tracks]);
     for ([_]usize{ 1, 2, calls / 4, calls / 2, calls - 1 }) |cancel_at| {
         observer = .{ .pair = pair, .old = old, .cancel_at = cancel_at };
-        try std.testing.expectError(error.Cancelled, pair.prepareCooperative(&.{}, tracks, 42, true, &observer));
+        try std.testing.expectError(error.Cancelled, pair.prepareCatalogueCooperative(&catalogue, 42, &observer));
         try std.testing.expect(pair.current() == old);
     }
     observer = .{ .pair = pair, .old = old };
-    pair.commit(try pair.prepareCooperative(&.{}, tracks, 42, true, &observer));
+    pair.commit(try pair.prepareCatalogueCooperative(&catalogue, 42, &observer));
     try std.testing.expectEqual(max_tracks, pair.current().track_count);
 }
 

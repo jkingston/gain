@@ -2,7 +2,18 @@
 //! Writes are four integers; the host reads the ring after each animation.
 const std = @import("std");
 pub const capacity = 2048;
-pub const Kind = enum(u32) { render = 1, commit = 2, release = 3, retarget = 4, model = 5, motion = 6, flow = 7 };
+pub const Kind = enum(u32) { render = 1, commit = 2, release = 3, retarget = 4, model = 5, motion = 6, flow = 7, covers = 8 };
+/// Masks follow the seven visible models in paint order. Missing means a
+/// completed negative cache entry; an absent ready bit alone means loading.
+pub const Covers = packed struct(u32) {
+    present: u7 = 0,
+    ready: u7 = 0,
+    missing: u7 = 0,
+    center_present: bool = false,
+    center_ready: bool = false,
+    destination_ready: bool = false,
+    reserved: u8 = 0,
+};
 pub const Entry = extern struct { sequence: u32, at: u32, kind: Kind, value: u32 };
 pub const Ring = struct {
     entries: [capacity]Entry = @splat(.{ .sequence = 0, .at = 0, .kind = .render, .value = 0 }),

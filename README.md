@@ -86,11 +86,15 @@ browsing retains its declarative renderer; choose Folders from Music and press
 Menu to return.
 
 Cover Flow uses seven perspective-projected covers, a 128 × 128 prepared front
-cover, restrained reflections and centred captions. Storage prepares artwork
-once into a twelve-slot column-major cache, prioritising the visible covers and
+cover, restrained reflections and centred captions. Storage filters loaded artwork
+into a twelve-slot column-major cache, prioritising the visible covers and
 destination. Prepared entries include artwork identity, so retagged art reloads
 without changing album selection. Bad tiles use a cached fallback and do not
 block other covers; changed art or a remount permits another load.
+Replacement consumes empty slots first, then the least recently requested
+unprotected entry. Obsolete loads stop at bounded read/preparation checkpoints.
+The atlas reader reuses sparse seek checkpoints; exFAT contiguous streams keep
+their direct seek path. The cache retains recent covers, not an entire library.
 Disk validation, unpacking and filtering yield in bounded chunks
 when idle; during playback the executive preempts storage work for audio/UI.
 Headers and captions retain their pixels between animation frames. The default
@@ -192,6 +196,11 @@ scanner uses separate reserved memory. Background SD work requires at least
 500 ms of buffered PCM. Artwork changes and catalogue writes wait for idle
 storage ownership; a quick refresh then completes deferred artwork. Now Playing
 and pending selections own their metadata independently of catalogue lifetimes.
+Completed views borrow tracks and artwork from the same new catalogue. A scan
+publishes that view before retiring the old catalogue, so playback transitions
+and scan completion do not rebuild an unchanged view. Cancelling an unchanged
+scan needs no rollback; withdrawing a published preview services the UI while
+preparing its replacement.
 
 To provision the files while the identified Gain SD card is mounted:
 
@@ -237,6 +246,12 @@ semantic testing after eject. Commands commit only after their USB ACK. This
 interface has no arbitrary memory write or execute operation; the normal release
 build omits it. A zero build identity means unspecified; evidence should also
 retain the image SHA-256. Experiments and captured reports belong outside this repo.
+RAM counters include successful scan-view preparations, cover reads/cancellations/
+evictions, and worst preparation and post-playback handoff time. Timer fields use
+6 MHz hardware ticks and include time spent servicing other work; they are not
+isolated CPU costs. Handoff measures catalogue finish, log flush, input resync
+and display reset, excluding worker join and decoder startup. These aggregate
+counters add no per-frame SD logging.
 The development ROM handoff resets the controller and enters the ROM afresh;
 the uploader waits for the X1000 identity and verifies every uploaded RAM byte
 before starting the player. Detailed display traces exist only in instrumented

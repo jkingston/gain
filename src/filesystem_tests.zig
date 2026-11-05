@@ -21,6 +21,18 @@ const Disk = struct {
     writes: usize = 0,
     fail_write: ?u32 = null,
     read_count: usize = 0,
+    fat_reads: usize = 0,
+    long_file: bool = false,
+
+    const long_file_clusters = 130;
+
+    fn fileStart(self: *const Disk) u32 {
+        return if (self.long_file) clusters - 512 else file_cluster;
+    }
+
+    fn physicalFileCluster(self: *const Disk, logical: u32) u32 {
+        return self.fileStart() + if (self.contiguous) logical else (logical * 73) % 256;
+    }
 
     fn put(comptime T: type, b: []u8, at: usize, value: T) void {
         std.mem.writeInt(T, b[at..][0..@sizeOf(T)], value, .little);
@@ -78,7 +90,7 @@ const Disk = struct {
         p[33] = if (contiguous) 3 else 1;
         p[35] = 8;
         put(u64, p, 40, valid);
-        put(u32, p, 52, file_cluster);
+        put(u32, p, 52, self.fileStart());
         put(u64, p, 56, size);
         p[64] = 0xc1;
         for ("Tone.wav", 0..) |byte, i| put(u16, p, 66 + i * 2, byte);
@@ -101,9 +113,14 @@ const Disk = struct {
             if (block < 24) {
                 @memcpy(row, self.boot[block * 512 ..][0..512]);
             } else if (block < 24 + 16384) {
+                self.fat_reads += 1;
                 for (0..128) |j| {
                     const cluster = (block - 24) * 128 + @as(u32, @intCast(j));
-                    const link: u32 = switch (cluster) {
+                    const link: u32 = if (self.long_file and cluster >= self.fileStart() and cluster < self.fileStart() + 256) long: {
+                        if (self.contiguous) break :long 0; // NoFatChain has no usable FAT links.
+                        const logical = ((cluster - self.fileStart()) * 249) % 256; // Inverse of73 modulo256.
+                        break :long if (logical + 1 < long_file_clusters) self.physicalFileCluster(logical + 1) else 0xffffffff;
+                    } else switch (cluster) {
                         2, 3, 6 => 0xffffffff,
                         4 => 5,
                         5 => 6,
@@ -120,16 +137,17 @@ const Disk = struct {
                 @memcpy(row[0..self.upcase.len], &self.upcase);
             } else if (block >= lba(4) and block < lba(7)) {
                 @memset(row, if (self.missing_allocation) 0 else 0xff);
-            } else if (self.pattern and block >= lba(file_cluster) and block < lba(file_cluster + 4)) {
-                const physical = (block - lba(file_cluster)) / spc;
-                const logical: ?u32 = if (self.contiguous) physical else switch (physical) {
+            } else if (self.pattern and block >= lba(self.fileStart()) and block < lba(self.fileStart() + @as(u32, if (self.long_file) 256 else 4))) {
+                const physical = (block - lba(self.fileStart())) / spc;
+                const logical: ?u32 = if (self.contiguous) physical else if (self.long_file) (physical * 249) % 256 else switch (physical) {
                     0 => 0,
                     3 => 1,
                     1 => 2,
                     else => null,
                 };
                 if (logical) |index| for (row, 0..) |*byte, at| {
-                    byte.* = @truncate((index * spc * 512 + ((block - lba(file_cluster)) % spc) * 512 + at) *% 37);
+                    const position = index * spc * 512 + ((block - lba(self.fileStart())) % spc) * 512 + at;
+                    byte.* = @truncate(position *% 37 +% if (self.long_file) index *% 19 else 0);
                 };
             } else if (block >= lba(file_cluster) and block < lba(file_cluster) + 2) {
                 @memcpy(row, self.data[(block - lba(file_cluster)) * 512 ..][0..512]);
@@ -256,6 +274,56 @@ test "contiguous and fragmented exFAT streams cross clusters and seek identicall
             const count = try reader.read(&bytes);
             try std.testing.expectEqual(@min(bytes.len, size - target), count);
             for (bytes[0..count], target..) |byte, at| try std.testing.expectEqual(@as(u8, @truncate(at *% 37)), byte);
+        }
+        try std.testing.expectEqual(0, disk.writes);
+    }
+}
+
+test "sparse seeks preserve exFAT data and validity across multiple checkpoints without indexing NoFatChain" {
+    const seeks = @import("file_seek_index.zig");
+    const Observer = struct {
+        cancel: bool = false,
+        pub fn cancelled(self: @This()) bool {
+            return self.cancel;
+        }
+    };
+    const cluster_bytes = spc * 512;
+    const size = Disk.long_file_clusters * cluster_bytes;
+    const valid = size - 613;
+    for ([_]bool{ false, true }) |contiguous| {
+        var disk = Disk.init();
+        disk.long_file = true;
+        disk.entry(size, valid, contiguous);
+        disk.pattern = true;
+        var scratch: [512]u8 = undefined;
+        var volume = try Volume.mount(&disk, &scratch);
+        const file = try (try volume.findPath("Tone.wav")).file();
+        var reader = try volume.reader(file);
+        var index: seeks.Index = .{};
+        try std.testing.expectError(error.Cancelled, index.seek(&reader, size, cluster_bytes, Observer{ .cancel = true }));
+        try std.testing.expectEqual(0, reader.position);
+        try index.seek(&reader, size, cluster_bytes, Observer{});
+        try std.testing.expectEqual(if (contiguous) @as(usize, 0) else 3, index.count);
+        try std.testing.expectEqual(size, reader.position);
+        try std.testing.expectEqual(0, reader.remaining);
+        try std.testing.expectEqual(valid, reader.valid_length);
+        const at_eof = reader;
+        try std.testing.expectError(error.InvalidSeek, index.seek(&reader, size + 1, cluster_bytes, Observer{}));
+        try std.testing.expectEqual(at_eof.position, reader.position);
+        var direct = try volume.reader(file);
+        var indexed_bytes: [4093]u8 align(4) = undefined;
+        var direct_bytes: [4093]u8 align(4) = undefined;
+        for ([_]u32{ 0, 64 * cluster_bytes - 17, 64 * cluster_bytes, 128 * cluster_bytes + 7, valid - 17, valid, size - 1, size, 512 }) |target| {
+            reader = try volume.reader(file);
+            const before = disk.fat_reads;
+            try index.seek(&reader, target, cluster_bytes, Observer{});
+            if (contiguous) try std.testing.expectEqual(before, disk.fat_reads) else try std.testing.expect(disk.fat_reads - before < seeks.stride);
+            const count = try reader.read(&indexed_bytes);
+            try direct.seekTo(target);
+            try std.testing.expectEqual(count, try direct.read(&direct_bytes));
+            try std.testing.expectEqualSlices(u8, direct_bytes[0..count], indexed_bytes[0..count]);
+            try std.testing.expectEqual(@min(indexed_bytes.len, size - target), count);
+            for (indexed_bytes[0..count], target..) |byte, at| try std.testing.expectEqual(if (at >= valid) @as(u8, 0) else @as(u8, @truncate(at *% 37 +% (at / cluster_bytes) *% 19)), byte);
         }
         try std.testing.expectEqual(0, disk.writes);
     }

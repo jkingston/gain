@@ -798,6 +798,7 @@ pub fn Controller(comptime Platform: type) type {
             const inspect_scene = self.screen == .albums and (scene_changed or self.rendered_flow != self.flow or self.rendered_revision != view.revision);
             if (inspect_scene) {
                 const anchor: i32 = @intFromFloat(@round(self.flow));
+                var coverage = @import("display_trace.zig").Covers{};
                 for ([_]i32{ -3, 3, -2, 2, -1, 1, 0 }) |offset| {
                     const i = anchor + offset;
                     if (i < 0 or i >= view.album_count) continue;
@@ -805,6 +806,15 @@ pub fn Controller(comptime Platform: type) type {
                     const distance = @as(f32, @floatFromInt(i)) - self.flow;
                     if (@abs(distance) > 3.4) continue;
                     const model = CoverModel{ .id = album.id, .texture = self.covers.get(album.id, album.art), .distance = distance };
+                    const bit = @as(u7, 1) << @as(u3, @intCast(visible_count));
+                    coverage.present |= bit;
+                    const ready = if (model.texture) |tile| tile.width != 0 and tile.height != 0 else false;
+                    if (ready) coverage.ready |= bit else if (model.texture != null) coverage.missing |= bit;
+                    if (i == anchor) {
+                        coverage.center_present = true;
+                        coverage.center_ready = ready;
+                    }
+                    if (i == self.selection) coverage.destination_ready = ready;
                     visible[visible_count] = model;
                     if (!scene_changed) {
                         if (visible_count >= self.rendered_cover_count) scene_changed = true else {
@@ -815,6 +825,7 @@ pub fn Controller(comptime Platform: type) type {
                     visible_count += 1;
                 }
                 scene_changed = scene_changed or visible_count != self.rendered_cover_count;
+                Platform.trace(.covers, Platform.now(), @bitCast(coverage));
             }
             const header_changed = !retained or self.rendered_selection != self.selection or self.rendered_count != view.album_count or self.rendered_battery != self.battery_mv or self.rendered_charging != self.charging or self.rendered_external_power != self.external_power or self.rendered_scan_active != diag.report.scan_active or self.rendered_scan_width != scan_width;
             const caption_changed = !retained or self.rendered_selection != self.selection or self.rendered_revision != view.revision;
