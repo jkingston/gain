@@ -50,6 +50,8 @@ pub fn extract(a: A, source: anytype, extension: []const u8) !catalog.Metadata {
     var magic: [4]u8 = undefined;
     try source.read(0, &magic);
     var result = catalog.Metadata{ .codec = try catalog.text(a, extension) };
+    if (std.mem.eql(u8, &magic, "RIFF") or std.mem.eql(u8, &magic, "FORM")) return @import("pcm_metadata.zig").extract(a, source);
+    if (std.mem.eql(u8, &magic, "OggS")) return @import("ogg_metadata.zig").extract(a, source);
     if (std.mem.eql(u8, &magic, "fLaC")) {
         result.codec = "flac";
         var at: u64 = 4;
@@ -89,8 +91,11 @@ pub fn extract(a: A, source: anytype, extension: []const u8) !catalog.Metadata {
         }
         return error.MetadataBudget;
     }
-    // Filename/folder fallbacks remain available for formats without library
-    // tag extraction; decoding support is independent of this metadata layer.
+    if (std.mem.eql(u8, magic[0..3], "ID3") or std.ascii.eqlIgnoreCase(extension, ".mp3") or std.ascii.eqlIgnoreCase(extension, ".mp2") or std.ascii.eqlIgnoreCase(extension, ".mp1")) {
+        result = try @import("id3.zig").extract(a, source);
+        try @import("mpeg_tags.zig").enrich(source, &result);
+        return result;
+    }
     return result;
 }
 
@@ -178,6 +183,14 @@ pub const PictureRange = struct { offset: u64, length: u32 };
 pub fn embeddedPicture(source: anytype) !?PictureRange {
     var magic: [4]u8 = undefined;
     try source.read(0, &magic);
+    if (std.mem.eql(u8, &magic, "RIFF") or std.mem.eql(u8, &magic, "FORM")) {
+        const picture = try @import("pcm_metadata.zig").picture(source) orelse return null;
+        return .{ .offset = picture.offset, .length = picture.length };
+    }
+    if (std.mem.eql(u8, magic[0..3], "ID3")) {
+        const picture = try @import("id3.zig").picture(source) orelse return null;
+        return .{ .offset = picture.offset, .length = picture.length };
+    }
     if (!std.mem.eql(u8, &magic, "fLaC")) {
         const picture = try tags.artwork(source) orelse return null;
         return .{ .offset = picture.offset, .length = picture.length };

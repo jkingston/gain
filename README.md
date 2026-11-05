@@ -162,8 +162,15 @@ resume under storage ownership during playback. Preview and artwork references
 are withdrawn before cancelled scan memory is reclaimed. Per-file parse failures retain previous known tags and record the error.
 FAT starting clusters are mount-local locators, never persistent track identity.
 
-Library tags currently cover MP4/AAC/ALAC and FLAC. Other decoded formats use
-filename/folder fallbacks. Album grouping uses album artist, release identity and
+Library tags cover MP4/AAC/ALAC, FLAC comments, ID3v2.2/2.3/2.4 and ID3v1,
+Vorbis/Opus comments, WAV INFO and AIFF text/embedded ID3. Common fields include
+title, artist, album artist, album, disc/track, date, genre, compilation, artist
+sort tags and ReplayGain. Missing tags use filename/folder fallbacks. Metadata
+parsers bound text, tag size and traversal work; malformed files retain previous
+known tags. MPEG properties require consecutive compatible frame headers;
+duration remains unknown without a frame count rather than guessing from size.
+Opus R128 gains use the ReplayGain reference (+5 dB relative to R128); the codec
+already applies OpusHead gain. Album grouping uses album artist, release identity and
 edition folders; multi-disc folders share an album. Sidecar/embedded baseline
 JPEG covers are streamed to bounded 112 × 112 RGB565 tiles. Progressive JPEG,
 PNG, EXIF orientation and colour-profile conversion are not implemented by the

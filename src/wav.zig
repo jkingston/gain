@@ -54,7 +54,10 @@ pub fn parse(reader: anytype) !Info {
             if (position > maximum_u32) return error.InvalidChunk;
             return parsed.info(@intCast(position), chunk_bytes);
         } else {
-            try discard(reader, chunk_bytes);
+            if (comptime @hasDecl(@TypeOf(reader.*), "seekTo")) {
+                if (position + chunk_bytes > maximum_u32) return error.InvalidChunk;
+                try reader.seekTo(@intCast(position + chunk_bytes));
+            } else try discard(reader, chunk_bytes);
         }
         remaining -= chunk_bytes;
         position += chunk_bytes;

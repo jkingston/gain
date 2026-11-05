@@ -252,6 +252,7 @@ pub fn build(b: *std.Build) void {
     });
     const player_ui_module = b.createModule(.{ .root_source_file = b.path("src/ui_api.zig"), .target = b.graph.host, .optimize = .ReleaseSafe, .link_libc = true, .link_libcpp = true });
     @import("build_text.zig").add(b, player_ui_module, b.graph.host, .ReleaseSafe);
+    @import("build_metadata.zig").add(b, player_ui_module, b.graph.host, .ReleaseSafe);
     player_app_module.addImport("gain_ui", player_ui_module);
     const player_app = b.addLibrary(.{ .name = "gain-player-ui", .linkage = .dynamic, .root_module = player_app_module });
     b.step("build-player-ui", "Build the production player UI as a simulator app").dependOn(&b.addInstallArtifact(player_app, .{}).step);
@@ -652,10 +653,24 @@ pub fn build(b: *std.Build) void {
         const verify_module = b.createModule(.{ .root_source_file = b.path("tools/usb_verify.zig"), .target = b.graph.host, .optimize = mode });
         usb_tests_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = verify_module })).step);
     }
+    const metadata_step = b.step("test-metadata", "Check native metadata against synthetic media fixtures");
+    for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseSafe, .ReleaseFast }) |mode| {
+        const module = b.createModule(.{ .root_source_file = b.path("tests/metadata_tests.zig"), .target = b.graph.host, .optimize = mode });
+        const metadata_module = b.createModule(.{ .root_source_file = b.path("src/library_metadata.zig"), .target = b.graph.host, .optimize = mode });
+        @import("build_metadata.zig").add(b, metadata_module, b.graph.host, mode);
+        module.addImport("metadata", metadata_module);
+        metadata_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = module })).step);
+    }
+    const metadata_fuzz_module = b.createModule(.{ .root_source_file = b.path("tests/metadata_tests.zig"), .target = b.graph.host, .optimize = .ReleaseSafe });
+    const metadata_fuzz_parser = b.createModule(.{ .root_source_file = b.path("src/library_metadata.zig"), .target = b.graph.host, .optimize = .ReleaseSafe });
+    @import("build_metadata.zig").add(b, metadata_fuzz_parser, b.graph.host, .ReleaseSafe);
+    metadata_fuzz_module.addImport("metadata", metadata_fuzz_parser);
+    b.step("fuzz-metadata", "Fuzz bounded native metadata readers").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = metadata_fuzz_module })).step);
     const library_step = b.step("test-library", "Test portable catalogue reconciliation and persistence");
     for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |mode| {
-        for ([_][]const u8{ "src/progressive_view.zig", "src/f20_library.zig", "src/catalog_codec.zig", "src/diagnostics.zig", "src/catalog_store.zig", "src/library_metadata.zig", "src/maintenance_protocol.zig", "src/f20_storage.zig" }) |path| {
+        for ([_][]const u8{ "src/ogg_metadata.zig", "src/id3.zig", "src/progressive_view.zig", "src/f20_library.zig", "src/catalog_codec.zig", "src/diagnostics.zig", "src/catalog_store.zig", "src/library_metadata.zig", "src/maintenance_protocol.zig", "src/f20_storage.zig" }) |path| {
             const module = b.createModule(.{ .root_source_file = b.path(path), .target = b.graph.host, .optimize = mode });
+            @import("build_metadata.zig").add(b, module, b.graph.host, mode);
             if (std.mem.eql(u8, path, "src/f20_library.zig")) @import("build_art.zig").add(b, module, b.graph.host, mode, false);
             library_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = module })).step);
         }
@@ -686,6 +701,7 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run host-side tests");
     test_step.dependOn(filesystem_tests_step);
     test_step.dependOn(boot_tests_step);
+    test_step.dependOn(metadata_step);
     test_step.dependOn(library_step);
     test_step.dependOn(text_test_step);
     test_step.dependOn(usb_tests_step);

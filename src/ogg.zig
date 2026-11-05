@@ -12,7 +12,7 @@ const crc_table = blk: {
     break :blk table;
 };
 
-fn crc(r0: u32, bytes: []const u8) u32 {
+pub fn crc(r0: u32, bytes: []const u8) u32 {
     var r = r0;
     for (bytes) |b| r = (r << 8) ^ crc_table[@as(u8, @truncate(r >> 24)) ^ b];
     return r;
