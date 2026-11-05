@@ -3,13 +3,59 @@ from pathlib import Path
 import struct
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 import zlib
 
 import gain_metrics as gain
 
 
 class MetricsTests(unittest.TestCase):
+    def test_health_rejects_unknown_versions_and_partial_snapshots(self):
+        monitor = object.__new__(gain.Gain)
+        values = [0] * len(gain.HEALTH_FIELDS)
+        values[0] = 1
+        raw = struct.pack(f'<{len(values)}I', *values)
+        with patch.object(gain.Gain, 'read', return_value=raw):
+            self.assertEqual(monitor.health()['version'], 1)
+        for invalid in (raw[:-1], raw + bytes(4), bytes(4) + raw[4:]):
+            with patch.object(gain.Gain, 'read', return_value=invalid):
+                with self.assertRaises(RuntimeError):
+                    monitor.health()
+
+    def test_connect_closes_stale_handles_before_retrying(self):
+        with (patch.object(gain.Gain, '__init__', return_value=None),
+              patch.object(gain.Gain, 'status', side_effect=[RuntimeError('detached'), {}]),
+              patch.object(gain.Gain, 'close') as close,
+              patch.object(gain.time, 'sleep')):
+            monitor = gain.Gain.connect()
+            self.assertIsInstance(monitor, gain.Gain)
+            close.assert_called_once()
+
+    def test_reconnect_waits_for_detach_instead_of_reopening_old_identity(self):
+        monitor = object.__new__(gain.Gain)
+        replacement = Mock()
+        with (patch.object(gain.Gain, 'command') as command,
+              patch.object(gain.Gain, 'status', side_effect=[{}, {}, RuntimeError('detached')]) as status,
+              patch.object(gain.Gain, 'close') as close,
+              patch.object(gain.Gain, 'connect', return_value=replacement) as connect,
+              patch.object(gain.time, 'sleep')):
+            self.assertIs(monitor.reconnect(), replacement)
+            command.assert_called_once_with('reconnect')
+            self.assertEqual(status.call_count, 3)
+            close.assert_called_once()
+            connect.assert_called_once()
+
+    def test_reconnect_timeout_closes_old_handle_without_opening_another(self):
+        monitor = object.__new__(gain.Gain)
+        with (patch.object(gain.Gain, 'command'),
+              patch.object(gain.Gain, 'status', return_value={}),
+              patch.object(gain.Gain, 'close') as close,
+              patch.object(gain.Gain, 'connect') as connect):
+            with self.assertRaises(TimeoutError):
+                monitor.reconnect(timeout=0)
+            close.assert_called_once()
+            connect.assert_not_called()
+
     def test_provision_preserves_user_data_and_reuses_only_owned_allocations(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

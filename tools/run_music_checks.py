@@ -48,16 +48,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def connect(timeout=40):
-    deadline = time.monotonic() + timeout
-    while True:
-        try:
-            monitor = Gain()
-            monitor.status()
-            return monitor
-        except RuntimeError:
-            if time.monotonic() >= deadline:
-                raise
-            time.sleep(0.25)
+    return Gain.connect(timeout=timeout)
 
 
 def wait(monitor, predicate, timeout=40):

@@ -90,6 +90,42 @@ def provision(mount):
 
 
 class Gain(Monitor):
+    @classmethod
+    def connect(cls, timeout=40):
+        deadline = time.monotonic() + timeout
+        while True:
+            candidate = None
+            try:
+                candidate = cls()
+                candidate.status()
+                return candidate
+            except RuntimeError:
+                if candidate is not None:
+                    candidate.close()
+                if time.monotonic() >= deadline:
+                    raise
+                time.sleep(0.1)
+
+    def reconnect(self, timeout=40):
+        """Wait for the old USB handle to detach before opening its replacement."""
+        deadline = time.monotonic() + timeout
+        self.command('reconnect')
+        try:
+            while True:
+                try:
+                    self.status()
+                except RuntimeError:
+                    break
+                if time.monotonic() >= deadline:
+                    raise TimeoutError('Gain did not disconnect for USB reconnect')
+                time.sleep(0.1)
+        finally:
+            self.close()
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError('Gain USB reconnect deadline exceeded')
+        return type(self).connect(timeout=remaining)
+
     def status(self):
         raw = self.read(0x60, len(FIELDS) * 4)
         core_fields = FIELDS.index('index_io_failures') + 1
