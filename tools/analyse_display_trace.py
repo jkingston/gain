@@ -21,7 +21,7 @@ def cover_readiness(entries):
     moving = False
     center_samples = center_ready = visible_samples = visible_ready = 0
     for entry in entries:
-        if entry["kind"] == 5:
+        if entry["kind"] in (5, 9):
             moving = bool(entry["value"] & (1 << 31))
         elif entry["kind"] == 8 and moving:
             value = entry["value"]
@@ -55,11 +55,11 @@ def analyse(entries, motion_mask):
     idle_intervals = []
     models = []
     for entry in entries:
-        if entry["kind"] == 5:
+        if entry["kind"] in (5, 9):
             value = entry["value"]
             flags = (value >> 31) | ((value >> 29) & 2)
             pending.append(bool(flags & motion_mask))
-            models.append(dict(selection=(value >> 11) & 0xFFFF, count=value & 2047))
+            models.append(dict(selection=(value >> 11) & (0x7FFF if entry["kind"] == 9 else 0xFFFF), count=value & 2047))
         elif entry["kind"] == 6 and not entry["value"] & motion_mask:
             idle_seen = True
         elif entry["kind"] == 2:

@@ -25,6 +25,20 @@ class TimingTests(unittest.TestCase):
         self.assertEqual(8, result["visible_samples"])
         self.assertEqual(6, result["visible_ready"])
 
+    def test_extended_screens_keep_selection_and_animation_flags_independent(self):
+        trace = []
+        for at in (0, 90000, 180000):
+            trace.extend([
+                event(9, at, (3 << 30) | (9 << 26) | (17 << 11) | 100),
+                event(8, at + 1, 1 | (1 << 7) | (1 << 21) | (1 << 22)),
+                event(2, at + 2, 76800),
+            ])
+        for mask in (1, 2):
+            result = analyse(trace, mask)
+            self.assertEqual([15, 15], result["active_intervals_ms"])
+            self.assertEqual([dict(selection=17, count=100)] * 3, result["models"])
+        self.assertEqual(3, cover_readiness(trace)["center_ready"])
+
     def test_older_traces_do_not_invent_cover_readiness(self):
         result = cover_readiness([event(5, 0, 1 << 31), event(2, 1, 76800)])
         self.assertEqual(0, result["center_samples"])

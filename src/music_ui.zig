@@ -10,6 +10,7 @@ const covers = @import("cover_cache.zig");
 const media = @import("f20_media.zig");
 const flow_scene = @import("cover_flow.zig");
 const navigation = @import("navigation.zig");
+const folders = @import("folder_view.zig");
 const cover_loading = @import("cover_loading.zig");
 
 const chrome = @import("music_chrome.zig");
@@ -21,23 +22,33 @@ const line = chrome.line;
 const accent = chrome.accent;
 const selected = chrome.selected;
 
-pub const Input = enum(u3) { select, back, home, up, down, volume_up, volume_down };
+pub const Input = enum(u3) { select, back, home, up, down, volume_up, volume_down, menu };
 
-pub const Screen = enum { home, albums, tracks, player, library, artists, artist, settings };
-pub const TrackScope = enum { album, artist, all, queue };
-const HomeItem = struct {
-    name: []const u8,
-    target: enum { player, albums, artists, songs, library, folders, settings, queue },
+pub const Screen = enum { home, albums, tracks, player, library, artists, artist, settings, music, folders };
+pub const TrackScope = enum { album, artist, all, queue, folder };
+const MusicItem = enum { albums, artists, songs, folders, shuffle_all };
+const music_items = [_]MusicItem{ .albums, .artists, .songs, .folders, .shuffle_all };
+const Collection = struct { scope: TrackScope, album: u64 = 0, artist: u64 = 0, directory: []const u8 = "" };
+const ContextMenu = struct {
+    kind: enum { collection, player },
+    collection: Collection = .{ .scope = .all },
+    selection: usize = 0,
+    jump: bool = false,
+    empty: bool = false,
+
+    fn count(self: ContextMenu) usize {
+        return if (self.empty) 0 else if (self.kind == .player) 4 else if (self.jump) 3 else 2;
+    }
 };
-const home_items = [_]HomeItem{
-    .{ .name = "Now Playing", .target = .player },
-    .{ .name = "Albums", .target = .albums },
-    .{ .name = "Artists", .target = .artists },
-    .{ .name = "All Songs", .target = .songs },
-    .{ .name = "Library", .target = .library },
-    .{ .name = "Folders", .target = .folders },
-    .{ .name = "Queue", .target = .queue },
-    .{ .name = "Settings", .target = .settings },
+const Location = struct {
+    screen: Screen,
+    selection: usize,
+    first: usize,
+    album: u64,
+    artist: u64,
+    scope: TrackScope,
+    selected_id: u64,
+    track_anchor: u64,
 };
 const visible_rows = 5;
 
@@ -62,8 +73,12 @@ pub fn Controller(comptime Platform: type) type {
         screen: Screen = .home,
         selection: usize = 0,
         first: usize = 0,
-        home_selection: usize = 0,
-        home_first: usize = 0,
+        menu: ?ContextMenu = null,
+        menu_directory: [4096]u8 = undefined,
+        history: [8]Location = undefined,
+        history_count: usize = 0,
+        shuffle_seed: u64 = 0x4741494e,
+
         album_id: u64 = 0,
         artist_id: u64 = 0,
         album_rank: ?usize = null,
@@ -88,7 +103,15 @@ pub fn Controller(comptime Platform: type) type {
         requested_start_frame: u64 = 0,
         resume_paused: bool = false,
         last_playback_phase: media.PlaybackPhase = .preparing,
-        requested_folders: bool = false,
+        folder_view: folders.View = .{},
+        folder_path: [4096]u8 = undefined,
+        folder_path_len: usize = 0,
+        folder_revision: u32 = std.math.maxInt(u32),
+        folder_entries_address: usize = 0,
+        folder_entries_count: usize = 0,
+        folder_selections: [16]usize = @splat(0),
+        folder_depth: usize = 0,
+        folder_error: bool = false,
         playing_track: ?*const core.Track = null,
         attenuation: u8 = 64,
         replay_gain: @import("replay_gain.zig").Settings = .{},
@@ -156,6 +179,7 @@ pub fn Controller(comptime Platform: type) type {
         pub fn navigate(self: *State, screen: Screen) void {
             self.cancelInput(self.input_policy.held);
             self.jump_position = null;
+            self.menu = null;
             self.screen = screen;
             self.rendered_screen = null;
             self.pending_frame.ready = false;
@@ -176,6 +200,7 @@ pub fn Controller(comptime Platform: type) type {
                 .artist => view.artistTrack(self.artistRank() orelse return null, position),
                 .all => if (position < view.track_count) view.tracks[view.title_order[position]] else null,
                 .queue => view.trackById(self.track_store.order.at(position) orelse return null),
+                .folder => self.collectionTrack(.{ .scope = .folder, .directory = self.folderPath() }, position),
             };
         }
 
@@ -187,30 +212,286 @@ pub fn Controller(comptime Platform: type) type {
             return if (self.revision == self.snapshot().revision) self.artist_rank else self.snapshot().artistIndex(self.artist_id);
         }
 
+        fn folderPath(self: *const State) []const u8 {
+            return self.folder_path[0..self.folder_path_len];
+        }
+
+        fn folderSource(self: *const State) folders.Source {
+            return .{ .entries = if (diag.catalog) |catalog| catalog.value.entries else &.{}, .tracks = self.snapshot().tracks[0..self.snapshot().track_count] };
+        }
+
+        fn refreshFolder(self: *State) void {
+            self.folder_error = false;
+            const source = self.folderSource();
+            self.folder_entries_address = @intFromPtr(source.entries.ptr);
+            self.folder_entries_count = source.entries.len;
+            self.folder_view.build(source, self.folderPath()) catch {
+                self.folder_error = true;
+                self.folder_view.count = 0;
+            };
+            self.folder_revision = self.snapshot().revision;
+            if (self.selected_id != 0) for (0..self.folder_view.count) |i| {
+                if (core.hash(self.folderRow(i).?.path) == self.selected_id) {
+                    self.selection = i;
+                    break;
+                }
+            };
+            self.selection = @min(self.selection, self.folder_view.count -| 1);
+            if (self.folderRow(self.selection)) |row| self.selected_id = core.hash(row.path);
+            self.dirty = true;
+            self.major = true;
+            self.pending_frame.ready = false;
+            self.rendered_screen = null;
+        }
+
+        fn folderRow(self: *const State, position: usize) ?folders.Row {
+            return self.folder_view.row(self.folderSource(), self.folderPath(), position);
+        }
+
+        fn enterFolder(self: *State, path: []const u8) void {
+            if (path.len > self.folder_path.len or self.folder_depth == self.folder_selections.len) return;
+            self.folder_selections[self.folder_depth] = self.selection;
+            self.folder_depth += 1;
+            @memmove(self.folder_path[0..path.len], path);
+            self.folder_path_len = path.len;
+            self.selection = 0;
+            self.selected_id = 0;
+            self.first = 0;
+            self.refreshFolder();
+            self.rendered_screen = null;
+            self.major = true;
+            self.dirty = true;
+        }
+
+        fn location(self: *const State) Location {
+            return .{ .screen = self.screen, .selection = self.selection, .first = self.first, .album = self.album_id, .artist = self.artist_id, .scope = self.track_scope, .selected_id = self.selected_id, .track_anchor = self.selected_track_anchor };
+        }
+
+        fn push(self: *State, screen: Screen) void {
+            if (self.history_count == self.history.len) {
+                @memmove(self.history[0 .. self.history.len - 1], self.history[1..]);
+                self.history_count -= 1;
+            }
+            self.history[self.history_count] = self.location();
+            self.history_count += 1;
+            self.navigate(screen);
+        }
+
+        fn goBack(self: *State) void {
+            if (self.screen == .folders and self.folder_path_len != 0) {
+                self.selected_id = core.hash(self.folderPath());
+                const parent = std.fs.path.dirname(self.folderPath()) orelse "";
+                self.folder_path_len = parent.len;
+                self.folder_depth -|= 1;
+                self.selection = self.folder_selections[self.folder_depth];
+                self.first = 0;
+                self.refreshFolder();
+                self.selection = @min(self.selection, self.rows() -| 1);
+                self.ensureVisible();
+                self.rendered_screen = null;
+                self.major = true;
+                self.dirty = true;
+                return;
+            }
+            if (self.history_count == 0) {
+                self.navigate(if (self.screen == .home or self.screen == .music) .home else .music);
+                return;
+            }
+            self.history_count -= 1;
+            const previous = self.history[self.history_count];
+            self.navigate(previous.screen);
+            self.album_id = previous.album;
+            self.artist_id = previous.artist;
+            self.track_scope = previous.scope;
+            self.selected_id = previous.selected_id;
+            self.selected_track_anchor = previous.track_anchor;
+            self.selection = previous.selection;
+            self.first = previous.first;
+            self.flow = @floatFromInt(self.selection);
+            self.reconcile();
+            self.ensureVisible();
+        }
+
+        fn collectionCount(self: *const State, collection: Collection) usize {
+            const view = self.snapshot();
+            return switch (collection.scope) {
+                .all => view.track_count,
+                .album => if (view.albumIndex(collection.album)) |i| view.albums[i].count else 0,
+                .artist => if (view.artistIndex(collection.artist)) |i| view.artists[i].track_count else 0,
+                .queue => self.track_store.order.count,
+                .folder => count: {
+                    var count: usize = 0;
+                    for (view.tracks[0..view.track_count]) |track| if (std.mem.eql(u8, std.fs.path.dirname(track.path) orelse "", collection.directory)) {
+                        count += 1;
+                    };
+                    break :count count;
+                },
+            };
+        }
+
+        fn collectionTrack(self: *const State, collection: Collection, position: usize) ?*const core.Track {
+            const view = self.snapshot();
+            return switch (collection.scope) {
+                .all => if (position < view.track_count) view.tracks[view.title_order[position]] else null,
+                .album => view.albumTrack(view.albumIndex(collection.album) orelse return null, position),
+                .artist => view.artistTrack(view.artistIndex(collection.artist) orelse return null, position),
+                .queue => view.trackById(self.track_store.order.at(position) orelse return null),
+                .folder => match: {
+                    var rank: usize = 0;
+                    for (view.tracks[0..view.track_count]) |track| {
+                        if (!std.mem.eql(u8, std.fs.path.dirname(track.path) orelse "", collection.directory)) continue;
+                        if (rank == position) break :match track;
+                        rank += 1;
+                    }
+                    break :match null;
+                },
+            };
+        }
+
+        fn currentCollection(self: *const State) ?Collection {
+            const view = self.snapshot();
+            return switch (self.screen) {
+                .home, .music => .{ .scope = .all },
+                .albums => if (self.selection < view.album_count) .{ .scope = .album, .album = view.albums[self.selection].id } else null,
+                .artists => if (self.selection < view.artist_count) .{ .scope = .artist, .artist = view.artistId(self.selection) } else null,
+                .artist => if (view.artistIndex(self.artist_id)) |i| if (self.selection == 0) .{ .scope = .artist, .artist = self.artist_id } else .{ .scope = .album, .album = view.albums[view.artists[i].first_album + self.selection - 1].id } else null,
+                .tracks => .{ .scope = self.track_scope, .album = self.album_id, .artist = self.artist_id, .directory = self.folderPath() },
+                .folders => .{ .scope = .folder, .directory = if (self.folderRow(self.selection)) |row| if (row.directory) row.path else self.folderPath() else self.folderPath() },
+                else => null,
+            };
+        }
+
+        fn nextSeed(self: *State, now: u64) u64 {
+            self.shuffle_seed +%= now +% 0x9e3779b97f4a7c15;
+            return self.shuffle_seed;
+        }
+
+        fn startCollection(self: *State, source: Collection, selected_track: ?u64, shuffled: bool, now: u64) void {
+            const count = self.collectionCount(source);
+            if (count == 0) return;
+            if (source.scope == .queue) {
+                // The queue already owns its membership; do not clear it while
+                // resolving itself or replace it from the latest catalogue.
+                if (selected_track) |id| _ = self.track_store.order.select(id);
+            } else {
+                if (count > self.track_store.order.capacity()) {
+                    self.fail(error.QueueFull);
+                    return;
+                }
+                self.track_store.order.clear();
+                if (source.scope == .folder) {
+                    const view = self.snapshot();
+                    for (view.tracks[0..view.track_count]) |track| {
+                        if (!std.mem.eql(u8, std.fs.path.dirname(track.path) orelse "", source.directory)) continue;
+                        self.track_store.order.append(track.id) catch unreachable;
+                    }
+                    const Sort = struct {
+                        view: *const views.Snapshot,
+                        pub fn less(ctx: @This(), left: u64, right: u64) bool {
+                            return core.lessText(ctx.view.trackById(left).?.path, ctx.view.trackById(right).?.path);
+                        }
+                    };
+                    self.track_store.order.sortCanonical(Sort{ .view = view });
+                } else for (0..count) |i| {
+                    const item = self.collectionTrack(source, i) orelse {
+                        self.fail(error.InvalidSelection);
+                        return;
+                    };
+                    self.track_store.order.append(item.id) catch |failure| {
+                        self.fail(failure);
+                        return;
+                    };
+                }
+                if (selected_track) |id| _ = self.track_store.order.select(id);
+                if (shuffled) self.track_store.order.shuffle(self.nextSeed(now), false);
+            }
+            if (self.track_store.order.at(self.track_store.order.cursor)) |id| {
+                if (self.snapshot().trackById(id)) |track| self.queue(track);
+            }
+        }
+
         fn startContext(self: *State, track: *const core.Track) void {
-            if (self.track_scope == .queue) {
-                _ = self.track_store.order.select(track.id);
-                self.queue(track);
-                return;
+            self.startCollection(.{ .scope = self.track_scope, .album = self.album_id, .artist = self.artist_id, .directory = self.folderPath() }, track.id, false, 0);
+        }
+
+        fn openMenu(self: *State) void {
+            if (self.menu != null) {
+                self.menu = null;
+            } else if (self.screen == .player or (self.screen == .tracks and self.track_scope == .queue)) {
+                if (self.playing_track == null) return;
+                self.menu = .{ .kind = .player };
+            } else if (self.currentCollection()) |source| {
+                if (self.screen == .home and self.selection != 0) return;
+                if (self.collectionCount(source) == 0 and self.screen != .folders) return;
+                var captured = source;
+                if (source.scope == .folder) {
+                    if (source.directory.len > self.menu_directory.len) return;
+                    @memcpy(self.menu_directory[0..source.directory.len], source.directory);
+                    captured.directory = self.menu_directory[0..source.directory.len];
+                }
+                self.menu = .{ .kind = .collection, .collection = captured, .jump = self.rows() > 8, .empty = self.collectionCount(source) == 0 };
+            } else return;
+            self.cancelInput(self.input_policy.held);
+            if (self.menu != null) self.covers.clearRequests();
+            self.rendered_screen = null;
+            self.pending_frame.ready = false;
+            self.dirty = true;
+            self.major = true;
+        }
+
+        fn menuSelect(self: *State, now: u64, playing: bool) media.PlaybackCommand {
+            const menu = self.menu.?;
+            if (menu.empty) return .none;
+            if (menu.kind == .player) switch (menu.selection) {
+                0 => {
+                    self.menu = null;
+                    if (self.screen != .tracks or self.track_scope != .queue) self.push(.tracks);
+                    self.track_scope = .queue;
+                    self.selection = self.track_store.order.cursor;
+                    self.ensureVisible();
+                },
+                1 => {
+                    const selected_track = if (self.screen == .tracks and self.track_scope == .queue) self.trackAt(self.selection) else null;
+                    if (self.track_store.order.shuffled) self.track_store.order.unshuffle() else self.track_store.order.shuffle(self.nextSeed(now), true);
+                    if (selected_track) |track| for (0..self.track_store.order.count) |i| {
+                        if (self.track_store.order.at(i).? == track.id) {
+                            self.selection = i;
+                            break;
+                        }
+                    };
+                    self.ensureVisible();
+                },
+                2 => self.track_store.order.repeat = switch (self.track_store.order.repeat) {
+                    .off => .all,
+                    .all => .one,
+                    .one => .off,
+                },
+                3 => {
+                    self.menu = null;
+                    return self.act(.jump, now, playing);
+                },
+                else => unreachable,
+            } else if (menu.selection == 2) {
+                self.menu = null;
+                return self.act(.jump, now, playing);
+            } else {
+                self.menu = null;
+                self.startCollection(menu.collection, null, menu.selection == 1, now);
+                if (self.requested_track != null) self.push(.player);
+                if (playing and self.requested_track != null) return .stop;
             }
-            const count = self.rows();
-            if (count > self.track_store.order.capacity()) {
-                self.fail(error.QueueFull);
-                return;
+            self.rendered_screen = null;
+            self.pending_frame.ready = false;
+            self.dirty = true;
+            self.major = true;
+            return .none;
+        }
+
+        pub fn finishedTrack(self: *State) ?*const core.Track {
+            if (self.playing_track) |track| {
+                if (self.track_store.order.repeat == .one and self.snapshot().trackById(track.id) != null) return track;
             }
-            self.track_store.order.clear();
-            for (0..count) |i| {
-                const item = self.trackAt(i) orelse {
-                    self.fail(error.InvalidSelection);
-                    return;
-                };
-                self.track_store.order.append(item.id) catch |failure| {
-                    self.fail(failure);
-                    return;
-                };
-            }
-            _ = self.track_store.order.select(track.id);
-            self.queue(track);
+            return self.neighbouringTrack(1);
         }
 
         pub fn neighbouringTrack(self: *State, direction: i2) ?*const core.Track {
@@ -240,7 +521,8 @@ pub fn Controller(comptime Platform: type) type {
 
         pub fn rows(self: *const State) usize {
             return switch (self.screen) {
-                .home => home_items.len,
+                .home => 2 + @as(usize, if (self.playing_track != null) 1 else 0),
+                .music => music_items.len,
                 .albums => self.snapshot().album_count,
                 .artists => self.snapshot().artist_count,
                 .artist => if (self.artistRank()) |i| 1 + @as(usize, self.snapshot().artists[i].album_count) else 0,
@@ -249,15 +531,17 @@ pub fn Controller(comptime Platform: type) type {
                     .artist => if (self.artistRank()) |i| self.snapshot().artists[i].track_count else 0,
                     .all => self.snapshot().track_count,
                     .queue => self.track_store.order.count,
+                    .folder => self.collectionCount(.{ .scope = .folder, .directory = self.folderPath() }),
                 },
                 .library => 2,
-                .settings => 1,
+                .settings => 2,
+                .folders => self.folder_view.count,
                 .player => 0,
             };
         }
 
         fn inputContext(self: *const State) navigation.Context {
-            if (self.jump_position != null) return .list;
+            if (self.jump_position != null or self.menu != null) return .list;
             return switch (self.screen) {
                 .albums => .covers,
                 .player => .transport,
@@ -286,29 +570,30 @@ pub fn Controller(comptime Platform: type) type {
         pub fn button(self: *State, key: navigation.Button, pressed: bool, now: u64, playing: bool) media.PlaybackCommand {
             self.reconcile();
             if (pressed) self.raw_held |= key.mask() else self.raw_held &= ~key.mask();
-            return self.act(self.input_policy.edge(key, pressed, now, self.inputContext(), if (self.jump_position != null or (self.screen == .player and self.status.total_frames != 0)) 21 else self.rows()), now, playing);
+            return self.act(self.input_policy.edge(key, pressed, now, self.inputContext(), if (self.menu != null) self.menu.?.count() else if (self.jump_position != null or (self.screen == .player and self.status.total_frames != 0)) 21 else self.rows()), now, playing);
         }
 
         pub fn wheel(self: *State, direction: i2, now: u64, playing: bool) media.PlaybackCommand {
             self.reconcile();
-            return self.act(self.input_policy.wheel(direction, now, self.inputContext(), if (self.jump_position != null) 8 else if (self.screen == .player and self.status.total_frames != 0) 21 else self.rows()), now, playing);
+            return self.act(self.input_policy.wheel(direction, now, self.inputContext(), if (self.menu != null) self.menu.?.count() else if (self.jump_position != null) 8 else if (self.screen == .player and self.status.total_frames != 0) 21 else self.rows()), now, playing);
         }
 
         pub fn repeat(self: *State, now: u64, held: u8, playing: bool) media.PlaybackCommand {
             self.reconcile();
             self.raw_held = held;
-            return self.act(self.input_policy.tick(now, self.inputContext(), if (self.jump_position != null) 8 else if (self.screen == .player and self.status.total_frames != 0) 21 else self.rows(), held), now, playing);
+            return self.act(self.input_policy.tick(now, self.inputContext(), if (self.menu != null) self.menu.?.count() else if (self.jump_position != null) 8 else if (self.screen == .player and self.status.total_frames != 0) 21 else self.rows(), held), now, playing);
         }
 
         fn act(self: *State, action: navigation.Action, now: u64, playing: bool) media.PlaybackCommand {
             if (action == .none) return .none;
+            if (action == .home) return self.handle(.home, now, playing);
             if (self.jump_position) |position| switch (action) {
                 .move => |delta| {
                     self.jump_position = navigation.move(position, 21, delta);
                     self.dirty = true;
                     return .none;
                 },
-                .select, .back, .home => {
+                .select, .back, .home, .menu => {
                     self.jump_position = null;
                     self.cancelInput(self.input_policy.held);
                     if (action == .select) {
@@ -326,6 +611,13 @@ pub fn Controller(comptime Platform: type) type {
             switch (action) {
                 .none => return .none,
                 .move => |delta| {
+                    if (self.menu) |*menu| {
+                        menu.selection = navigation.move(menu.selection, menu.count(), delta);
+                        self.dirty = true;
+                        self.major = true;
+                        self.pending_frame.ready = false;
+                        return .none;
+                    }
                     self.moveBy(delta, now);
                     return .none;
                 },
@@ -342,6 +634,7 @@ pub fn Controller(comptime Platform: type) type {
                     .select => .select,
                     .back => .back,
                     .home => .home,
+                    .menu => .menu,
                     .volume_up => .volume_up,
                     .volume_down => .volume_down,
                     else => unreachable,
@@ -365,6 +658,9 @@ pub fn Controller(comptime Platform: type) type {
             if (self.screen == .artist and self.selection > 0) {
                 if (self.artistRank()) |i| self.selected_id = self.snapshot().albums[self.snapshot().artists[i].first_album + self.selection - 1].id;
             } else if (self.screen == .artist) self.selected_id = 0;
+            if (self.screen == .folders) if (self.folderRow(self.selection)) |row| {
+                self.selected_id = core.hash(row.path);
+            };
             if (self.screen == .tracks) if (self.trackAt(self.selection)) |track| {
                 self.selected_id = track.id;
             };
@@ -375,101 +671,81 @@ pub fn Controller(comptime Platform: type) type {
         pub fn handle(self: *State, event: Input, now: u64, playing: bool) media.PlaybackCommand {
             self.reconcile();
             if (self.screen == .player or (event != .volume_up and event != .volume_down)) self.dirty = true;
+            if (event == .menu) {
+                self.openMenu();
+                return .none;
+            }
+            if (self.menu != null and event != .volume_up and event != .volume_down and event != .home) {
+                switch (event) {
+                    .up, .down => self.menu.?.selection = navigation.move(self.menu.?.selection, self.menu.?.count(), if (event == .up) -1 else 1),
+                    .select => return self.menuSelect(now, playing),
+                    .back => self.menu = null,
+                    else => {},
+                }
+                self.rendered_screen = null;
+                self.pending_frame.ready = false;
+                self.major = true;
+                return .none;
+            }
             switch (event) {
+                .menu => unreachable,
                 .volume_up, .volume_down => {
                     self.attenuation = if (event == .volume_up) self.attenuation -| 4 else @min(128, self.attenuation +| 4);
                     self.attenuation = @max(16, self.attenuation);
                     self.animation.request(now, @as(u32, 128 - self.attenuation) * 100 / 112);
                     return .{ .set_attenuation = self.attenuation };
                 },
-                .home => self.navigate(.home),
-                .back => {
-                    if (self.screen == .artists or self.screen == .artist or (self.screen == .tracks and self.tracks_return != .albums)) {
-                        const destination: Screen = switch (self.screen) {
-                            .artists => .home,
-                            .artist => .artists,
-                            else => self.tracks_return,
-                        };
-                        const artist = self.snapshot().artistIndex(self.artist_id);
-                        self.navigate(destination);
-                        if (destination == .home) {
-                            self.selection = self.home_selection;
-                            self.first = self.home_first;
-                        }
-                        if (destination == .artists) if (artist) |rank| {
-                            self.selection = rank;
-                            self.selected_id = self.snapshot().artistId(rank);
-                        };
-                        if (destination == .artist and self.track_scope == .album) if (artist) |rank| {
-                            if (self.snapshot().albumIndex(self.album_id)) |album| {
-                                const group = self.snapshot().artists[rank];
-                                if (album >= group.first_album and album < group.first_album + group.album_count) {
-                                    self.selection = album - group.first_album + 1;
-                                    self.selected_id = self.album_id;
-                                }
-                            }
-                        };
-                        self.first = self.selection -| (visible_rows - 1);
-                        return .none;
-                    }
-                    const album = if (self.screen == .tracks) self.snapshot().albumIndex(self.album_id) else null;
-                    self.navigate(if (self.screen == .tracks) .albums else .home);
-                    if (self.screen == .home) {
-                        self.selection = self.home_selection;
-                        self.first = self.home_first;
-                    }
-                    if (album) |rank| {
-                        self.selection = rank;
-                        self.flow = @floatFromInt(rank);
-                        self.selected_id = self.snapshot().albums[rank].id;
-                        self.selected_track_anchor = self.snapshot().albums[rank].representative.id;
-                    }
+                .home => {
+                    self.history_count = 0;
+                    self.navigate(.home);
                 },
+                .back => self.goBack(),
                 .up, .down => {
                     if (self.screen == .player and playing) return if (event == .up) .previous else .next;
                     self.moveBy(if (event == .up) -1 else 1, now);
                 },
                 .select => switch (self.screen) {
-                    .home => {
-                        self.home_selection = self.selection;
-                        self.home_first = self.first;
-                        const target = home_items[self.selection].target;
-                        if (target == .folders) {
-                            self.requested_folders = true;
-                            if (playing) return .stop;
-                        } else {
-                            self.track_scope = if (target == .queue) .queue else .all;
-                            self.tracks_return = .home;
-                            self.navigate(switch (target) {
-                                .player => .player,
-                                .albums => .albums,
-                                .artists => .artists,
-                                .songs, .queue => .tracks,
-                                .library => .library,
-                                .settings => .settings,
-                                .folders => unreachable,
-                            });
-                        }
+                    .home => self.push(switch (self.selection) {
+                        0 => .music,
+                        1 => .settings,
+                        else => .player,
+                    }),
+                    .music => switch (music_items[self.selection]) {
+                        .albums => self.push(.albums),
+                        .artists => self.push(.artists),
+                        .songs => {
+                            self.push(.tracks);
+                            self.track_scope = .all;
+                        },
+                        .folders => {
+                            self.push(.folders);
+                            self.refreshFolder();
+                        },
+                        .shuffle_all => {
+                            self.startCollection(.{ .scope = .all }, null, true, now);
+                            if (self.requested_track != null) self.push(.player);
+                            if (playing and self.requested_track != null) return .stop;
+                        },
                     },
                     .albums => if (self.snapshot().album_count > 0) {
                         self.album_id = self.snapshot().albums[self.selection].id;
                         self.track_scope = .album;
                         self.tracks_return = .albums;
-                        self.navigate(.tracks);
+                        self.push(.tracks);
                     },
                     .artists => if (self.rows() > 0) {
                         self.artist_id = self.snapshot().artistId(self.selection);
-                        self.navigate(.artist);
+                        self.push(.artist);
                     },
                     .artist => if (self.snapshot().artistIndex(self.artist_id)) |i| {
                         self.track_scope = if (self.selection == 0) .artist else .album;
                         self.tracks_return = .artist;
                         if (self.selection > 0) self.album_id = self.snapshot().albums[self.snapshot().artists[i].first_album + self.selection - 1].id;
-                        self.navigate(.tracks);
+                        self.push(.tracks);
                     },
                     .tracks => if (self.trackAt(self.selection)) |track| {
                         self.startContext(track);
-                        self.navigate(.player);
+                        if (self.track_scope == .queue and self.history_count != 0 and self.history[self.history_count - 1].screen == .player) self.goBack() else self.push(.player);
                         if (playing) return .stop;
                     },
                     .player => if (playing) {
@@ -477,11 +753,24 @@ pub fn Controller(comptime Platform: type) type {
                     } else if (self.playing_track) |track| {
                         self.queue(track);
                     },
+                    .folders => if (self.folderRow(self.selection)) |row| {
+                        if (row.directory) {
+                            self.enterFolder(row.path);
+                        } else if (self.snapshot().trackByPath(row.path)) |track| {
+                            self.startCollection(.{ .scope = .folder, .directory = self.folderPath() }, track.id, false, now);
+                            self.push(.player);
+                            if (playing) return .stop;
+                        }
+                    },
                     .library => self.index.request(self.selection == 1),
-                    .settings => self.replay_gain.mode = switch (self.replay_gain.mode) {
-                        .off => .track,
-                        .track => .album,
-                        .album => .off,
+                    .settings => if (self.selection == 1) {
+                        self.push(.library);
+                    } else {
+                        self.replay_gain.mode = switch (self.replay_gain.mode) {
+                            .off => .track,
+                            .track => .album,
+                            .album => .off,
+                        };
                     },
                 },
             }
@@ -490,6 +779,18 @@ pub fn Controller(comptime Platform: type) type {
 
         fn reconcile(self: *State) void {
             const view = self.snapshot();
+            if (self.screen == .folders) {
+                const source = self.folderSource();
+                if (self.folder_revision != view.revision or self.folder_entries_address != @intFromPtr(source.entries.ptr) or self.folder_entries_count != source.entries.len) self.refreshFolder();
+            }
+            if (self.menu) |*menu| if (menu.kind == .collection) {
+                const empty = self.collectionCount(menu.collection) == 0;
+                if (empty != menu.empty) {
+                    menu.empty = empty;
+                    self.major = true;
+                    self.dirty = true;
+                }
+            };
             if (view.revision == self.revision) return;
             self.artist_rank = view.artistIndex(self.artist_id);
             self.album_rank = view.albumIndex(self.album_id);
@@ -565,7 +866,7 @@ pub fn Controller(comptime Platform: type) type {
         }
 
         pub fn isAnimating(self: *const State, now: u64) bool {
-            return (self.screen == .albums and @abs(self.flow - @as(f32, @floatFromInt(self.selection))) > 0.005) or (self.screen == .player and self.animation.isAnimating(now));
+            return self.menu == null and ((self.screen == .albums and @abs(self.flow - @as(f32, @floatFromInt(self.selection))) > 0.005) or (self.screen == .player and self.animation.isAnimating(now)));
         }
 
         pub fn refreshBattery(self: *State, millivolts: u32, charging: bool, external_power: bool, now: u64) void {
@@ -599,7 +900,8 @@ pub fn Controller(comptime Platform: type) type {
                 self.dirty = true;
                 self.major = true;
             }
-            const volume_moving = self.animation.tick(now) and self.screen == .player;
+            const modal = self.menu != null or self.jump_position != null;
+            const volume_moving = self.animation.tick(now) and self.screen == .player and !modal;
             if (volume_moving) self.dirty = true;
             if (!defer_cosmetic and self.last_active != diag.report.scan_active) {
                 self.last_active = diag.report.scan_active;
@@ -622,20 +924,20 @@ pub fn Controller(comptime Platform: type) type {
                 self.major = true;
                 self.dirty = true;
             }
-            if (self.screen == .player and self.last_second != self.status.played_frames / @max(1, self.status.sample_rate)) {
+            if (self.screen == .player and !modal and self.last_second != self.status.played_frames / @max(1, self.status.sample_rate)) {
                 self.last_second = self.status.played_frames / @max(1, self.status.sample_rate);
                 self.dirty = true;
             }
             // Prefetch deadlines and releases can change without a repaint.
             // Numeric plans are cheap; hash/publish only a changed request set.
-            if (self.screen == .albums) self.requestCovers(now);
-            const moving = self.screen == .albums and @abs(self.flow - @as(f32, @floatFromInt(self.selection))) > 0.005;
+            if (self.screen == .albums and !modal) self.requestCovers(now);
+            const moving = !modal and self.screen == .albums and @abs(self.flow - @as(f32, @floatFromInt(self.selection))) > 0.005;
             const motion_flags = @as(u32, @intFromBool(moving)) | (@as(u32, @intFromBool(volume_moving)) << 1);
             if (motion_flags != self.motion_flags) {
                 self.motion_flags = motion_flags;
                 Platform.trace(.motion, Platform.now(), motion_flags);
             }
-            if (!moving and self.screen == .albums and self.flow != @as(f32, @floatFromInt(self.selection))) {
+            if (!moving and !modal and self.screen == .albums and self.flow != @as(f32, @floatFromInt(self.selection))) {
                 self.flow = @floatFromInt(self.selection);
                 self.dirty = true;
                 self.major = true;
@@ -664,13 +966,19 @@ pub fn Controller(comptime Platform: type) type {
             if (!self.pending_frame.dueAt(now, self.dirty, lcd.renderIntervalMs())) return;
             if (moving) self.advanceFlow(now);
             const draw_started = Platform.now();
-            Platform.trace(.model, draw_started, (@as(u32, @intFromBool(moving)) << 31) | (@as(u32, @intFromBool(volume_moving)) << 30) | (@as(u32, @backingInt(self.screen)) << 27) | (@as(u32, @intCast(self.selection)) << 11) | @as(u32, @intCast(@min(2047, self.rows()))));
+            Platform.trace(.model_v2, draw_started, @bitCast(@import("display_trace.zig").Model{
+                .rows = @intCast(@min(2047, self.rows())),
+                .selection = @intCast(self.selection),
+                .screen = @intCast(@backingInt(self.screen)),
+                .volume_moving = volume_moving,
+                .moving = moving,
+            }));
             Platform.trace(.flow, draw_started, @bitCast(self.flow));
-            if (!self.major and self.screen == .player) self.renderTimelineInto(lcd.framebuffer, now) else self.render(now);
+            if (!self.major and !modal and self.screen == .player) self.renderTimelineInto(lcd.framebuffer, now) else self.render(now);
             const draw_ticks = Platform.now() -% draw_started;
             Platform.trace(.render, Platform.now(), draw_ticks);
             diag.report.ui_draw_max = @max(diag.report.ui_draw_max, draw_ticks);
-            const full = self.major or self.screen != .player;
+            const full = self.major or self.screen != .player or modal;
             self.frozen = lcd.freeze(if (full) .{ .x = 0, .y = 0, .width = 320, .height = 240 } else .{ .x = 0, .y = 188, .width = 320, .height = 42 }) catch |failure| {
                 self.fail(failure);
                 return;
@@ -709,6 +1017,41 @@ pub fn Controller(comptime Platform: type) type {
 
         fn centered(c: C, y: i32, width: u16, text: []const u8, role: draw.fonts.Role, color: draw.Color) void {
             c.centered(@divTrunc(320 - @as(i32, width), 2), y, width, text, role, color);
+        }
+
+        fn menuRow(_: *State, c: C, row: usize, name: []const u8, value: []const u8, highlighted: bool, chevron: bool) void {
+            const y: i32 = Layout.row_top + @as(i32, @intCast(row)) * Layout.row_height;
+            if (highlighted) highlightRow(c, y);
+            const color = if (highlighted) accent else ink;
+            label(c, Layout.left, Layout.rowText(y, .reading), if (value.len == 0) 268 else 190, name, .reading, color);
+            if (value.len != 0) c.right(Layout.right, Layout.rowText(y, .reading), value, .reading, color);
+            if (chevron) c.chevron(Layout.right - 6, y + 12, muted);
+        }
+
+        fn playbackModes(self: *const State, c: C) void {
+            if (self.track_store.order.shuffled) {
+                for (0..12) |i| {
+                    const x: i32 = 255 + @as(i32, @intCast(i));
+                    const dy: i32 = @intCast(i * 8 / 11);
+                    c.fill(x, 164 + dy, 1, 2, muted);
+                    c.fill(x, 172 - dy, 1, 2, muted);
+                }
+                c.fill(263, 163, 5, 2, muted);
+                c.fill(263, 172, 5, 2, muted);
+            }
+            if (self.track_store.order.repeat != .off) {
+                c.rounded(283, 163, 18, 12, 3, muted);
+                c.rounded(285, 165, 14, 8, 2, paper);
+                c.fill(282, 169, 4, 5, paper);
+                c.fill(298, 164, 4, 5, paper);
+                c.fill(282, 169, 5, 2, muted);
+                c.fill(297, 167, 5, 2, muted);
+                if (self.track_store.order.repeat == .one) {
+                    c.fill(291, 166, 1, 6, muted);
+                    c.pixel(290, 167, muted);
+                    c.fill(290, 172, 3, 1, muted);
+                }
+            }
         }
 
         fn header(self: *State, c: C, title: []const u8, detail: []const u8) void {
@@ -822,6 +1165,41 @@ pub fn Controller(comptime Platform: type) type {
             var c = C.init(pixels);
             c.text_cache = self.text_cache;
             if (self.text_cache) |cache| cache.beginFrame();
+            if (self.menu) |menu| {
+                c.clear(paper);
+                self.header(c, if (menu.kind == .player) "Playback" else switch (menu.collection.scope) {
+                    .album => if (self.snapshot().albumIndex(menu.collection.album)) |i| self.snapshot().albums[i].title else "Album",
+                    .artist => if (self.snapshot().artistIndex(menu.collection.artist)) |i| self.snapshot().artists[i].name else "Artist",
+                    .folder => if (menu.collection.directory.len != 0) std.fs.path.basename(menu.collection.directory) else "Folders",
+                    else => "Music",
+                }, "");
+                if (menu.empty) label(c, Layout.left, Layout.rowText(Layout.row_top, .reading), Layout.width, "No songs in this folder", .reading, muted);
+                for (0..menu.count()) |i| {
+                    const name: []const u8 = if (menu.kind == .player) switch (i) {
+                        0 => "Queue",
+                        1 => "Shuffle",
+                        2 => "Repeat",
+                        else => "Seek",
+                    } else switch (i) {
+                        0 => "Play All",
+                        1 => "Shuffle",
+                        else => "Jump",
+                    };
+                    const value: []const u8 = if (menu.kind == .player) switch (i) {
+                        1 => if (self.track_store.order.shuffled) "On" else "Off",
+                        2 => switch (self.track_store.order.repeat) {
+                            .off => "Off",
+                            .all => "All",
+                            .one => "One",
+                        },
+                        else => "",
+                    } else "";
+                    self.menuRow(c, i, name, value, i == menu.selection, menu.kind == .player and (i == 0 or i == 3));
+                }
+                self.rendered_surface = @intFromPtr(pixels);
+                self.rendered_screen = null;
+                return;
+            }
             const view = self.snapshot();
             const retained = self.screen == .albums and self.rendered_screen == .albums and self.rendered_surface == @intFromPtr(pixels);
             const scan_width = if (self.screen == .albums) albumProgressWidth() else 0;
@@ -870,15 +1248,30 @@ pub fn Controller(comptime Platform: type) type {
                 self.cover_plan = null;
             }
             switch (self.screen) {
-                .home => {
-                    self.header(c, "Music", "");
-                    for (self.first..@min(home_items.len, self.first + self.visibleRows())) |i| {
-                        const name = home_items[i].name;
-                        const y: i32 = Layout.row_top + @as(i32, @intCast(i - self.first)) * Layout.row_height;
-                        if (i == self.selection) highlightRow(c, y);
-                        label(c, Layout.left, Layout.rowText(y, .reading), 268, name, .reading, if (i == self.selection) accent else ink);
-                        c.chevron(Layout.right - 6, y + 12, muted);
+                .home, .music => {
+                    self.header(c, if (self.screen == .home) "Home" else "Music", "");
+                    for (self.first..@min(self.rows(), self.first + self.visibleRows())) |i| {
+                        const name: []const u8 = if (self.screen == .home) switch (i) {
+                            0 => "Music",
+                            1 => "Settings",
+                            else => "Now Playing",
+                        } else switch (music_items[i]) {
+                            .albums => "Albums",
+                            .artists => "Artists",
+                            .songs => "Songs",
+                            .folders => "Folders",
+                            .shuffle_all => "Shuffle All",
+                        };
+                        self.menuRow(c, i - self.first, name, "", i == self.selection, self.screen == .home or music_items[i] != .shuffle_all);
                     }
+                },
+                .folders => {
+                    self.header(c, if (self.folder_path_len == 0) "Folders" else std.fs.path.basename(self.folderPath()), "");
+                    for (self.first..@min(self.rows(), self.first + self.visibleRows())) |i| {
+                        const row = self.folderRow(i) orelse continue;
+                        self.menuRow(c, i - self.first, row.name, if (!row.directory and self.snapshot().trackByPath(row.path) == null) (if (view.complete) "Unavailable" else "Pending") else "", i == self.selection, row.directory);
+                    }
+                    if (self.rows() == 0) label(c, Layout.left, Layout.rowText(Layout.row_top, .reading), Layout.width, if (self.folder_error) "Folder too large" else "Empty folder", .reading, muted);
                 },
                 .library => {
                     self.header(c, "Library", std.fmt.bufPrint(&buf, "{d} albums", .{view.album_count}) catch "");
@@ -933,6 +1326,7 @@ pub fn Controller(comptime Platform: type) type {
                             .all => "All Songs",
                             .queue => "Queue",
                             .artist => if (artist) |a| a.name else "Songs",
+                            .folder => "Songs",
                             .album => if (view.albumIndex(self.album_id)) |i| view.albums[i].title else "Tracks",
                         },
                         else => unreachable,
@@ -953,13 +1347,12 @@ pub fn Controller(comptime Platform: type) type {
                 },
                 .settings => {
                     self.header(c, "Settings", "");
-                    highlightRow(c, Layout.row_top);
-                    label(c, Layout.left, Layout.rowText(Layout.row_top, .reading), 180, "ReplayGain", .reading, accent);
-                    c.right(Layout.right, Layout.rowText(Layout.row_top, .reading), switch (self.replay_gain.mode) {
+                    self.menuRow(c, 0, "ReplayGain", switch (self.replay_gain.mode) {
                         .off => "Off",
                         .track => "Track",
                         .album => "Album",
-                    }, .reading, accent);
+                    }, self.selection == 0, false);
+                    self.menuRow(c, 1, "Library", "", self.selection == 1, true);
                 },
                 .player => {
                     self.header(c, if (self.status.phase == .paused) "Paused" else "Now Playing", "");
@@ -984,7 +1377,8 @@ pub fn Controller(comptime Platform: type) type {
                         label(c, 144, Layout.capTop(Layout.row_top, .title), 160, track.meta.title, .title, ink);
                         label(c, 144, Layout.capTop(100, .body), 160, track.meta.artist, .body, ink);
                         label(c, 144, Layout.capTop(124, .caption), 160, track.meta.album, .caption, muted);
-                        label(c, 144, Layout.capBottom(176, .caption), 160, track.meta.codec, .caption, muted);
+                        label(c, 144, Layout.capBottom(176, .caption), 100, track.meta.codec, .caption, muted);
+                        self.playbackModes(c);
                         self.timeline(c, now);
                     } else label(c, 16, 100, 288, "Choose a track", .title, ink);
                 },
@@ -1016,7 +1410,7 @@ pub fn Controller(comptime Platform: type) type {
             }
             self.covers.publishRequests();
             self.rendered_surface = @intFromPtr(pixels);
-            self.rendered_screen = if (self.jump_position != null) null else self.screen;
+            self.rendered_screen = if (self.jump_position != null or self.menu != null) null else self.screen;
             self.rendered_selection = self.selection;
             self.rendered_revision = view.revision;
             self.rendered_count = view.album_count;
@@ -1912,22 +2306,187 @@ test "play toggles pause and seeking previews without changing the queue" {
     try std.testing.expectEqual(48000 * 20, state.status.played_frames);
 }
 
-test "physical Menu hold enters seek exactly once and release cannot go Home" {
+test "physical Menu opens playback actions, hold goes Home and seek remains available" {
     var fixture: Fixture = undefined;
     try fixture.init();
     defer fixture.deinit();
+    const track = core.Track{ .id = 1, .path = "A/1.flac", .stamp = .{}, .meta = .{} };
+    try fixture.pair.publish(&.{}, &.{track}, 1, true);
     var state = fixture.state();
+    state.queue(&track);
+    state.playing_track = state.track_store.begin().?;
     state.navigate(.player);
-    state.status = .{ .phase = .playing, .sample_rate = 48000, .output_format = .signed_24_in_u32, .total_frames = 48000 * 100, .played_frames = 48000 * 20 };
+    state.status.total_frames = 1000;
+    state.status.played_frames = 200;
     _ = state.button(.menu, true, 0, true);
-    _ = state.repeat(499, @import("navigation.zig").Button.menu.mask(), true);
-    try std.testing.expectEqual(null, state.jump_position);
-    _ = state.repeat(500, @import("navigation.zig").Button.menu.mask(), true);
+    _ = state.button(.menu, false, 100, true);
+    try std.testing.expect(state.menu != null);
+    state.menu.?.selection = 3;
+    _ = state.handle(.select, 101, true);
     try std.testing.expectEqual(4, state.jump_position.?);
-    _ = state.button(.menu, false, 510, true);
+    _ = state.button(.menu, true, 200, true);
+    _ = state.repeat(700, navigation.Button.menu.mask(), true);
+    try std.testing.expectEqual(Screen.home, state.screen);
+    try std.testing.expect(state.jump_position == null and state.menu == null);
+    _ = state.button(.menu, false, 701, true);
+    try std.testing.expect(state.menu == null);
+}
+
+test "collection actions capture scope, preserve playback when toggling modes and honour repeat" {
+    var fixture: Fixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const tracks = [_]core.Track{
+        .{ .id = 1, .path = "Music/A/01.flac", .stamp = .{}, .meta = .{ .title = "First", .album = "A", .artist = "Artist", .track = 1 } },
+        .{ .id = 2, .path = "Music/A/02.flac", .stamp = .{}, .meta = .{ .title = "Second", .album = "A", .artist = "Artist", .track = 2 } },
+        .{ .id = 3, .path = "Music/A/03.flac", .stamp = .{}, .meta = .{ .title = "Third", .album = "A", .artist = "Artist", .track = 3 } },
+        .{ .id = 4, .path = "Music/B/01.flac", .stamp = .{}, .meta = .{ .title = "Elsewhere", .album = "B", .artist = "Other" } },
+    };
+    try fixture.pair.publish(&.{}, &tracks, 42, true);
+    var state = fixture.state();
+    state.navigate(.albums);
+    state.reconcile();
+    _ = state.handle(.menu, 1, false);
+    const selected_album = state.menu.?.collection.album;
+    // A publication between opening and activating the menu cannot change its
+    // captured collection or silently substitute an album at the same rank.
+    const added = core.Track{ .id = 5, .path = "Z/01.flac", .stamp = .{}, .meta = .{ .title = "New", .album = "0", .artist = "Other" } };
+    const changed = tracks ++ .{added};
+    try fixture.pair.publish(&.{}, &changed, 42, true);
+    _ = state.handle(.select, 2, false);
+    try std.testing.expectEqual(3, state.track_store.order.count);
+    try std.testing.expectEqual(1, state.requested_track.?.id);
+    try std.testing.expectEqual(selected_album, state.snapshot().albums[state.snapshot().albumIndex(selected_album).?].id);
+    state.playing_track = state.track_store.begin().?;
+    state.requested_track = null;
+    state.status.played_frames = 1234;
+    state.status.phase = .paused;
+    _ = state.handle(.menu, 10, true);
+    state.menu.?.selection = 1;
+    try std.testing.expectEqual(.none, std.meta.activeTag(state.handle(.select, 11, true)));
+    try std.testing.expect(state.track_store.order.shuffled);
+    try std.testing.expect(state.requested_track == null);
+    try std.testing.expectEqual(1234, state.status.played_frames);
+    try std.testing.expectEqual(media.PlaybackPhase.paused, state.status.phase);
+    state.menu.?.selection = 2;
+    _ = state.handle(.select, 12, true);
+    try std.testing.expectEqual(@import("play_queue.zig").Repeat.all, state.track_store.order.repeat);
+    _ = state.handle(.select, 13, true);
+    try std.testing.expectEqual(state.playing_track.?.id, state.finishedTrack().?.id);
+    try std.testing.expect(state.neighbouringTrack(1).?.id != state.playing_track.?.id);
+    _ = state.handle(.select, 14, true);
+    try std.testing.expectEqual(@import("play_queue.zig").Repeat.off, state.track_store.order.repeat);
+}
+
+test "folder playback is naturally ordered, nonrecursive and shares the retained queue" {
+    var fixture: Fixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const tracks = [_]core.Track{
+        .{ .id = 10, .path = "Music/A/10.flac", .stamp = .{}, .meta = .{ .title = "Ten", .album = "A" } },
+        .{ .id = 2, .path = "Music/A/2.flac", .stamp = .{}, .meta = .{ .title = "Two", .album = "A" } },
+        .{ .id = 3, .path = "Music/A/Sub/3.flac", .stamp = .{}, .meta = .{ .title = "Nested", .album = "B" } },
+        .{ .id = 4, .path = "Music/B/1.flac", .stamp = .{}, .meta = .{ .title = "Other", .album = "C" } },
+    };
+    try fixture.pair.publish(&.{}, &tracks, 1, true);
+    var state = fixture.state();
+    state.navigate(.folders);
+    state.reconcile();
+    _ = state.handle(.select, 1, false); // Music
+    _ = state.handle(.select, 2, false); // A
+    try std.testing.expectEqualStrings("Music/A", state.folderPath());
+    try std.testing.expectEqual(3, state.rows()); // Sub, 2.flac, 10.flac
+    _ = state.handle(.down, 2, false);
+    _ = state.handle(.menu, 3, false);
+    _ = state.handle(.select, 4, false);
+    try std.testing.expectEqual(2, state.track_store.order.count);
+    try std.testing.expectEqual(2, state.track_store.order.at(0).?);
+    try std.testing.expectEqual(10, state.track_store.order.at(1).?);
+    state.playing_track = state.track_store.begin().?;
+    state.requested_track = null;
+    _ = state.handle(.menu, 5, true);
+    _ = state.handle(.select, 6, true); // Queue
+    try std.testing.expectEqual(TrackScope.queue, state.track_scope);
+    _ = state.handle(.down, 7, true);
+    _ = state.handle(.select, 8, true);
+    try std.testing.expectEqual(10, state.requested_track.?.id);
+    try std.testing.expectEqual(2, state.track_store.order.count);
     try std.testing.expectEqual(Screen.player, state.screen);
-    _ = state.button(.next, true, 520, true);
-    _ = state.button(.next, false, 530, true);
-    try std.testing.expectEqual(5, state.jump_position.?);
-    try std.testing.expectEqual(media.PlaybackCommand{ .seek_to = 48000 * 25 }, state.button(.play, true, 540, true));
+    _ = state.handle(.back, 9, false);
+    try std.testing.expectEqual(Screen.folders, state.screen);
+    _ = state.handle(.back, 10, false);
+    try std.testing.expectEqualStrings("Music", state.folderPath());
+}
+
+test "context selection and dismissals retain immutable presentation through delayed DMA" {
+    var fixture: Fixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const track = core.Track{ .id = 1, .path = "A/1.flac", .stamp = .{}, .meta = .{} };
+    try fixture.pair.publish(&.{}, &.{track}, 1, true);
+    var state = fixture.state();
+    state.queue(&track);
+    state.playing_track = state.track_store.begin().?;
+    state.requested_track = null;
+    state.navigate(.player);
+    state.status.sample_rate = 48000;
+    state.status.total_frames = 480000;
+    TestPlatform.Display.reset();
+    TestPlatform.Display.latency = 37;
+    defer TestPlatform.Display.reset();
+    for (0..400) |now| {
+        if (now == 40 or now == 160 or now == 280) _ = state.button(.menu, true, now, true);
+        if (now == 60 or now == 180 or now == 300) _ = state.button(.menu, false, now, true);
+        if (now == 100 or now == 110) _ = state.handle(.down, now, true);
+        if (now == 120) _ = state.handle(.select, now, true);
+        if (now == 220 or now == 330) _ = state.handle(.back, now, true);
+        state.status.played_frames += 48;
+        TestPlatform.milliseconds = now;
+        state.frame(now);
+        try std.testing.expect(!state.failure);
+        try std.testing.expect(!TestPlatform.Display.corrupted);
+    }
+    try std.testing.expect(state.requested_track == null);
+    try std.testing.expectEqual(19200, state.status.played_frames);
+}
+
+test "folder focus follows paths when authoritative directory entries replace a preview" {
+    var fixture: Fixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const old_entries = [_]core.Entry{ .{ .path = "B", .kind = .directory }, .{ .path = "C", .kind = .directory } };
+    const new_entries = [_]core.Entry{ .{ .path = "A", .kind = .directory }, .{ .path = "B", .kind = .directory }, .{ .path = "C", .kind = .directory } };
+    try fixture.pair.publish(&.{}, &.{}, 1, true);
+    test_diag.catalog = .{ .arena = .init(std.testing.allocator), .value = .{ .entries = &old_entries } };
+    defer test_diag.catalog = null;
+    var state = fixture.state();
+    state.navigate(.folders);
+    state.reconcile();
+    try std.testing.expectEqualStrings("B", state.folderRow(state.selection).?.name);
+    // Final persistence can replace raw entries without another view commit.
+    test_diag.catalog = .{ .arena = .init(std.testing.allocator), .value = .{ .entries = &new_entries } };
+    state.reconcile();
+    try std.testing.expectEqualStrings("B", state.folderRow(state.selection).?.name);
+    try std.testing.expectEqual(1, state.selection);
+}
+
+test "open folder actions own their path across source mutation and reclamation" {
+    var fixture: Fixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    var path = [_]u8{'A'};
+    const entries = [_]core.Entry{.{ .path = &path, .kind = .directory }};
+    test_diag.catalog = .{ .arena = .init(std.testing.allocator), .value = .{ .entries = &entries } };
+    defer test_diag.catalog = null;
+    try fixture.pair.publish(&.{}, &.{}, 1, true);
+    var state = fixture.state();
+    state.navigate(.folders);
+    state.reconcile();
+    _ = state.handle(.menu, 1, false);
+    path[0] = 'B';
+    try std.testing.expectEqualStrings("A", state.menu.?.collection.directory);
+    _ = state.handle(.select, 2, false);
+    try std.testing.expect(state.requested_track == null);
+    _ = state.handle(.back, 3, false);
+    try std.testing.expect(state.menu == null);
 }

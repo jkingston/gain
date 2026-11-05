@@ -2,7 +2,16 @@
 //! Writes are four integers; the host reads the ring after each animation.
 const std = @import("std");
 pub const capacity = 2048;
-pub const Kind = enum(u32) { render = 1, commit = 2, release = 3, retarget = 4, model = 5, motion = 6, flow = 7, covers = 8 };
+pub const Kind = enum(u32) { render = 1, commit = 2, release = 3, retarget = 4, model = 5, motion = 6, flow = 7, covers = 8, model_v2 = 9 };
+/// Versioned separately from legacy kind 5, which reserved only three screen
+/// bits. Existing timing captures remain readable after adding device menus.
+pub const Model = packed struct(u32) {
+    rows: u11,
+    selection: u15,
+    screen: u4,
+    volume_moving: bool,
+    moving: bool,
+};
 /// Masks follow the seven visible models in paint order. Missing means a
 /// completed negative cache entry; an absent ready bit alone means loading.
 pub const Covers = packed struct(u32) {

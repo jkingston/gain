@@ -18,7 +18,7 @@ pub const State = struct {
         const action: Action = std.enums.fromInt(Action, bytes[1] -| 0x60) orelse return null;
         const value = std.mem.readInt(u16, bytes[2..4], .little);
         if (action != .play and action != .input and action != .input_sample and value != 0) return null;
-        if (action == .input and value > 6) return null;
+        if (action == .input and value > 7) return null;
         if (action == .input_sample and value != 0xffff and (value > 0x3ff or value & 0x80 != 0)) return null;
         self.waiting = .{ .action = action, .value = value };
         return self.waiting;

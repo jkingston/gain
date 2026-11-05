@@ -284,6 +284,21 @@ pub const Snapshot = struct {
         return left.id < right.id;
     }
 
+    pub fn trackByPath(self: *const Snapshot, path: []const u8) ?*const core.Track {
+        // The scanner and progressive merge retain bytewise path order.
+        var first: usize = 0;
+        var end = self.track_count;
+        while (first < end) {
+            const middle = first + (end - first) / 2;
+            switch (std.mem.order(u8, self.tracks[middle].path, path)) {
+                .lt => first = middle + 1,
+                .gt => end = middle,
+                .eq => return self.tracks[middle],
+            }
+        }
+        return null;
+    }
+
     pub fn trackById(self: *const Snapshot, id: u64) ?*const core.Track {
         var first: usize = 0;
         var end = self.track_count;

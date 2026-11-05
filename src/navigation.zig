@@ -4,7 +4,7 @@ const std = @import("std");
 const capture = @import("input_capture.zig");
 pub const Button = capture.Button;
 pub const Context = enum { list, covers, transport };
-pub const Action = union(enum) { none, move: i32, select, back, home, jump, previous, next, volume_up, volume_down };
+pub const Action = union(enum) { none, move: i32, select, back, home, menu, jump, previous, next, volume_up, volume_down };
 
 const first_repeat_ms = 320;
 const travel_start_ms = 900;
@@ -73,7 +73,7 @@ pub const Policy = struct {
                 return .none;
             }
             defer self.menu_at = null;
-            return if (self.menu_at != null and !self.menu_consumed) .home else .none;
+            return if (self.menu_at != null and !self.menu_consumed) .menu else .none;
         }
         if (!pressed) return .none;
         return switch (button) {
@@ -111,13 +111,13 @@ pub const Policy = struct {
 
     /// raw_held inhibits a repeat on the first observed release, before debounce.
     /// Call after draining captured edges, so a queued release wins over a tick.
-    pub fn tick(self: *Policy, now: u64, context: Context, count: usize, raw_held: u8) Action {
+    pub fn tick(self: *Policy, now: u64, context: Context, _: usize, raw_held: u8) Action {
         if (self.menu_at) |at| {
-            if (!self.menu_consumed and raw_held & Button.menu.mask() != 0 and count > 8 and now -| at >= menu_hold_ms) {
+            if (!self.menu_consumed and raw_held & Button.menu.mask() != 0 and now -| at >= menu_hold_ms) {
                 self.menu_consumed = true;
                 self.direction = 0;
                 self.suppressed |= self.held & navigation_mask;
-                return .jump;
+                return .home;
             }
         }
         if (context != self.gesture_context) {
@@ -211,8 +211,8 @@ test "transport holds do not repeat skip and Menu hold consumes its short action
     policy.cancel(0);
     _ = policy.edge(.menu, true, 6000, .list, 1000);
     try std.testing.expectEqual(.none, std.meta.activeTag(policy.tick(6499, .list, 1000, Button.menu.mask())));
-    try std.testing.expectEqual(.jump, std.meta.activeTag(policy.tick(6500, .list, 1000, Button.menu.mask())));
+    try std.testing.expectEqual(.home, std.meta.activeTag(policy.tick(6500, .list, 1000, Button.menu.mask())));
     try std.testing.expectEqual(.none, std.meta.activeTag(policy.edge(.menu, false, 6600, .list, 1000)));
     _ = policy.edge(.menu, true, 7000, .list, 1000);
-    try std.testing.expectEqual(.home, std.meta.activeTag(policy.edge(.menu, false, 7100, .list, 1000)));
+    try std.testing.expectEqual(.menu, std.meta.activeTag(policy.edge(.menu, false, 7100, .list, 1000)));
 }

@@ -95,11 +95,20 @@ class TextStatus(c.Structure):
     ]
 
 
+class PlaybackStatus(c.Structure):
+    _fields_ = [(name, c.c_uint32) for name in (
+        "version", "count", "cursor", "shuffle", "repeat", "menu_open", "menu_selection", "paused", "sample_rate"
+    )] + [("played_frames", c.c_uint64), ("total_frames", c.c_uint64)]
+
+
 class Player:
     def __init__(self, app, root):
         self.module = c.CDLL(str(app))
         self.module.gain_app_api.restype = c.POINTER(Api)
         self.module.gain_player_ui_status.argtypes = [c.POINTER(Status)]
+        self.module.gain_player_playback_status.argtypes = [c.POINTER(PlaybackStatus)]
+        self.module.gain_player_queue_item.argtypes = [c.c_uint32]
+        self.module.gain_player_queue_item.restype = c.c_uint64
         self.module.gain_player_environment.argtypes = [c.c_uint32] * 4
         self.module.gain_player_environment.restype = c.c_bool
         self.api = self.module.gain_app_api().contents
@@ -131,6 +140,22 @@ class Player:
         if result["version"] != 1 or result["failure"] or result["scan_failure"]:
             raise RuntimeError(f"Player UI failure: {result}")
         return result
+
+    def playback(self):
+        value = PlaybackStatus()
+        self.module.gain_player_playback_status(c.byref(value))
+        result = {name: getattr(value, name) for name, _ in PlaybackStatus._fields_}
+        assert result["version"] == 1
+        return result
+
+    def queue(self):
+        return [self.module.gain_player_queue_item(i) for i in range(self.playback()["count"])]
+
+    def home(self):
+        self.edge("menu")
+        self.frame(510)
+        self.edge("menu", False)
+        return self.frame()
 
     def text_status(self):
         value = TextStatus()
@@ -209,7 +234,7 @@ def qualify(app, root, synthetic=False):
             # The generated card includes fictional Arabic, CJK and Korean
             # names. Prepare them through the app worker, then prove that
             # ordinary stable frames reuse labels without invoking the engine.
-            player.tap("next", "next", "select")
+            player.tap("select", "next", "select")
             deadline = time.monotonic() + 10
             while True:
                 player.frame()
@@ -224,16 +249,8 @@ def qualify(app, root, synthetic=False):
             for _ in range(120):
                 player.frame()
             assert player.text_status()["prepared"] == text["prepared"]
-            player.tap(
-                "menu",
-                "previous",
-                "previous",
-                "previous",
-                "previous",
-                "previous",
-                "previous",
-            )
-            artist = player.tap("next", "next", "select", "select", "select")
+            player.home()
+            artist = player.tap("select", "next", "select", "select", "select")
             assert artist["rows"] == 48, artist
             player.tap("next", "next", "next")
             chosen = player.status()["selected_id"]
@@ -241,7 +258,8 @@ def qualify(app, root, synthetic=False):
             assert playing["playing"] and playing["playing_id"] == chosen, playing
             player.tap("select")
             # Manual update uses the same scanner and reuses unchanged native tags.
-            player.tap("menu", "next", "next", "next", "next", "select", "select")
+            player.home()
+            player.tap("next", "select", "next", "select", "select")
             updated = player.settle_scan()
             assert updated["reused"] == 192 and updated["parsed"] == 0, updated
             changed = sorted(root.rglob("*.flac"))[0]
@@ -265,7 +283,8 @@ def qualify(app, root, synthetic=False):
             player.tap("select")
             removed = player.settle_scan()
             assert removed["tracks"] == 191 and removed["reused"] == 191, removed
-            player.tap("menu", "next", "next", "next", "select")
+            player.home()
+            player.tap("select", "next", "next", "select")
             start = player.status()["selection"]
             player.edge("next")
             assert player.frame(318)["selection"] == start + 1
@@ -276,6 +295,54 @@ def qualify(app, root, synthetic=False):
             stopped = player.frame()["selection"]
             assert player.frame(5000)["selection"] == stopped
             assert player.tap("previous")["selection"] == stopped - 1
+        # Collection actions, playback modes and queue selection use the real
+        # app callbacks. No private library filenames or app-specific host UI.
+        player.home()
+        player.tap("select", "select")  # Music -> Albums
+        player.tap("menu", "select")  # Play All in the selected album
+        assert player.status()["playing"]
+        original = player.queue()
+        assert original and len(original) == len(set(original))
+        player.tap("select")  # Pause before changing modes.
+        position = player.playback()["played_frames"]
+        current = player.status()["playing_id"]
+        player.tap("menu", "next", "select")
+        assert player.playback()["shuffle"] == 1
+        assert sorted(player.queue()) == sorted(original)
+        assert player.status()["playing_id"] == current
+        assert player.playback()["played_frames"] == position
+        player.tap("select")  # Disable shuffle, restoring the captured order.
+        assert player.queue() == original
+        player.tap("next", "select", "select")  # Repeat All -> One
+        assert player.playback()["repeat"] == 2
+        player.tap("back", "select")  # Close actions, resume.
+        total = player.playback()["total_frames"]
+        assert total > 0
+        rate = player.playback()["sample_rate"]
+        player.frame(100 + total * 1000 // rate)
+        assert player.playback()["played_frames"] < total
+        assert player.status()["playing_id"] == current
+        player.tap("next")  # Manual Next still advances with Repeat One.
+        if len(original) > 1:
+            assert player.status()["playing_id"] != current
+        player.tap("menu", "select")  # Queue
+        player.tap("next", "select")
+        assert player.queue() == original
+        player.home()
+        player.tap("select", "next", "next", "next", "select")  # Folders
+        # Each generated directory is traversed by raw filesystem names. Files
+        # use the same player and queue rather than a second playback screen.
+        if synthetic:
+            for _ in range(3):
+                player.tap("select")
+            player.tap("menu", "select")
+            assert player.status()["playing"]
+            assert player.playback()["count"] == 47  # one deleted synthetic file
+        player.home()
+        player.tap("select", "next", "next", "next", "next", "select")
+        assert player.playback()["shuffle"] == 1
+        assert len(player.queue()) == initial["tracks"] - (1 if synthetic else 0)
+        assert len(set(player.queue())) == len(player.queue())
         return {
             "passed": True,
             "tracks": initial["tracks"],

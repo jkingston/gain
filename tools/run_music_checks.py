@@ -89,7 +89,7 @@ def screen(monitor, output, name):
 def remote(monitor, button):
     monitor.command(
         "input",
-        dict(select=0, back=1, home=2, up=3, down=4, volume_up=5, volume_down=6)[
+        dict(select=0, back=1, home=2, up=3, down=4, volume_up=5, volume_down=6, menu=7)[
             button
         ],
     )
@@ -186,7 +186,7 @@ def inputs(monitor, buttons, delay):
     for button in buttons:
         remote(monitor, button) if delay is None else monitor.command(
             "input",
-            dict(select=0, back=1, home=2, up=3, down=4, volume_up=5, volume_down=6)[
+            dict(select=0, back=1, home=2, up=3, down=4, volume_up=5, volume_down=6, menu=7)[
                 button
             ],
         )
@@ -295,7 +295,7 @@ def check_idle_selection(monitor, output, track):
 
 
 def check_album_return(monitor, output):
-    inputs(monitor, ["home", "down", "select"] + ["down"] * 6, None)
+    inputs(monitor, ["home", "select", "select"] + ["down"] * 6, None)
     time.sleep(0.8)
     screen(monitor, output, "album-before-tracks")
     inputs(monitor, ["select"], None)
@@ -317,7 +317,7 @@ def check_album_return(monitor, output):
 
 
 def check_spaced_taps(monitor, output):
-    inputs(monitor, ["home", "down", "select"], None)
+    inputs(monitor, ["home", "select", "select"], None)
     for name, button in [("forward", "down"), ("backward", "up")]:
         time.sleep(1.5)
         before = monitor.status()["ui_trace_next"]
@@ -370,20 +370,22 @@ def check_raw_navigation(monitor, output):
 
     def selections(trace, screen_id):
         return [
-            (event["value"] >> 11) & 0xFFFF
+            (event["value"] >> 11) & 0x7FFF
             for event in trace
-            if event["kind"] == 5 and (event["value"] >> 27) & 7 == screen_id
+            if event["kind"] in (5, 9)
+            and (event["value"] >> (26 if event["kind"] == 9 else 27))
+            & (15 if event["kind"] == 9 else 7) == screen_id
         ]
 
     def enter(menu_row):
-        inputs(monitor, ["home"] + ["down"] * menu_row + ["select"], None)
+        inputs(monitor, ["home", "select"] + ["down"] * menu_row + ["select"], None)
         time.sleep(0.3)
 
     results = {}
     try:
         # These are raw button/wheel levels, including releases, rather than
         # the semantic Up/Down commands used by the animation profiles.
-        for name, menu_row, screen_id in [("tracks", 3, 2), ("covers", 1, 1)]:
+        for name, menu_row, screen_id in [("tracks", 2, 2), ("covers", 0, 1)]:
             enter(menu_row)
             before = monitor.status()["ui_trace_next"]
             sample(1 << 5)
@@ -406,7 +408,7 @@ def check_raw_navigation(monitor, output):
                 selection=positions[-1], trace=trace, released=released
             )
 
-        enter(3)
+        enter(2)
         before = monitor.status()["ui_trace_next"]
         # One control transfer per edge preserves velocity. A status read for
         # every edge would slow the injected gesture below its fast threshold.
@@ -492,7 +494,7 @@ def main():
         results = []
 
         def albums():
-            inputs(monitor, ["home", "down", "select"], None)
+            inputs(monitor, ["home", "select", "select"], None)
             time.sleep(0.5)
 
         def flow():
@@ -508,13 +510,13 @@ def main():
         wait(monitor, lambda s: s["live_played_frames"] > 144000)
         albums()
         results.append(profile(monitor, out, "flow-playing", flow))
-        inputs(monitor, ["home", "select"], None)
+        inputs(monitor, ["home", "down", "down", "select"], None)
         results.append(profile(monitor, out, "volume-playing", volume))
         monitor.command("rebuild")
         wait(monitor, lambda s: s["scan_active"] == 1)
         albums()
         results.append(profile(monitor, out, "flow-scanning", flow))
-        inputs(monitor, ["home", "select"], None)
+        inputs(monitor, ["home", "down", "down", "select"], None)
         results.append(profile(monitor, out, "volume-scanning", volume))
         wait_sampled(
             monitor,
@@ -545,11 +547,11 @@ def main():
         if not gate["passed"]:
             raise RuntimeError(f"UI pacing regression: {gate['failures']}")
         final = check_idle_selection(monitor, out, args.track)
-        # Exercise the retained folder browser and return via Menu.
-        inputs(monitor, ["home"] + ["down"] * 5 + ["select"], None)
+        # Exercise the filesystem folder view and return Home.
+        inputs(monitor, ["home", "select"] + ["down"] * 3 + ["select"], None)
         time.sleep(0.5)
         screen(monitor, out, "folders")
-        inputs(monitor, ["home", "down", "select"], None)
+        inputs(monitor, ["home", "select", "select"], None)
         time.sleep(0.5)
         screen(monitor, out, "albums")
         check_album_return(monitor, out)

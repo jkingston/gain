@@ -38,7 +38,8 @@ SPL/U-Boot and a Gain SD loader in the normal kernel slot. The build provides:
 - native FLAC decoding and bounded C backends for MP3, AAC, ALAC, Vorbis and Opus;
 - identified ES9018K2M, filters, de-emphasis, mute and output routing;
 - linked-PDMA PCM playback with source-validated buffer ownership;
-- music home, album Cover Flow, album track lists, now-playing and folder browsing;
+- device home, music menus, album Cover Flow, artist/track lists and folder browsing;
+- a captured playback queue, shuffle, repeat and contextual playback controls;
 - DAC hardware volume and bounded, priority-aware display updates;
 - a watchdog-backed panic screen.
 
@@ -347,7 +348,7 @@ buffers with silence before the output FIFO drains. Linked-descriptor interrupts
 wake output directly; a one-period watchdog bounds a missing notification.
 
 MP4 has direct sample lookup. MP3, FLAC and Ogg decoder seeking currently
-replays from the beginning. Hold Menu on Now Playing to preview a seek position,
+replays from the beginning. Choose Menu → Seek on Now Playing to preview a position,
 move with previous/next or the wheel, then Play to confirm or Back to cancel.
 Seeking joins the existing workers before restarting at the requested frame;
 pause remains paused across a seek. MP4 uses direct sample lookup. MP4/Ogg title parsing is available to decoder callers. Metadata and artwork support is described in the library section. Analogue
@@ -498,6 +499,31 @@ avoids duplicate ownership/type identities for the shared UI sources. Apps that
 only need the pixel/input contract may import `src/simulator.zig` directly. The
 module ABI is desktop development tooling, independent of any future firmware
 extension system.
+
+The player opens at Home with Music, Settings and, once a listening session
+exists, Now Playing. Music offers Albums, Artists, Songs, Folders and Shuffle
+All. Artists retain both their complete song list and individual albums.
+
+Press Menu for actions; hold it for 500 ms to return Home. Back closes actions
+or restores the preceding screen and selection. Collection actions offer Play
+All and Shuffle; long lists also offer Jump. Now Playing actions contain Queue,
+Shuffle (Off/On), Repeat (Off/All/One) and Seek. Play selects a row and toggles
+pause on Now Playing. Previous/Next scroll menus with hold-repeat and acceleration,
+while skipping tracks on Now Playing. Volume uses the physical volume buttons.
+
+Starting a collection captures its membership and resets playback modes.
+Selecting a song starts that collection at the chosen song. Queue selections
+retain the queue. Shuffle changes future order without restarting the current
+song, and disabling it restores canonical order. Repeat All wraps that queue;
+Repeat One affects automatic completion, while manual skips still advance.
+Browsing and progressive library updates do not replace a listening session.
+
+Folders use filesystem names from the scanner's directory snapshot, with
+folders first and natural filename sorting. Preview tracks can introduce new
+folders before a scan finishes. Folder playback includes only direct children;
+subfolders are not played recursively. All browsing and context-menu rendering
+remain free of filesystem I/O. Files awaiting usable index metadata are marked
+Pending or Unavailable rather than entering a separate player.
 
 The production player UI is one optional app for this host. Build it separately;
 the simulator itself has no player dependency:

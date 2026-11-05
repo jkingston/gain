@@ -359,6 +359,7 @@ fn apply(command: media.PlaybackCommand, at: u64) void {
     switch (command) {
         .none, .set_attenuation => {},
         .stop => {
+            base_frames = state.status.played_frames;
             playing = false;
             paused = false;
         },
@@ -411,6 +412,20 @@ fn input(event: api.Event, at: u64) callconv(.c) void {
     apply(state.button(button, event.phase == .press, at, playing), at);
 }
 
+fn transportStatus(at: u64) void {
+    if (state.playing_track) |track| {
+        const rate = @max(1, track.meta.sample_rate);
+        const total = track.meta.duration_ms * rate / 1000;
+        state.status = .{
+            .phase = if (!playing) .preparing else if (paused) .paused else .playing,
+            .sample_rate = rate,
+            .output_format = .signed_24_in_u32,
+            .total_frames = total,
+            .played_frames = if (playing and !paused) @min(total, base_frames + (at -| started_at) * rate / 1000) else base_frames,
+        };
+    }
+}
+
 fn frame(pixels: *api.Pixels, at: u64) callconv(.c) bool {
     lock();
     if (usb_phase) |phase| {
@@ -433,16 +448,16 @@ fn frame(pixels: *api.Pixels, at: u64) callconv(.c) bool {
         loadCatalogue() catch |failure| std.debug.print("Player UI catalogue: {s}\n", .{@errorName(failure)});
     }
     apply(state.repeat(at, state.input_policy.held, playing), at);
-    if (state.playing_track) |track| {
-        const rate = @max(1, track.meta.sample_rate);
-        const total = track.meta.duration_ms * rate / 1000;
-        state.status = .{
-            .phase = if (!playing) .preparing else if (paused) .paused else .playing,
-            .sample_rate = rate,
-            .output_format = .signed_24_in_u32,
-            .total_frames = total,
-            .played_frames = if (playing and !paused) @min(total, base_frames + (at -| started_at) * rate / 1000) else base_frames,
-        };
+    transportStatus(at);
+    if (playing and !paused and state.status.total_frames != 0 and state.status.played_frames == state.status.total_frames) {
+        if (state.finishedTrack()) |track| {
+            state.queue(track);
+            apply(.none, at);
+        } else {
+            base_frames = state.status.total_frames;
+            playing = false;
+        }
+        transportStatus(at);
     }
     state.frame(at);
     if (presented_revision == Platform.Display.revision) return false;
@@ -556,4 +571,32 @@ export fn gain_player_environment(millivolts: u32, charging: u32, usb: u32, exte
     state.dirty = true;
     state.major = true;
     return true;
+}
+
+/// Versioned app-only playback diagnostics; the generic simulator remains
+/// unaware of queues, playback modes and context menus.
+const PlaybackStatus = extern struct {
+    version: u32 = 1,
+    count: u32,
+    cursor: u32,
+    shuffle: u32,
+    repeat: u32,
+    menu_open: u32,
+    menu_selection: u32,
+    paused: u32,
+    sample_rate: u32,
+    played_frames: u64,
+    total_frames: u64,
+};
+
+export fn gain_player_playback_status(output: *PlaybackStatus) callconv(.c) void {
+    lock();
+    defer unlock();
+    output.* = .{ .count = @intCast(state.track_store.order.count), .cursor = @intCast(state.track_store.order.cursor), .shuffle = @intFromBool(state.track_store.order.shuffled), .repeat = @backingInt(state.track_store.order.repeat), .menu_open = @intFromBool(state.menu != null), .menu_selection = if (state.menu) |menu| @intCast(menu.selection) else 0, .paused = @intFromBool(paused), .sample_rate = state.status.sample_rate, .played_frames = state.status.played_frames, .total_frames = state.status.total_frames };
+}
+
+export fn gain_player_queue_item(position: u32) callconv(.c) u64 {
+    lock();
+    defer unlock();
+    return state.track_store.order.at(position) orelse 0;
 }
