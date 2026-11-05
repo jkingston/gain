@@ -16,6 +16,7 @@ const LcdDma = @import("f20_display.zig");
 const memory = board.memory;
 const Timer = x1000.Timer;
 const Watchdog = x1000.Watchdog;
+var appearance: @import("music_chrome.zig").Appearance = .light;
 var text_loader: ?*@import("f20_text.zig").Loader = null;
 
 const Display = struct {
@@ -349,6 +350,7 @@ export fn gain_main() callconv(.c) noreturn {
 }
 
 fn runUsbMode(pmic: *@import("f20_power.zig").Controller) void {
+    LcdDma.setAwake(true);
     diag.flush();
     diag.event(.usb, .{ 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 });
     const view = @import("usb_view.zig");
@@ -374,7 +376,7 @@ fn runUsbMode(pmic: *@import("f20_power.zig").Controller) void {
         };
         const power = @import("battery.zig").Status.fromPower(if (diag.report.power_valid & 1 != 0) diag.report.battery_mv else 0, diag.report.power_valid & (1 << 5) != 0, diag.report.power_valid & (1 << 3) != 0);
         if (previous_phase == null or previous_phase.? != phase or !std.meta.eql(previous_power, power)) {
-            view.render(@import("canvas.zig").Canvas.init(LcdDma.framebuffer), phase, power);
+            view.renderThemed(@import("canvas.zig").Canvas.init(LcdDma.framebuffer), phase, power, appearance);
             _ = Display.present();
             previous_phase = phase;
             previous_power = power;
@@ -472,6 +474,11 @@ const MusicSession = struct {
         } else self.power_started = null;
         self.state.refreshBattery(if (diag.report.power_valid & 1 != 0) diag.report.battery_mv else 0, diag.report.power_valid & (1 << 5) != 0, diag.report.power_valid & (1 << 3) != 0, now_ms);
         self.state.frame(self.now());
+        const health = &@import("health.zig").snapshot;
+        health.ui_locked = @intFromBool(self.state.locked);
+        health.ui_appearance = @backingInt(self.state.appearance);
+        health.ui_attenuation = self.state.attenuation;
+        health.ui_backlight_active = @intFromBool(board.display.backlight.get());
         if (self.state.failure) return .stop;
         return result;
     }
@@ -512,7 +519,7 @@ fn browseMusic(volume: *Volume, battery_mv: u32, attenuation: *u8, input: *Input
         text.deinit();
     }
     index.request(false);
-    var state = @import("f20_music_ui.zig").State{ .index = &index, .covers = &covers.cache, .text_cache = &text.cache, .attenuation = attenuation.*, .battery_mv = battery_mv, .track_store = @import("track_selection.zig").Store.init(memory.scan_artwork.cachedSlice(u8)) };
+    var state = @import("f20_music_ui.zig").State{ .index = &index, .covers = &covers.cache, .text_cache = &text.cache, .attenuation = attenuation.*, .battery_mv = battery_mv, .appearance = appearance, .track_store = @import("track_selection.zig").Store.init(memory.scan_artwork.cachedSlice(u8)) };
     var session = MusicSession{ .state = &state, .input = input, .pmic = pmic };
     // Font source polls occur between card transactions, so a long font read
     // can give urgent artwork a turn without adding a second storage owner.
@@ -528,6 +535,7 @@ fn browseMusic(volume: *Volume, battery_mv: u32, attenuation: *u8, input: *Input
         covers.idle_yield = null;
     }
     defer attenuation.* = state.attenuation;
+    defer appearance = state.appearance;
     var last_flush = Timer.now();
     diag.booted();
     while (true) {

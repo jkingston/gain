@@ -16,6 +16,8 @@ pub const framebuffer: *[board.width * board.height]u16 = @ptrFromInt(board.fram
 const snapshot: *[board.width * board.height]u16 = @ptrFromInt(board.dma_snapshot_address);
 const next_snapshot: *[board.width * board.height]u16 = @ptrFromInt(@import("f20_memory.zig").display_next.uncached());
 var state = presentation.State{};
+var awake = true;
+
 const timeout_ticks = x.Timer.milliseconds(100);
 const quick_disable_done = @as(u32, 1) << 7;
 var panel_config: phase.Config = undefined;
@@ -28,6 +30,13 @@ pub var last_failure: ?anyerror = null;
 var prepared_region: Region = undefined;
 var prepared_source: usize = 0;
 const fifo_underrun = @as(u32, 1) << 2;
+
+/// Backlight permission is independent of DMA ownership. A late completion
+/// must not relight a locked player; waking waits for the next fresh transfer.
+pub fn setAwake(enabled: bool) void {
+    if (awake and !enabled) board.backlight.set(false);
+    awake = enabled;
+}
 
 pub fn waitReady() !void {
     const began = x.Timer.now();
@@ -319,7 +328,7 @@ pub fn poll() Poll {
         .release => {
             trace.record(.release, x.Timer.now(), 0);
             restoreDirect();
-            board.backlight.set(true);
+            board.backlight.set(awake);
             return .idle;
         },
     }

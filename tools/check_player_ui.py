@@ -303,6 +303,42 @@ def qualify(app, root, synthetic=False):
         assert player.status()["playing"]
         original = player.queue()
         assert original and len(original) == len(set(original))
+        # A long transport press changes position once, on release, with the
+        # current track and captured queue intact. The app clock is deterministic.
+        player.tap("select")  # Pause so the expected position has no wall-time drift.
+        current_id = player.status()["playing_id"]
+        position = player.playback()["played_frames"]
+        player.edge("next")
+        player.frame(450)
+        assert player.status()["playing_id"] == current_id
+        assert player.playback()["played_frames"] == position
+        player.edge("next", False)
+        player.frame()
+        assert player.playback()["played_frames"] > position
+        assert player.playback()["paused"] == 1
+        assert player.queue() == original
+        # Hold Back provides queue access without consuming a short Back.
+        player.edge("back")
+        player.frame(510)
+        player.edge("back", False)
+        player.frame()
+        assert player.status()["screen"] == 2
+        assert player.queue() == original
+        assert player.tap("back")["screen"] == 3
+        # Lock blocks controls, keeps the paused transport, and paints black.
+        player.tap("power")
+        assert all(pixel == 0 for pixel in player.pixels)
+        player.tap("select", "next", "volume_up")
+        assert player.status()["playing_id"] == current_id
+        assert player.playback()["paused"] == 1
+        player.tap("power")
+        assert any(pixel != 0 for pixel in player.pixels)
+        player.edge("previous")
+        player.frame(450)
+        player.edge("previous", False)
+        player.frame()
+        player.tap("select")  # Resume for the existing queue/mode checks.
+
         player.tap("select")  # Pause before changing modes.
         position = player.playback()["played_frames"]
         current = player.status()["playing_id"]

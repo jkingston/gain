@@ -28,6 +28,10 @@ pub const Snapshot = extern struct {
     playback_phase: u32 = 0,
     queue_count: u32 = 0,
     queue_cursor: u32 = 0,
+    ui_locked: u32 = 0,
+    ui_appearance: u32 = 0,
+    ui_attenuation: u32 = 0,
+    ui_backlight_active: u32 = 0,
 };
 pub var snapshot: Snapshot = .{};
 pub fn charger(configuration: @import("axp192.zig").ChargerConfiguration) void {

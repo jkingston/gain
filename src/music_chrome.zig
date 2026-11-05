@@ -2,12 +2,50 @@
 const draw = @import("canvas.zig");
 const battery = @import("battery.zig");
 
-pub const paper = draw.rgb(247, 247, 242);
-pub const ink = draw.rgb(31, 42, 44);
-pub const muted = draw.rgb(102, 114, 113);
-pub const line = draw.rgb(217, 222, 216);
-pub const accent = draw.rgb(35, 101, 91);
-pub const selected = draw.rgb(226, 234, 225);
+pub const Palette = struct {
+    paper: draw.Color,
+    ink: draw.Color,
+    muted: draw.Color,
+    line: draw.Color,
+    accent: draw.Color,
+    selected: draw.Color,
+};
+
+pub const Appearance = enum {
+    light,
+    dark,
+
+    pub fn palette(self: Appearance) Palette {
+        return switch (self) {
+            .light => light,
+            .dark => dark,
+        };
+    }
+};
+
+pub const light = Palette{
+    .paper = draw.rgb(247, 247, 242),
+    .ink = draw.rgb(31, 42, 44),
+    .muted = draw.rgb(102, 114, 113),
+    .line = draw.rgb(217, 222, 216),
+    .accent = draw.rgb(35, 101, 91),
+    .selected = draw.rgb(226, 234, 225),
+};
+pub const dark = Palette{
+    .paper = draw.rgb(22, 28, 29),
+    .ink = draw.rgb(235, 239, 232),
+    .muted = draw.rgb(159, 176, 172),
+    .line = draw.rgb(60, 74, 71),
+    .accent = draw.rgb(142, 207, 184),
+    .selected = draw.rgb(43, 65, 59),
+};
+// Compatibility for static callers; live controllers carry their own palette.
+pub const paper = light.paper;
+pub const ink = light.ink;
+pub const muted = light.muted;
+pub const line = light.line;
+pub const accent = light.accent;
+pub const selected = light.selected;
 
 pub const Layout = struct {
     pub const left = 16;
@@ -49,31 +87,39 @@ pub const Layout = struct {
 };
 
 pub fn header(c: draw.Canvas, title: []const u8, detail: []const u8, status: battery.Status) void {
+    headerThemed(c, title, detail, status, light);
+}
+
+pub fn headerThemed(c: draw.Canvas, title: []const u8, detail: []const u8, status: battery.Status, palette: Palette) void {
     const detail_right = Layout.detail_right;
     const title_right: i32 = if (detail.len == 0) detail_right else detail_right - @as(i32, draw.textWidth(detail, .caption)) - 12;
-    c.ellipsis(Layout.left, Layout.headerText(.serif), @intCast(@max(0, title_right - Layout.left)), title, .serif, ink);
-    c.right(detail_right, Layout.headerText(.caption), detail, .caption, muted);
-    c.fill(Layout.left, Layout.header_rule_top, Layout.width, 1, line);
-    batteryIcon(c, status);
+    c.ellipsis(Layout.left, Layout.headerText(.serif), @intCast(@max(0, title_right - Layout.left)), title, .serif, palette.ink);
+    c.right(detail_right, Layout.headerText(.caption), detail, .caption, palette.muted);
+    c.fill(Layout.left, Layout.header_rule_top, Layout.width, 1, palette.line);
+    batteryIconThemed(c, status, palette);
 }
 
 pub fn batteryIcon(c: draw.Canvas, status: battery.Status) void {
+    batteryIconThemed(c, status, light);
+}
+
+pub fn batteryIconThemed(c: draw.Canvas, status: battery.Status, palette: Palette) void {
     const left = Layout.battery_left;
     const top = Layout.battery_top;
-    const color = if (status.kind == .low or status.kind == .empty) draw.rgb(174, 65, 47) else accent;
+    const color = if (status.kind == .low or status.kind == .empty) draw.rgb(174, 65, 47) else palette.accent;
     // Own the entire fixed slot so removing a power badge leaves no stale pixels.
-    c.fill(Layout.power_badge_left, top, Layout.right - Layout.power_badge_left, Layout.battery_height, paper);
-    c.fill(left, top, Layout.battery_width, Layout.battery_height, muted);
-    c.pixel(left, top, paper);
-    c.pixel(left + Layout.battery_width - 1, top, paper);
-    c.pixel(left, top + Layout.battery_height - 1, paper);
-    c.pixel(left + Layout.battery_width - 1, top + Layout.battery_height - 1, paper);
-    c.fill(left + 1, top + 1, Layout.battery_width - 2, Layout.battery_height - 2, paper);
-    c.fill(Layout.right - 2, top + (Layout.battery_height - 4) / 2, 2, 4, muted);
+    c.fill(Layout.power_badge_left, top, Layout.right - Layout.power_badge_left, Layout.battery_height, palette.paper);
+    c.fill(left, top, Layout.battery_width, Layout.battery_height, palette.muted);
+    c.pixel(left, top, palette.paper);
+    c.pixel(left + Layout.battery_width - 1, top, palette.paper);
+    c.pixel(left, top + Layout.battery_height - 1, palette.paper);
+    c.pixel(left + Layout.battery_width - 1, top + Layout.battery_height - 1, palette.paper);
+    c.fill(left + 1, top + 1, Layout.battery_width - 2, Layout.battery_height - 2, palette.paper);
+    c.fill(Layout.right - 2, top + (Layout.battery_height - 4) / 2, 2, 4, palette.muted);
     const fill_width = Layout.battery_width - 4;
     const fill_height = Layout.battery_height - 4;
     if (status.kind == .unknown) {
-        c.fill(left + Layout.battery_width / 2 - 2, top + Layout.battery_height / 2 - 1, 5, 2, muted);
+        c.fill(left + Layout.battery_width / 2 - 2, top + Layout.battery_height / 2 - 1, 5, 2, palette.muted);
     } else if (status.level > 0) {
         const width: u16 = @as(u16, @min(status.level, 4)) * fill_width / 4;
         c.fill(left + 2, top + 2, width, fill_height, color);
@@ -86,14 +132,14 @@ pub fn batteryIcon(c: draw.Canvas, status: battery.Status) void {
         // The bolt has its own fixed space; neither icon nor title shifts.
         const offsets = [_]u8{ 6, 5, 4, 3, 2, 1, 4, 4, 3, 2, 2, 1 };
         const widths = [_]u8{ 2, 2, 2, 2, 6, 7, 3, 2, 2, 2, 1, 1 };
-        for (offsets, widths, 0..) |offset, width, row| c.fill(badge_left + 1 + @as(i32, offset), badge_top + @as(i32, @intCast(row)), width, 1, accent);
+        for (offsets, widths, 0..) |offset, width, row| c.fill(badge_left + 1 + @as(i32, offset), badge_top + @as(i32, @intCast(row)), width, 1, palette.accent);
     } else if (status.badge() == .plugged) {
-        c.fill(badge_left + 2, badge_top, 2, 3, accent);
-        c.fill(badge_left + 6, badge_top, 2, 3, accent);
-        c.fill(badge_left + 1, badge_top + 3, 8, 4, accent);
-        c.fill(badge_left + 2, badge_top + 7, 6, 1, accent);
-        c.fill(badge_left + 3, badge_top + 8, 4, 1, accent);
-        c.fill(badge_left + 4, badge_top + 9, 2, 3, accent);
+        c.fill(badge_left + 2, badge_top, 2, 3, palette.accent);
+        c.fill(badge_left + 6, badge_top, 2, 3, palette.accent);
+        c.fill(badge_left + 1, badge_top + 3, 8, 4, palette.accent);
+        c.fill(badge_left + 2, badge_top + 7, 6, 1, palette.accent);
+        c.fill(badge_left + 3, badge_top + 8, 4, 1, palette.accent);
+        c.fill(badge_left + 4, badge_top + 9, 2, 3, palette.accent);
     }
 }
 

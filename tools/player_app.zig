@@ -269,8 +269,18 @@ const Platform = struct {
         var frozen: api.Pixels = undefined;
         var presented: api.Pixels = undefined;
         var revision: u64 = 0;
+        var awake = true;
         pub const framebuffer = &pixels;
         pub const last_failure: ?anyerror = null;
+
+        pub fn setAwake(enabled: bool) void {
+            if (awake == enabled) return;
+            awake = enabled;
+            if (!enabled) {
+                @memset(&presented, 0);
+                revision +%= 1;
+            }
+        }
 
         pub fn renderIntervalMs() u64 {
             return 16;
@@ -432,7 +442,7 @@ fn frame(pixels: *api.Pixels, at: u64) callconv(.c) bool {
         defer unlock();
         milliseconds = at;
         if (!usb_dirty) return false;
-        gain.usb_view.render(gain.canvas.Canvas.init(pixels), phase, power);
+        gain.usb_view.renderThemed(gain.canvas.Canvas.init(pixels), phase, power, state.appearance);
         usb_dirty = false;
         return true;
     }

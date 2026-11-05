@@ -15,16 +15,10 @@ const cover_loading = @import("cover_loading.zig");
 
 const chrome = @import("music_chrome.zig");
 const battery_status = @import("battery.zig");
-const paper = chrome.paper;
-const ink = chrome.ink;
-const muted = chrome.muted;
-const line = chrome.line;
-const accent = chrome.accent;
-const selected = chrome.selected;
 
 pub const Input = enum(u3) { select, back, home, up, down, volume_up, volume_down, menu };
 
-pub const Screen = enum { home, albums, tracks, player, library, artists, artist, settings, music, folders };
+pub const Screen = enum { home, albums, tracks, player, library, artists, artist, settings, music, folders, themes };
 pub const TrackScope = enum { album, artist, all, queue, folder };
 const MusicItem = enum { albums, artists, songs, folders, shuffle_all };
 const music_items = [_]MusicItem{ .albums, .artists, .songs, .folders, .shuffle_all };
@@ -37,7 +31,7 @@ const ContextMenu = struct {
     empty: bool = false,
 
     fn count(self: ContextMenu) usize {
-        return if (self.empty) 0 else if (self.kind == .player) 4 else if (self.jump) 3 else 2;
+        return if (self.empty) 0 else if (self.kind == .player) 3 else if (self.jump) 3 else 2;
     }
 };
 const Location = struct {
@@ -77,6 +71,10 @@ pub fn Controller(comptime Platform: type) type {
         menu_directory: [4096]u8 = undefined,
         history: [8]Location = undefined,
         history_count: usize = 0,
+        appearance: chrome.Appearance = .light,
+        locked: bool = false,
+        power_at: ?u64 = null,
+        seek_frame: ?u64 = null,
         shuffle_seed: u64 = 0x4741494e,
 
         album_id: u64 = 0,
@@ -168,6 +166,7 @@ pub fn Controller(comptime Platform: type) type {
         }
 
         pub fn queue(self: *State, track: *const core.Track) void {
+            self.cancelInput(self.input_policy.held);
             self.requested_start_frame = 0;
             self.resume_paused = false;
             self.requested_track = self.track_store.queue(track) catch |failure| {
@@ -468,10 +467,6 @@ pub fn Controller(comptime Platform: type) type {
                     .all => .one,
                     .one => .off,
                 },
-                3 => {
-                    self.menu = null;
-                    return self.act(.jump, now, playing);
-                },
                 else => unreachable,
             } else if (menu.selection == 2) {
                 self.menu = null;
@@ -556,7 +551,8 @@ pub fn Controller(comptime Platform: type) type {
                     .folder => self.collectionCount(.{ .scope = .folder, .directory = self.folderPath() }),
                 },
                 .library => 2,
-                .settings => 2,
+                .settings => 3,
+                .themes => 2,
                 .folders => self.folder_view.count,
                 .player => 0,
             };
@@ -585,6 +581,7 @@ pub fn Controller(comptime Platform: type) type {
         }
 
         pub fn cancelInput(self: *State, held: u8) void {
+            self.seek_frame = null;
             self.input_policy.cancel(held);
             self.raw_held = held;
         }
@@ -592,10 +589,30 @@ pub fn Controller(comptime Platform: type) type {
         pub fn button(self: *State, key: navigation.Button, pressed: bool, now: u64, playing: bool) media.PlaybackCommand {
             self.reconcile();
             if (pressed) self.raw_held |= key.mask() else self.raw_held &= ~key.mask();
+            if (key == .power) {
+                if (pressed) {
+                    self.power_at = now;
+                } else if (self.power_at) |at| {
+                    self.power_at = null;
+                    // The hardware session owns long-Power shutdown. A short
+                    // release exclusively toggles the pocket lock.
+                    if (now -| at < 1500) {
+                        self.locked = !self.locked;
+                        self.cancelInput(self.raw_held);
+                        self.rendered_screen = null;
+                        self.pending_frame.ready = false;
+                        self.dirty = true;
+                        self.major = true;
+                    }
+                }
+                return .none;
+            }
+            if (self.locked) return .none;
             return self.act(self.input_policy.edge(key, pressed, now, self.inputContext(), if (self.menu != null) self.menu.?.count() else if (self.jump_position != null or (self.screen == .player and self.status.total_frames != 0)) 21 else self.rows()), now, playing);
         }
 
         pub fn wheel(self: *State, direction: i2, now: u64, playing: bool) media.PlaybackCommand {
+            if (self.locked) return .none;
             self.reconcile();
             return self.act(self.input_policy.wheel(direction, now, self.inputContext(), if (self.menu != null) self.menu.?.count() else if (self.jump_position != null) 8 else if (self.screen == .player and self.status.total_frames != 0) 21 else self.rows()), now, playing);
         }
@@ -603,6 +620,7 @@ pub fn Controller(comptime Platform: type) type {
         pub fn repeat(self: *State, now: u64, held: u8, playing: bool) media.PlaybackCommand {
             self.reconcile();
             self.raw_held = held;
+            if (self.locked) return .none;
             return self.act(self.input_policy.tick(now, self.inputContext(), if (self.menu != null) self.menu.?.count() else if (self.jump_position != null) 8 else if (self.screen == .player and self.status.total_frames != 0) 21 else self.rows(), held), now, playing);
         }
 
@@ -619,7 +637,6 @@ pub fn Controller(comptime Platform: type) type {
                     self.jump_position = null;
                     self.cancelInput(self.input_policy.held);
                     if (action == .select) {
-                        if (self.screen == .player and self.status.total_frames != 0) return .{ .seek_to = self.status.total_frames * position / 20 };
                         const target = (self.rows() -| 1) * position / 20;
                         self.moveBy(@as(i32, @intCast(target)) - @as(i32, @intCast(self.selection)), now);
                     }
@@ -632,6 +649,17 @@ pub fn Controller(comptime Platform: type) type {
             };
             switch (action) {
                 .none => return .none,
+                .queue => {
+                    if (self.playing_track == null or self.track_store.order.count == 0) return .none;
+                    self.menu = null;
+                    if (self.screen != .tracks or self.track_scope != .queue) self.push(.tracks);
+                    self.track_scope = .queue;
+                    self.selection = self.track_store.order.cursor;
+                    self.ensureVisible();
+                    self.dirty = true;
+                    self.major = true;
+                    return .none;
+                },
                 .move => |delta| {
                     if (self.menu) |*menu| {
                         menu.selection = navigation.move(menu.selection, menu.count(), delta);
@@ -644,11 +672,28 @@ pub fn Controller(comptime Platform: type) type {
                     return .none;
                 },
                 .jump => {
-                    self.jump_position = if (self.screen == .player and self.status.total_frames != 0) @intCast(@min(20, self.status.played_frames * 20 / self.status.total_frames)) else if (self.rows() > 1) self.selection * 20 / (self.rows() - 1) else 0;
+                    if (self.screen == .player) return .none;
+                    self.jump_position = if (self.rows() > 1) self.selection * 20 / (self.rows() - 1) else 0;
                     self.cancelInput(self.input_policy.held);
                     self.dirty = true;
                     self.major = true;
                     return .none;
+                },
+                .scrub => |seconds| {
+                    if (!playing or self.status.total_frames == 0) return .none;
+                    const current = self.seek_frame orelse self.status.played_frames;
+                    const frames = @as(u64, @intCast(@abs(seconds))) * self.status.sample_rate;
+                    const target = @min(self.status.total_frames - 1, if (seconds < 0) current -| frames else current +| frames);
+                    if (target == current) return .none;
+                    self.seek_frame = target;
+                    self.dirty = true;
+                    return .none;
+                },
+                .commit_seek => {
+                    const target = self.seek_frame orelse return .none;
+                    self.seek_frame = null;
+                    self.dirty = true;
+                    return if (playing) .{ .seek_to = target } else .none;
                 },
                 .previous => return if (playing) .previous else .none,
                 .next => return if (playing) .next else .none,
@@ -692,7 +737,7 @@ pub fn Controller(comptime Platform: type) type {
 
         pub fn handle(self: *State, event: Input, now: u64, playing: bool) media.PlaybackCommand {
             self.reconcile();
-            if (self.screen == .player or (event != .volume_up and event != .volume_down)) self.dirty = true;
+            if (event != .volume_up and event != .volume_down) self.dirty = true;
             if (event == .menu) {
                 self.openMenu();
                 return .none;
@@ -712,8 +757,10 @@ pub fn Controller(comptime Platform: type) type {
             switch (event) {
                 .menu => unreachable,
                 .volume_up, .volume_down => {
-                    self.attenuation = if (event == .volume_up) self.attenuation -| 4 else @min(128, self.attenuation +| 4);
-                    self.attenuation = @max(16, self.attenuation);
+                    const attenuation = @max(16, if (event == .volume_up) self.attenuation -| 4 else @min(128, self.attenuation +| 4));
+                    if (attenuation == self.attenuation) return .none;
+                    self.attenuation = attenuation;
+                    if (self.screen == .player) self.dirty = true;
                     self.animation.request(now, @as(u32, 128 - self.attenuation) * 100 / 112);
                     return .{ .set_attenuation = self.attenuation };
                 },
@@ -785,7 +832,16 @@ pub fn Controller(comptime Platform: type) type {
                         }
                     },
                     .library => self.index.request(self.selection == 1),
-                    .settings => if (self.selection == 1) {
+                    .themes => {
+                        self.appearance = @fromBackingInt(@intCast(self.selection));
+                        self.rendered_screen = null;
+                        self.pending_frame.ready = false;
+                        self.major = true;
+                    },
+                    .settings => if (self.selection == 2) {
+                        self.push(.themes);
+                        self.selection = @backingInt(self.appearance);
+                    } else if (self.selection == 1) {
                         self.push(.library);
                     } else {
                         self.replay_gain.mode = switch (self.replay_gain.mode) {
@@ -905,6 +961,13 @@ pub fn Controller(comptime Platform: type) type {
         }
 
         pub fn frame(self: *State, now: u64) void {
+            if (@hasDecl(lcd, "setAwake")) lcd.setAwake(!self.locked);
+            if (self.locked) {
+                // Drain an already-owned transfer, but submit no new frames.
+                // The audio/storage executive keeps running independently.
+                if (lcd.poll() == .failed) self.fail(lcd.last_failure orelse error.DisplayBusy);
+                return;
+            }
             if (self.text_cache) |cache| {
                 const revision = cache.revision.load(.acquire);
                 if (revision != self.text_revision) {
@@ -1041,9 +1104,12 @@ pub fn Controller(comptime Platform: type) type {
             c.centered(@divTrunc(320 - @as(i32, width), 2), y, width, text, role, color);
         }
 
-        fn menuRow(_: *State, c: C, row: usize, name: []const u8, value: []const u8, highlighted: bool, chevron: bool) void {
+        fn menuRow(self: *State, c: C, row: usize, name: []const u8, value: []const u8, highlighted: bool, chevron: bool) void {
+            const accent = self.appearance.palette().accent;
+            const ink = self.appearance.palette().ink;
+            const muted = self.appearance.palette().muted;
             const y: i32 = Layout.row_top + @as(i32, @intCast(row)) * Layout.row_height;
-            if (highlighted) highlightRow(c, y);
+            if (highlighted) self.highlightRow(c, y);
             const color = if (highlighted) accent else ink;
             label(c, Layout.left, Layout.rowText(y, .reading), if (value.len == 0) 268 else 190, name, .reading, color);
             if (value.len != 0) c.right(Layout.right, Layout.rowText(y, .reading), value, .reading, color);
@@ -1051,33 +1117,14 @@ pub fn Controller(comptime Platform: type) type {
         }
 
         fn playbackModes(self: *const State, c: C) void {
-            if (self.track_store.order.shuffled) {
-                for (0..12) |i| {
-                    const x: i32 = 255 + @as(i32, @intCast(i));
-                    const dy: i32 = @intCast(i * 8 / 11);
-                    c.fill(x, 164 + dy, 1, 2, muted);
-                    c.fill(x, 172 - dy, 1, 2, muted);
-                }
-                c.fill(263, 163, 5, 2, muted);
-                c.fill(263, 172, 5, 2, muted);
-            }
-            if (self.track_store.order.repeat != .off) {
-                c.rounded(283, 163, 18, 12, 3, muted);
-                c.rounded(285, 165, 14, 8, 2, paper);
-                c.fill(282, 169, 4, 5, paper);
-                c.fill(298, 164, 4, 5, paper);
-                c.fill(282, 169, 5, 2, muted);
-                c.fill(297, 167, 5, 2, muted);
-                if (self.track_store.order.repeat == .one) {
-                    c.fill(291, 166, 1, 6, muted);
-                    c.pixel(290, 167, muted);
-                    c.fill(290, 172, 3, 1, muted);
-                }
-            }
+            const icons = @import("playback_icons.zig");
+            const color = self.appearance.palette().muted;
+            if (self.track_store.order.shuffled) icons.paint(c, 252, 162, .shuffle, color);
+            if (self.track_store.order.repeat != .off) icons.paint(c, 281, 162, if (self.track_store.order.repeat == .one) .repeat_one else .repeat_all, color);
         }
 
         fn header(self: *State, c: C, title: []const u8, detail: []const u8) void {
-            chrome.header(c, title, detail, battery_status.Status.fromPower(self.battery_mv, self.charging, self.external_power));
+            chrome.headerThemed(c, title, detail, battery_status.Status.fromPower(self.battery_mv, self.charging, self.external_power), self.appearance.palette());
         }
 
         fn requestCovers(self: *State, now: u64) void {
@@ -1104,11 +1151,13 @@ pub fn Controller(comptime Platform: type) type {
             self.cover_plan_revision = view.revision;
         }
 
-        fn highlightRow(c: C, top: i32) void {
+        fn highlightRow(self: *const State, c: C, top: i32) void {
+            const selected = self.appearance.palette().selected;
             c.rounded(Layout.left - 8, top, Layout.width + 16, Layout.row_height, 4, selected);
         }
 
         fn image(self: *State, c: C, album: views.Album, x: i32, y: i32, w: u16, h: u16, lean: i32) void {
+            const line = self.appearance.palette().line;
             const tile = self.covers.get(album.id, album.art) orelse {
                 c.rounded(x, y, w, h, 2, line);
                 return;
@@ -1147,19 +1196,23 @@ pub fn Controller(comptime Platform: type) type {
         }
 
         fn timeline(self: *State, c: C, now: u64) void {
+            const line = self.appearance.palette().line;
+            const accent = self.appearance.palette().accent;
+            const muted = self.appearance.palette().muted;
+            const paper = self.appearance.palette().paper;
             var buf: [96]u8 = undefined;
-            const mix = self.animation.mix(now);
+            const mix = if (self.seek_frame != null) 0 else self.animation.mix(now);
             const volume_width: u16 = @intFromFloat(std.math.clamp(self.animation.value(now) / 100, 0, 1) * 288);
-            const progress_width: u16 = @intCast(if (self.status.total_frames > 0) @min(288, self.status.played_frames * 288 / self.status.total_frames) else 0);
+            const progress_width: u16 = @intCast(if (self.status.total_frames > 0) @min(288, (self.seek_frame orelse self.status.played_frames) * 288 / self.status.total_frames) else 0);
             const opacity: u8 = @intFromFloat(mix * 255);
-            c.rounded(Layout.left, Layout.timeline_top, Layout.width, 12, 3, line);
-            if (volume_width > 0) c.rounded(Layout.left, Layout.timeline_top, volume_width, 12, 3, draw.blend(line, accent, opacity));
-            if (progress_width > 0) c.rounded(Layout.left, Layout.timeline_top, progress_width, 12, 3, draw.blend(line, accent, 255 - opacity));
+            c.fill(Layout.left, Layout.timeline_top, Layout.width, 12, line);
+            if (volume_width > 0) c.fill(Layout.left, Layout.timeline_top, volume_width, 12, draw.blend(line, accent, opacity));
+            if (progress_width > 0) c.fill(Layout.left, Layout.timeline_top, progress_width, 12, draw.blend(line, accent, 255 - opacity));
             const overlap = @min(volume_width, progress_width);
-            if (overlap > 0) c.rounded(Layout.left, Layout.timeline_top, overlap, 12, 3, accent);
+            if (overlap > 0) c.fill(Layout.left, Layout.timeline_top, overlap, 12, accent);
             const caption_top = Layout.capTop(212, .caption);
             if (mix < 0.5) {
-                label(c, Layout.left, caption_top, 80, clock(&buf, self.status.played_frames / @max(1, self.status.sample_rate)), .caption, draw.blend(muted, paper, @intFromFloat(mix * 2 * 255)));
+                label(c, Layout.left, caption_top, 80, clock(&buf, (self.seek_frame orelse self.status.played_frames) / @max(1, self.status.sample_rate)), .caption, draw.blend(muted, paper, @intFromFloat(mix * 2 * 255)));
                 c.right(Layout.right, caption_top, clock(&buf, self.status.total_frames / @max(1, self.status.sample_rate)), .caption, muted);
             } else {
                 label(c, Layout.left, caption_top, 80, "Volume", .caption, draw.blend(paper, muted, @intFromFloat((mix - 0.5) * 2 * 255)));
@@ -1168,6 +1221,7 @@ pub fn Controller(comptime Platform: type) type {
         }
 
         pub fn renderTimelineInto(self: *State, pixels: *[320 * 240]u16, now: u64) void {
+            const paper = self.appearance.palette().paper;
             var c = C.init(pixels);
             c.text_cache = self.text_cache;
             if (self.text_cache) |cache| cache.beginFrame();
@@ -1184,6 +1238,11 @@ pub fn Controller(comptime Platform: type) type {
         }
 
         pub fn renderInto(self: *State, pixels: *[320 * 240]u16, now: u64) void {
+            const paper = self.appearance.palette().paper;
+            const ink = self.appearance.palette().ink;
+            const muted = self.appearance.palette().muted;
+            const line = self.appearance.palette().line;
+            const accent = self.appearance.palette().accent;
             var c = C.init(pixels);
             c.text_cache = self.text_cache;
             if (self.text_cache) |cache| cache.beginFrame();
@@ -1201,7 +1260,7 @@ pub fn Controller(comptime Platform: type) type {
                         0 => "Queue",
                         1 => "Shuffle",
                         2 => "Repeat",
-                        else => "Seek",
+                        else => unreachable,
                     } else switch (i) {
                         0 => "Play All",
                         1 => "Shuffle",
@@ -1216,7 +1275,7 @@ pub fn Controller(comptime Platform: type) type {
                         },
                         else => "",
                     } else "";
-                    self.menuRow(c, i, name, value, i == menu.selection, menu.kind == .player and (i == 0 or i == 3));
+                    self.menuRow(c, i, name, value, i == menu.selection, menu.kind == .player and i == 0);
                 }
                 self.rendered_surface = @intFromPtr(pixels);
                 self.rendered_screen = null;
@@ -1300,7 +1359,7 @@ pub fn Controller(comptime Platform: type) type {
                     label(c, Layout.left, Layout.rowText(Layout.row_top, .reading), Layout.width, self.index.phase, .reading, ink);
                     for ([_][]const u8{ "Update library", "Verify library" }, 0..) |name, i| {
                         const y: i32 = 112 + @as(i32, @intCast(i)) * Layout.row_height;
-                        if (i == self.selection) highlightRow(c, y);
+                        if (i == self.selection) self.highlightRow(c, y);
                         label(c, Layout.left, Layout.rowText(y, .body), Layout.width, name, .body, ink);
                     }
                 },
@@ -1363,8 +1422,13 @@ pub fn Controller(comptime Platform: type) type {
                             else => unreachable,
                         };
                         const y: i32 = Layout.row_top + @as(i32, @intCast(i - self.first)) * Layout.row_height;
-                        if (i == self.selection) highlightRow(c, y);
-                        label(c, Layout.left, Layout.rowText(y, .reading), Layout.width, name, .reading, if (i == self.selection) accent else ink);
+                        if (i == self.selection) self.highlightRow(c, y);
+                        if (self.screen == .tracks and self.track_scope == .queue and i == self.selection) {
+                            label(c, Layout.left, Layout.capTop(y + 1, .reading), Layout.width, name, .reading, accent);
+                            if (self.trackAt(i)) |track| label(c, Layout.left, Layout.capBottom(y + Layout.row_height - 2, .caption), Layout.width, track.meta.artist, .caption, muted);
+                        } else {
+                            label(c, Layout.left, Layout.rowText(y, .reading), Layout.width, name, .reading, if (i == self.selection) accent else ink);
+                        }
                     }
                 },
                 .settings => {
@@ -1375,6 +1439,12 @@ pub fn Controller(comptime Platform: type) type {
                         .album => "Album",
                     }, self.selection == 0, false);
                     self.menuRow(c, 1, "Library", "", self.selection == 1, true);
+                    self.menuRow(c, 2, "Themes", "", self.selection == 2, true);
+                },
+                .themes => {
+                    self.header(c, "Themes", "");
+                    self.menuRow(c, 0, "Light", if (self.appearance == .light) "Active" else "", self.selection == 0, false);
+                    self.menuRow(c, 1, "Dark", if (self.appearance == .dark) "Active" else "", self.selection == 1, false);
                 },
                 .player => {
                     self.header(c, if (self.status.phase == .paused) "Paused" else "Now Playing", "");
@@ -1415,7 +1485,7 @@ pub fn Controller(comptime Platform: type) type {
             if (self.screen == .player and diag.report.scan_active != 0) c.rounded(266, 22, 4, 4, 2, accent);
             if (self.jump_position) |position| {
                 c.clear(paper);
-                self.header(c, if (self.screen == .player) "Seek" else "Jump", "");
+                self.header(c, "Jump", "");
                 centered(c, 86, 288, std.fmt.bufPrint(&buf, "{d}%", .{position * 5}) catch "", .serif, ink);
                 c.rounded(16, 139, 288, 8, 3, line);
                 const width: u16 = @intCast(position * 288 / 20);
@@ -1425,7 +1495,6 @@ pub fn Controller(comptime Platform: type) type {
                     .albums => if (self.rows() > 0) view.albums[target].title else "",
                     .artists => if (self.rows() > 0) view.artists[target].name else "",
                     .tracks => if (self.trackAt(target)) |track| track.meta.title else "",
-                    .player => clock(&buf, self.status.total_frames * position / 20 / @max(1, self.status.sample_rate)),
                     else => "",
                 };
                 centered(c, 167, 288, text, .reading, muted);
@@ -2312,26 +2381,7 @@ test "queue browsing resolves current metadata and selecting a row preserves its
     try std.testing.expectEqual(7, state.neighbouringTrack(-1).?.id);
 }
 
-test "play toggles pause and seeking previews without changing the queue" {
-    var fixture: Fixture = undefined;
-    try fixture.init();
-    defer fixture.deinit();
-    var state = fixture.state();
-    state.navigate(.player);
-    state.status = .{ .phase = .playing, .sample_rate = 48000, .output_format = .signed_24_in_u32, .total_frames = 48000 * 100, .played_frames = 48000 * 20 };
-    try std.testing.expectEqual(media.PlaybackCommand.toggle_pause, state.handle(.select, 0, true));
-    _ = state.act(.jump, 10, true);
-    try std.testing.expectEqual(4, state.jump_position.?);
-    _ = state.act(.{ .move = 2 }, 20, true);
-    try std.testing.expectEqual(0, state.track_store.order.count);
-    try std.testing.expectEqual(media.PlaybackCommand{ .seek_to = 48000 * 30 }, state.act(.select, 30, true));
-    try std.testing.expectEqual(null, state.jump_position);
-    _ = state.act(.jump, 40, true);
-    _ = state.act(.back, 50, true);
-    try std.testing.expectEqual(48000 * 20, state.status.played_frames);
-}
-
-test "physical Menu opens playback actions, hold goes Home and seek remains available" {
+test "physical Menu opens playback actions and hold goes Home without an accidental menu" {
     var fixture: Fixture = undefined;
     try fixture.init();
     defer fixture.deinit();
@@ -2346,9 +2396,7 @@ test "physical Menu opens playback actions, hold goes Home and seek remains avai
     _ = state.button(.menu, true, 0, true);
     _ = state.button(.menu, false, 100, true);
     try std.testing.expect(state.menu != null);
-    state.menu.?.selection = 3;
-    _ = state.handle(.select, 101, true);
-    try std.testing.expectEqual(4, state.jump_position.?);
+    _ = state.handle(.back, 101, true);
     _ = state.button(.menu, true, 200, true);
     _ = state.repeat(700, navigation.Button.menu.mask(), true);
     try std.testing.expectEqual(Screen.home, state.screen);
@@ -2588,4 +2636,107 @@ test "retiring workers cannot override newer selections and faults cannot auto-a
     state.playbackFinished(.{ .sample_rate = 48000, .output_format = .signed_24_in_u32, .frames = 1000, .chunks = 3, .underruns = 0, .minimum_fifo_level = 32 }, true);
     try std.testing.expect(state.requested_track == null);
     try std.testing.expectEqual(0, state.track_store.order.cursor);
+}
+
+test "held transport previews one bounded seek and commits on release while paused" {
+    var fixture: Fixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    var state = fixture.state();
+    state.navigate(.player);
+    state.status = .{ .phase = .paused, .sample_rate = 48000, .output_format = .signed_24_in_u32, .total_frames = 48000 * 100, .played_frames = 48000 * 20 };
+    try std.testing.expectEqual(media.PlaybackCommand.toggle_pause, state.handle(.select, 0, true));
+    try std.testing.expectEqual(media.PlaybackCommand.none, state.button(.next, true, 0, true));
+    try std.testing.expectEqual(media.PlaybackCommand.none, state.repeat(400, navigation.Button.next.mask(), true));
+    try std.testing.expectEqual(48000 * 22, state.seek_frame.?);
+    try std.testing.expectEqual(48000 * 20, state.status.played_frames);
+    _ = state.repeat(520, navigation.Button.next.mask(), true);
+    try std.testing.expectEqual(media.PlaybackCommand{ .seek_to = 48000 * 24 }, state.button(.next, false, 600, true));
+    try std.testing.expectEqual(null, state.seek_frame);
+    _ = state.button(.previous, true, 700, true);
+    _ = state.repeat(6000, navigation.Button.previous.mask(), true);
+    _ = state.repeat(6120, navigation.Button.previous.mask(), true);
+    try std.testing.expectEqual(0, state.seek_frame.?);
+    state.cancelInput(navigation.Button.previous.mask());
+    try std.testing.expectEqual(null, state.seek_frame);
+    try std.testing.expectEqual(media.PlaybackCommand.none, state.button(.previous, false, 6200, true));
+}
+
+test "held Back opens the captured queue and short Back returns to the player" {
+    var fixture: Fixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const track = core.Track{ .id = 1, .path = "Music/one.flac", .stamp = .{}, .meta = .{ .title = "A title", .artist = "An artist" } };
+    try fixture.pair.publish(&.{}, &.{track}, 1, true);
+    var state = fixture.state();
+    try state.track_store.order.append(track.id);
+    state.queue(&track);
+    state.playing_track = state.track_store.begin().?;
+    state.navigate(.player);
+    _ = state.button(.back, true, 0, true);
+    _ = state.repeat(500, navigation.Button.back.mask(), true);
+    _ = state.button(.back, false, 501, true);
+    try std.testing.expectEqual(Screen.tracks, state.screen);
+    try std.testing.expectEqual(TrackScope.queue, state.track_scope);
+    _ = state.button(.back, true, 600, true);
+    _ = state.button(.back, false, 700, true);
+    try std.testing.expectEqual(Screen.player, state.screen);
+    try std.testing.expectEqual(1, state.track_store.order.count);
+}
+
+test "light and dark selection invalidates retained screens and region rendering matches a full repaint" {
+    var fixture: Fixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    var state = fixture.state();
+    state.navigate(.themes);
+    state.selection = 1;
+    _ = state.handle(.select, 0, false);
+    try std.testing.expectEqual(chrome.Appearance.dark, state.appearance);
+    var pixels: [320 * 240]u16 = undefined;
+    state.renderInto(&pixels, 0);
+    try std.testing.expectEqual(chrome.dark.paper, pixels[0]);
+    state.navigate(.player);
+    const track = core.Track{ .id = 1, .path = "Music/one.flac", .stamp = .{}, .meta = .{ .title = "A title", .artist = "An artist" } };
+    state.playing_track = &track;
+    state.status = .{ .phase = .playing, .sample_rate = 48000, .output_format = .signed_24_in_u32, .total_frames = 48000 * 100, .played_frames = 48000 * 20 };
+    // Compare just the timeline's owned region, including every antialiased edge.
+    for ([_]chrome.Appearance{ .light, .dark }) |appearance| {
+        state.appearance = appearance;
+        @memset(&pixels, appearance.palette().paper);
+        state.renderTimelineInto(&pixels, 0);
+        var fresh: [320 * 240]u16 = @splat(appearance.palette().paper);
+        state.rendered_screen = null;
+        state.renderInto(&fresh, 0);
+        try std.testing.expectEqualSlices(u16, fresh[188 * 320 .. 230 * 320], pixels[188 * 320 .. 230 * 320]);
+    }
+}
+
+test "pocket lock suppresses controls and frames, consumes unlock, and preserves long Power shutdown" {
+    var fixture: Fixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    var state = fixture.state();
+    state.navigate(.player);
+    const old_volume = state.attenuation;
+    _ = state.button(.power, true, 0, true);
+    _ = state.button(.power, false, 100, true);
+    try std.testing.expect(state.locked);
+    const before = TestPlatform.Display.submissions;
+    for (0..100) |i| {
+        _ = state.button(.volume_up, true, 101 + i * 100, true);
+        _ = state.repeat(102 + i * 100, navigation.Button.volume_up.mask(), true);
+        _ = state.wheel(1, 103 + i * 100, true);
+        state.frame(104 + i * 100);
+    }
+    try std.testing.expectEqual(old_volume, state.attenuation);
+    try std.testing.expectEqual(before, TestPlatform.Display.submissions);
+    _ = state.button(.power, true, 11000, true);
+    _ = state.button(.power, false, 11100, true);
+    try std.testing.expect(!state.locked);
+    try std.testing.expectEqual(media.PlaybackCommand.none, state.repeat(12000, navigation.Button.volume_up.mask(), true));
+    _ = state.button(.volume_up, false, 12001, true);
+    _ = state.button(.power, true, 13000, true);
+    _ = state.button(.power, false, 15000, true);
+    try std.testing.expect(!state.locked);
 }

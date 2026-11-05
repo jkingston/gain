@@ -507,9 +507,26 @@ All. Artists retain both their complete song list and individual albums.
 Press Menu for actions; hold it for 500 ms to return Home. Back closes actions
 or restores the preceding screen and selection. Collection actions offer Play
 All and Shuffle; long lists also offer Jump. Now Playing actions contain Queue,
-Shuffle (Off/On), Repeat (Off/All/One) and Seek. Play selects a row and toggles
-pause on Now Playing. Previous/Next scroll menus with hold-repeat and acceleration,
-while skipping tracks on Now Playing. Volume uses the physical volume buttons.
+Shuffle (Off/On) and Repeat (Off/All/One). Play selects a row and toggles
+pause on Now Playing. Previous/Next scroll menus with hold-repeat and acceleration.
+On Now Playing, a tap skips on release; a 400 ms hold previews an accelerating
+seek, committed once on release. Paused seeks remain paused. Holding Back for
+500 ms opens the captured Queue directly; a short Back retains normal navigation.
+The selected queue row includes the artist. Volume buttons repeat after 320 ms,
+then every 100 ms, without catching up missed repeats in a burst.
+
+Settings > Themes offers Light and Dark appearances of the current production
+layout. Theme colours are per-controller values, with no parsing in drawing or
+input paths. The same palette applies to USB mode, battery chrome, Cover Flow
+background and the square progress/volume timeline. The other design-family and
+runtime theme-file experiments remain outside the production player. Appearance
+survives USB handoff in RAM, but is not yet saved across power cycles.
+
+A short Power press locks controls and turns off the backlight while audio and
+background indexing continue. Short Power again unlocks; that gesture cannot
+also activate a playback control. Held keys remain suppressed until released.
+Long Power retains the existing 1.5-second hardware shutdown. This pocket lock
+does not add an automatic display timeout or change panel power sequencing.
 
 Starting a collection captures its membership and resets playback modes.
 Selecting a song starts that collection at the chosen song. Queue selections

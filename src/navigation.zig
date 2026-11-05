@@ -4,7 +4,7 @@ const std = @import("std");
 const capture = @import("input_capture.zig");
 pub const Button = capture.Button;
 pub const Context = enum { list, covers, transport };
-pub const Action = union(enum) { none, move: i32, select, back, home, menu, jump, previous, next, volume_up, volume_down };
+pub const Action = union(enum) { none, move: i32, select, back, home, menu, queue, jump, previous, next, scrub: i32, commit_seek, volume_up, volume_down };
 
 const first_repeat_ms = 320;
 const travel_start_ms = 900;
@@ -12,7 +12,11 @@ const travel_ramp_ms = 700;
 const traversal_ms = 2000;
 const wheel_reset_ms = 180;
 const menu_hold_ms = 500;
+const seek_hold_ms = 400;
+const seek_repeat_ms = 120;
+const volume_repeat_ms = 100;
 const navigation_mask = Button.previous.mask() | Button.next.mask();
+const volume_mask = Button.volume_up.mask() | Button.volume_down.mask();
 
 pub fn move(selection: usize, count: usize, delta: i32) usize {
     if (count == 0) return 0;
@@ -30,6 +34,11 @@ pub const Policy = struct {
     gesture_context: Context = .list,
     menu_at: ?u64 = null,
     menu_consumed: bool = false,
+    back_at: ?u64 = null,
+    back_consumed: bool = false,
+    transport_button: ?Button = null,
+    seeking: bool = false,
+    volume_at: u64 = 0,
     wheel_at: ?u64 = null,
     wheel_direction: i32 = 0,
     wheel_interval: u64 = wheel_reset_ms,
@@ -56,6 +65,26 @@ pub const Policy = struct {
         }
         if (button == .previous or button == .next) {
             self.stopWheel();
+            if (context == .transport) {
+                if (pressed) {
+                    // A tap skips on release. Waiting distinguishes it from a
+                    // hold without starting a different track first.
+                    if (self.held & navigation_mask == navigation_mask) {
+                        self.transport_button = null;
+                        self.suppressed |= navigation_mask;
+                        return if (self.seeking) .commit_seek else .none;
+                    }
+                    self.transport_button = button;
+                    self.seeking = false;
+                    self.started_at = now;
+                    self.repeat_at = now +| seek_hold_ms;
+                    self.gesture_context = context;
+                    return .none;
+                }
+                if (self.transport_button != button) return .none;
+                self.transport_button = null;
+                return if (self.seeking) .commit_seek else if (now -| self.started_at >= seek_hold_ms) .none else if (button == .previous) .previous else .next;
+            }
             const active = self.held & ~self.suppressed & navigation_mask;
             self.direction = if (active == Button.next.mask()) 1 else if (active == Button.previous.mask()) -1 else 0;
             self.started_at = now;
@@ -63,8 +92,21 @@ pub const Policy = struct {
             self.gesture_count = count;
             self.gesture_context = context;
             if (!pressed or self.direction == 0) return .none;
-            if (context == .transport) return if (self.direction < 0) .previous else .next;
             return .{ .move = self.direction };
+        }
+        if (button == .volume_up or button == .volume_down) {
+            self.volume_at = now +| first_repeat_ms;
+            if (!pressed or self.held & volume_mask == volume_mask) return .none;
+            return if (button == .volume_up) .volume_up else .volume_down;
+        }
+        if (button == .back) {
+            if (pressed) {
+                self.back_at = now;
+                self.back_consumed = false;
+                return .none;
+            }
+            defer self.back_at = null;
+            return if (self.back_at != null and !self.back_consumed) .back else .none;
         }
         if (button == .menu) {
             if (pressed) {
@@ -112,6 +154,12 @@ pub const Policy = struct {
     /// raw_held inhibits a repeat on the first observed release, before debounce.
     /// Call after draining captured edges, so a queued release wins over a tick.
     pub fn tick(self: *Policy, now: u64, context: Context, _: usize, raw_held: u8) Action {
+        if (self.back_at) |at| {
+            if (!self.back_consumed and raw_held & Button.back.mask() != 0 and now -| at >= menu_hold_ms) {
+                self.back_consumed = true;
+                return .queue;
+            }
+        }
         if (self.menu_at) |at| {
             if (!self.menu_consumed and raw_held & Button.menu.mask() != 0 and now -| at >= menu_hold_ms) {
                 self.menu_consumed = true;
@@ -122,7 +170,22 @@ pub const Policy = struct {
         }
         if (context != self.gesture_context) {
             self.direction = 0;
+            self.transport_button = null;
             self.suppressed |= self.held & navigation_mask;
+        }
+        const volume = self.held & raw_held & ~self.suppressed & volume_mask;
+        if (now >= self.volume_at and (volume == Button.volume_up.mask() or volume == Button.volume_down.mask())) {
+            self.volume_at = now +| volume_repeat_ms;
+            return if (volume == Button.volume_up.mask()) .volume_up else .volume_down;
+        }
+        if (self.transport_button) |button| {
+            if (context == .transport and raw_held & button.mask() != 0 and now >= self.repeat_at) {
+                self.seeking = true;
+                self.repeat_at = now +| seek_repeat_ms;
+                const elapsed = now -| self.started_at;
+                const seconds: i32 = if (elapsed < 2000) 2 else if (elapsed < 5000) 5 else 15;
+                return .{ .scrub = if (button == .previous) -seconds else seconds };
+            }
         }
         if (self.direction == 0 or context == .transport or now < self.repeat_at) return .none;
         const mask = if (self.direction > 0) Button.next.mask() else Button.previous.mask();
@@ -206,8 +269,8 @@ test "wheel accelerates only sustained motion, keeps short menus precise and nev
 
 test "transport holds do not repeat skip and Menu hold consumes its short action" {
     var policy = Policy{};
-    try std.testing.expectEqual(.next, std.meta.activeTag(policy.edge(.next, true, 0, .transport, 1000)));
-    try std.testing.expectEqual(.none, std.meta.activeTag(policy.tick(5000, .transport, 1000, Button.next.mask())));
+    try std.testing.expectEqual(.none, std.meta.activeTag(policy.edge(.next, true, 0, .transport, 1000)));
+    try std.testing.expectEqual(.next, std.meta.activeTag(policy.edge(.next, false, 100, .transport, 1000)));
     policy.cancel(0);
     _ = policy.edge(.menu, true, 6000, .list, 1000);
     try std.testing.expectEqual(.none, std.meta.activeTag(policy.tick(6499, .list, 1000, Button.menu.mask())));
@@ -215,4 +278,33 @@ test "transport holds do not repeat skip and Menu hold consumes its short action
     try std.testing.expectEqual(.none, std.meta.activeTag(policy.edge(.menu, false, 6600, .list, 1000)));
     _ = policy.edge(.menu, true, 7000, .list, 1000);
     try std.testing.expectEqual(.menu, std.meta.activeTag(policy.edge(.menu, false, 7100, .list, 1000)));
+}
+
+test "transport taps skip only on release and held seeking accelerates without skips" {
+    for ([_]Button{ .previous, .next }) |button| {
+        var policy = Policy{};
+        try std.testing.expectEqual(Action.none, policy.edge(button, true, 0, .transport, 10));
+        try std.testing.expectEqual(Action.none, policy.tick(399, .transport, 10, button.mask()));
+        const sign: i32 = if (button == .previous) -1 else 1;
+        try std.testing.expectEqual(Action{ .scrub = sign * 2 }, policy.tick(400, .transport, 10, button.mask()));
+        try std.testing.expectEqual(Action{ .scrub = sign * 5 }, policy.tick(2000, .transport, 10, button.mask()));
+        try std.testing.expectEqual(Action{ .scrub = sign * 15 }, policy.tick(5000, .transport, 10, button.mask()));
+        try std.testing.expectEqual(Action.none, policy.tick(5200, .transport, 10, 0));
+        try std.testing.expectEqual(Action.commit_seek, policy.edge(button, false, 5201, .transport, 10));
+        try std.testing.expectEqual(Action.none, policy.tick(10000, .transport, 10, 0));
+    }
+}
+
+test "volume holds are bounded and release or cancellation withdraws repeats" {
+    var policy = Policy{};
+    try std.testing.expectEqual(Action.volume_up, policy.edge(.volume_up, true, 0, .list, 3));
+    try std.testing.expectEqual(Action.none, policy.tick(319, .list, 3, Button.volume_up.mask()));
+    try std.testing.expectEqual(Action.volume_up, policy.tick(320, .list, 3, Button.volume_up.mask()));
+    try std.testing.expectEqual(Action.volume_up, policy.tick(10000, .list, 3, Button.volume_up.mask()));
+    try std.testing.expectEqual(Action.none, policy.tick(10000, .list, 3, Button.volume_up.mask()));
+    try std.testing.expectEqual(Action.none, policy.tick(10100, .list, 3, 0));
+    _ = policy.edge(.volume_down, true, 10200, .list, 3);
+    try std.testing.expectEqual(Action.none, policy.tick(11000, .list, 3, volume_mask));
+    policy.cancel(volume_mask);
+    try std.testing.expectEqual(Action.none, policy.tick(20000, .list, 3, volume_mask));
 }
