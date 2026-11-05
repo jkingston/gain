@@ -12,6 +12,40 @@ def percentile(values, quantile):
     return sorted(values)[int((len(values) - 1) * quantile)] if values else None
 
 
+def cover_readiness(entries):
+    """Read inspected moving scenes; exclude completed negative cache entries.
+
+    These are render samples, not atomic panel captures or elapsed-time shares.
+    Older traces without kind8 yield no samples rather than zero readiness.
+    """
+    moving = False
+    center_samples = center_ready = visible_samples = visible_ready = 0
+    for entry in entries:
+        if entry["kind"] == 5:
+            moving = bool(entry["value"] & (1 << 31))
+        elif entry["kind"] == 8 and moving:
+            value = entry["value"]
+            present = value & 127
+            ready = (value >> 7) & 127
+            missing = (value >> 14) & 127
+            visible_samples += (present & ~missing).bit_count()
+            visible_ready += (present & ready & ~missing).bit_count()
+            # The centre is the final model in paint order, including edges.
+            if present and value & (1 << 21):
+                center = 1 << (present.bit_length() - 1)
+                if not missing & center:
+                    center_samples += 1
+                    center_ready += bool(value & (1 << 22))
+    return dict(
+        center_samples=center_samples,
+        center_ready=center_ready,
+        center_ready_fraction=center_ready / center_samples if center_samples else None,
+        visible_samples=visible_samples,
+        visible_ready=visible_ready,
+        visible_ready_fraction=visible_ready / visible_samples if visible_samples else None,
+    )
+
+
 def analyse(entries, motion_mask):
     pending = deque()
     previous_at = None
@@ -48,6 +82,7 @@ def analyse(entries, motion_mask):
         ),
         idle_or_unclassified_intervals_ms=idle_intervals,
         models=models,
+        covers=cover_readiness(entries),
     )
 
 

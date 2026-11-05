@@ -56,9 +56,7 @@ pub const State = struct {
         self.service = service;
         defer self.service = null;
         if (self.text) |loader| {
-            loader.yield = .{ .context = service.context, .poll = service.poll };
-            loader.service();
-            loader.yield = null;
+            loader.serviceWithYield(.{ .context = service.context, .poll = service.poll });
         }
         if (self.covers) |cache| cache.service(self.volume);
         if (!self.requested) return;
@@ -85,9 +83,7 @@ pub const State = struct {
         if (self.covers) |cache| cache.service(self.volume);
         if (self.text) |loader| {
             const service = self.service.?;
-            loader.yield = .{ .context = service.context, .poll = service.poll };
-            loader.service();
-            loader.yield = null;
+            loader.serviceWithYield(.{ .context = service.context, .poll = service.poll });
         }
         return false;
     }

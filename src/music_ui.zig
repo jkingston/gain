@@ -10,6 +10,7 @@ const covers = @import("cover_cache.zig");
 const media = @import("f20_media.zig");
 const flow_scene = @import("cover_flow.zig");
 const navigation = @import("navigation.zig");
+const cover_loading = @import("cover_loading.zig");
 
 const chrome = @import("music_chrome.zig");
 const battery_status = @import("battery.zig");
@@ -70,6 +71,9 @@ pub fn Controller(comptime Platform: type) type {
         track_scope: TrackScope = .album,
         tracks_return: Screen = .albums,
         input_policy: navigation.Policy = .{},
+        raw_held: u8 = 0,
+        cover_plan: ?cover_loading.Plan = null,
+        cover_plan_revision: u32 = 0,
         jump_position: ?usize = null,
         selected_id: u64 = 0,
         selected_track_anchor: u64 = 0,
@@ -276,10 +280,12 @@ pub fn Controller(comptime Platform: type) type {
 
         pub fn cancelInput(self: *State, held: u8) void {
             self.input_policy.cancel(held);
+            self.raw_held = held;
         }
 
         pub fn button(self: *State, key: navigation.Button, pressed: bool, now: u64, playing: bool) media.PlaybackCommand {
             self.reconcile();
+            if (pressed) self.raw_held |= key.mask() else self.raw_held &= ~key.mask();
             return self.act(self.input_policy.edge(key, pressed, now, self.inputContext(), if (self.jump_position != null or (self.screen == .player and self.status.total_frames != 0)) 21 else self.rows()), now, playing);
         }
 
@@ -290,6 +296,7 @@ pub fn Controller(comptime Platform: type) type {
 
         pub fn repeat(self: *State, now: u64, held: u8, playing: bool) media.PlaybackCommand {
             self.reconcile();
+            self.raw_held = held;
             return self.act(self.input_policy.tick(now, self.inputContext(), if (self.jump_position != null) 8 else if (self.screen == .player and self.status.total_frames != 0) 21 else self.rows(), held), now, playing);
         }
 
@@ -619,6 +626,9 @@ pub fn Controller(comptime Platform: type) type {
                 self.last_second = self.status.played_frames / @max(1, self.status.sample_rate);
                 self.dirty = true;
             }
+            // Prefetch deadlines and releases can change without a repaint.
+            // Numeric plans are cheap; hash/publish only a changed request set.
+            if (self.screen == .albums) self.requestCovers(now);
             const moving = self.screen == .albums and @abs(self.flow - @as(f32, @floatFromInt(self.selection))) > 0.005;
             const motion_flags = @as(u32, @intFromBool(moving)) | (@as(u32, @intFromBool(volume_moving)) << 1);
             if (motion_flags != self.motion_flags) {
@@ -703,6 +713,30 @@ pub fn Controller(comptime Platform: type) type {
 
         fn header(self: *State, c: C, title: []const u8, detail: []const u8) void {
             chrome.header(c, title, detail, battery_status.Status.fromPower(self.battery_mv, self.charging, self.external_power));
+        }
+
+        fn requestCovers(self: *State, now: u64) void {
+            const view = self.snapshot();
+            const plan = cover_loading.plan(.{
+                .now_ms = now,
+                .position = self.flow,
+                .selected = self.selection,
+                .count = view.album_count,
+                .latency_ms = self.covers.load_estimate_ms,
+                .next = if (self.jump_position == null) cover_loading.repeatIntent(self.input_policy, self.selection, view.album_count, self.raw_held, now) else null,
+            });
+            if (self.cover_plan) |previous| {
+                if (self.cover_plan_revision == view.revision and previous.count == plan.count and previous.eligible == plan.eligible and
+                    std.mem.eql(usize, previous.ranks[0..previous.count], plan.ranks[0..plan.count])) return;
+            }
+            self.covers.requested = @splat(.{});
+            for (plan.ranks[0..plan.count], 0..) |rank, i| {
+                const album = view.albums[rank];
+                self.covers.requested[i] = .{ .id = album.id, .art = album.art, .eligible = plan.eligible & (@as(u10, 1) << @intCast(i)) != 0 };
+            }
+            self.covers.publishRequests();
+            self.cover_plan = plan;
+            self.cover_plan_revision = view.revision;
         }
 
         fn highlightRow(c: C, top: i32) void {
@@ -831,7 +865,10 @@ pub fn Controller(comptime Platform: type) type {
             const caption_changed = !retained or self.rendered_selection != self.selection or self.rendered_revision != view.revision;
             if (!retained) c.clear(paper) else if (scene_changed) c.fill(0, Layout.row_top, 320, 193 - Layout.row_top, paper);
             var buf: [96]u8 = undefined;
-            for (&self.covers.requested) |*request| request.* = .{};
+            if (self.screen != .albums) {
+                self.covers.requested = @splat(.{});
+                self.cover_plan = null;
+            }
             switch (self.screen) {
                 .home => {
                     self.header(c, "Music", "");
@@ -860,24 +897,7 @@ pub fn Controller(comptime Platform: type) type {
                     }
                     const scene_started = benchmarkClock();
                     diag.report.cover_header_max = @max(diag.report.cover_header_max, scene_started -% header_started);
-                    const anchor: i32 = @intFromFloat(@round(self.flow));
-                    var request: usize = 0;
-                    // Ask for the visible seven and the destination's centre and
-                    // neighbours. Ten requests fit the existing twelve-tile cache.
-                    for ([_]i32{ 0, -1, 1, -2, 2, -3, 3 }) |offset| {
-                        const i = anchor + offset;
-                        if (i < 0 or i >= view.album_count) continue;
-                        const album = view.albums[@intCast(i)];
-                        self.covers.request(request, album.id, album.art);
-                        request += 1;
-                    }
-                    for ([_]i32{ 0, -1, 1 }) |offset| {
-                        const i = @as(i32, @intCast(self.selection)) + offset;
-                        if (i < 0 or i >= view.album_count or @abs(i - anchor) <= 3) continue;
-                        const album = view.albums[@intCast(i)];
-                        self.covers.request(request, album.id, album.art);
-                        request += 1;
-                    }
+                    self.requestCovers(now);
                     if (scene_changed) {
                         var cards: [7]flow_scene.Card = undefined;
                         for (visible[0..visible_count], cards[0..visible_count]) |model, *card| card.* = .{ .texture = model.texture, .quad = flow_scene.project(model.distance) };
@@ -1697,6 +1717,53 @@ test "stationary flow still prefetches a newly selected destination before motio
     };
     try std.testing.expect(found);
     try std.testing.expect(fixture.cache.request_revision.load(.acquire) != revision);
+}
+
+test "prefetch admission and raw release update while presentation waits" {
+    var fixture: Fixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const tracks = try a.alloc(core.Track, 128);
+    for (tracks, 0..) |*track, i| track.* = .{
+        .id = i + 1,
+        .path = try std.fmt.allocPrint(a, "Synthetic/{d:0>3}/1.flac", .{i}),
+        .stamp = .{},
+        .meta = .{ .album = try std.fmt.allocPrint(a, "Album {d:0>3}", .{i}) },
+    };
+    try fixture.pair.publish(&.{}, tracks, 42, true);
+    var state = fixture.state();
+    state.navigate(.albums);
+    state.reconcile();
+    state.selection = 24;
+    state.flow = 23;
+    const mask = navigation.Button.next.mask();
+    state.raw_held = mask;
+    state.input_policy = .{ .held = mask, .direction = 1, .started_at = 0, .repeat_at = 3070, .gesture_count = 1024, .gesture_context = .covers };
+    TestPlatform.Display.reset();
+    TestPlatform.Display.waiting_launch = true;
+    defer TestPlatform.Display.waiting_launch = false;
+    TestPlatform.milliseconds = 3000;
+    state.frame(3000);
+    const destination = state.snapshot().albums[24].id;
+    const predicted = state.snapshot().albums[48].id;
+    try std.testing.expectEqual(destination, fixture.cache.requested[0].id);
+    try std.testing.expectEqual(predicted, fixture.cache.requested[1].id);
+    try std.testing.expect(fixture.cache.requested[0].eligible);
+    const early_revision = fixture.cache.request_revision.load(.acquire);
+    TestPlatform.milliseconds = 3050;
+    state.frame(3050);
+    try std.testing.expect(!fixture.cache.requested[0].eligible);
+    try std.testing.expect(fixture.cache.request_revision.load(.acquire) != early_revision);
+    // The raw release arrives before its debounced edge. Speculation must stop
+    // now even though the display has not accepted a single new frame.
+    _ = state.repeat(3051, 0, false);
+    TestPlatform.milliseconds = 3051;
+    state.frame(3051);
+    for (fixture.cache.requested) |request| try std.testing.expect(request.id != predicted);
+    try std.testing.expectEqual(0, TestPlatform.Display.submissions);
 }
 
 test "volume commands apply immediately without animating hidden controls" {

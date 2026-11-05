@@ -821,6 +821,11 @@ const MusicSession = struct {
             self.state.requested_track != null or self.state.requested_folders;
     }
 
+    fn serviceCovers(context: *anyopaque) void {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        if (self.state.index.covers) |loader| loader.service(self.state.index.volume);
+    }
+
     fn keepIdleResponsive() void {
         if (idle_music_session) |session| {
             _ = control(session, session.state.status);
@@ -845,6 +850,10 @@ fn browseMusic(volume: *Volume, browser: *Browser, battery_mv: u32, attenuation:
     index.request(false);
     var state = @import("f20_music_ui.zig").State{ .index = &index, .covers = &covers.cache, .text_cache = &text.cache, .attenuation = attenuation.*, .battery_mv = battery_mv, .track_store = @import("track_selection.zig").Store.init(memory.scan_artwork.cachedSlice(u8)) };
     var session = MusicSession{ .state = &state, .input = input, .pmic = pmic };
+    // Font source polls occur between card transactions, so a long font read
+    // can give urgent artwork a turn without adding a second storage owner.
+    text.storage_work.hook = .{ .context = &session, .run = MusicSession.serviceCovers };
+    defer text.storage_work.hook = null;
     const old_keep_alive = volume.device.keep_alive;
     idle_music_session = &session;
     volume.device.keep_alive = MusicSession.keepIdleResponsive;
@@ -963,9 +972,7 @@ fn browseMusic(volume: *Volume, browser: *Browser, battery_mv: u32, attenuation:
         }
         if (index.requested) @import("f20_index.zig").State.run(&index, .{ .context = &session, .poll = MusicSession.idlePoll });
         covers.service(volume);
-        text.yield = .{ .context = &session, .poll = MusicSession.idlePoll };
-        text.service();
-        text.yield = null;
+        text.serviceWithYield(.{ .context = &session, .poll = MusicSession.idlePoll });
         @import("f20_display.zig").idleLaunch();
         if (!state.isAnimating(session.now())) {
             diag.samplePower(pmic);

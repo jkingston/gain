@@ -93,14 +93,22 @@ pub const Cache = struct {
 
     /// Called while the adapter excludes UI callbacks/preemption. Heavy work
     /// happens after leaving that critical section; working slots cannot evict.
+    /// Prefer the most recently requested label. An older queued label remains
+    /// reusable: frame age cannot identify abandonment of a retained UI band.
     pub fn claim(self: *Cache) ?usize {
+        var newest: ?usize = null;
+        var newest_age: u32 = std.math.maxInt(u32);
         for (&self.slots, 0..) |*slot, i| {
-            if (slot.phase.load(.acquire) == .queued) {
-                slot.phase.store(.working, .release);
-                return i;
+            if (slot.phase.load(.acquire) != .queued) continue;
+            const age = self.epoch -% slot.used;
+            if (newest == null or age < newest_age) {
+                newest = i;
+                newest_age = age;
             }
         }
-        return null;
+        const index = newest orelse return null;
+        self.slots[index].phase.store(.working, .release);
+        return index;
     }
 
     pub fn request(self: *const Cache, slot: usize) *const contract.Request {
@@ -182,4 +190,44 @@ test "cancelled jobs resume and invalid masks never enter the render cache" {
     try std.testing.expect(cache.lookup("العربية", .body, 100, true) == null);
     cache.reset();
     try std.testing.expect(!cache.pending());
+}
+
+test "newest caption is prepared before old queued history" {
+    var cache: Cache = .{};
+    for (0..8) |i| {
+        var text: [64]u8 = undefined;
+        cache.beginFrame();
+        const value = try std.fmt.bufPrint(&text, "日本語のアルバム {d}", .{i});
+        _ = cache.lookup(value, .reading, 288, true);
+    }
+    const newest = cache.claim().?;
+    try std.testing.expectEqualStrings("日本語のアルバム 7", cache.request(newest).value());
+    cache.destination(newest).* = .{ .width = 17, .height = 21 };
+    cache.publish(newest, .ready);
+    // Old labels remain useful on a return journey; prioritisation does not
+    // turn them into failures or discard their requests.
+    try std.testing.expect(cache.claim() != null);
+    try std.testing.expect(cache.lookup("日本語のアルバム 7", .reading, 288, true) != null);
+}
+
+test "retained pending captions survive cover-only frames and epoch wrap" {
+    var cache: Cache = .{};
+    cache.epoch = std.math.maxInt(u32) - 1;
+    for (0..3) |i| {
+        var text: [64]u8 = undefined;
+        cache.beginFrame();
+        const value = try std.fmt.bufPrint(&text, "日本語のアルバム {d}", .{i});
+        _ = cache.lookup(value, .reading, 288, true);
+    }
+    const working = cache.claim().?;
+    try std.testing.expectEqualStrings("日本語のアルバム 2", cache.request(working).value());
+    // The retained caption band makes no further lookups during cover motion.
+    // Its frame age is not a valid cancellation or expiration signal.
+    for (0..90) |_| cache.beginFrame();
+    cache.publish(working, .cancelled);
+    const resumed = cache.claim().?;
+    try std.testing.expectEqual(working, resumed);
+    cache.destination(resumed).* = .{ .width = 17, .height = 21 };
+    cache.publish(resumed, .ready);
+    try std.testing.expect(cache.lookup("日本語のアルバム 2", .reading, 288, true) != null);
 }

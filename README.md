@@ -95,6 +95,12 @@ Replacement consumes empty slots first, then the least recently requested
 unprotected entry. Obsolete loads stop at bounded read/preparation checkpoints.
 The atlas reader reuses sparse seek checkpoints; exFAT contiguous streams keep
 their direct seek path. The cache retains recent covers, not an entire library.
+Loading prioritises the selected album and predicts the next held-button repeat
+from the same navigation policy that will execute it. A smoothed completed-load
+estimate bounds lookahead and avoids starting side-cover work just before a
+jump. All seven visible covers stay protected, with at most three speculative
+requests. Raw release/reversal updates requests without waiting for a repaint;
+wheel motion uses destination priority without guessing future wheel events.
 Disk validation, unpacking and filtering yield in bounded chunks
 when idle; during playback the executive preempts storage work for audio/UI.
 Headers and captions retain their pixels between animation frames. The default
@@ -252,6 +258,9 @@ evictions, and worst preparation and post-playback handoff time. Timer fields us
 isolated CPU costs. Handoff measures catalogue finish, log flush, input resync
 and display reset, excluding worker join and decoder startup. These aggregate
 counters add no per-frame SD logging.
+Instrumented cover traces distinguish ready covers, pending loads and completed
+negative cache entries. `analyse_display_trace.py` reports readiness only for
+inspected moving scenes; those are render samples, not panel captures or FPS.
 The development ROM handoff resets the controller and enters the ROM afresh;
 the uploader waits for the X1000 identity and verifies every uploaded RAM byte
 before starting the player. Detailed display traces exist only in instrumented
@@ -900,6 +909,11 @@ frames do not reshape text. Sparse FAT checkpoints bound warm font seeks to
 64 cluster steps, including fragmented cards. Audio admission, cancellation
 and watchdog hooks remain active during font I/O. Font and label memory have
 explicit reservations checked against audio, catalogues, USB and task stacks.
+The font worker claims the most recently requested label first, while retaining
+older labels for retained screen bands and return journeys. Font-source polls
+may service covers between card transactions. A nonrecursive pump and scoped
+yield bindings preserve cancellation and the sole storage owner; SD keep-alive
+callbacks never start this storage work.
 
 `mise run test-text` runs the official Unicode 17 bidi/grapheme vectors, direct
 HarfBuzz glyph/position comparisons, multilingual rendering, cancellation,

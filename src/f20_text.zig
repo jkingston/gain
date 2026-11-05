@@ -7,6 +7,7 @@ const memory = @import("f20_memory.zig");
 const library = @import("f20_library.zig");
 const fat = @import("filesystem.zig");
 const x = @import("x1000.zig");
+const worker_service = @import("text/worker_service.zig");
 pub const Loader = struct {
     cache: @import("text/cache.zig").Cache = .{},
     volume: *library.Volume,
@@ -21,7 +22,8 @@ pub const Loader = struct {
     statistics: abi.Statistics = .{},
     io: [4096]u8 align(32) = undefined,
     seeks: @import("file_seek_index.zig").Index = .{},
-    yield: ?struct { context: *anyopaque, poll: *const fn (*anyopaque) bool } = null,
+    yield: ?worker_service.Yield = null,
+    storage_work: worker_service.StoragePump = .{},
 
     pub fn init(volume: *library.Volume) *Loader {
         comptime {
@@ -42,6 +44,7 @@ pub const Loader = struct {
         self.source_bytes = 0;
         self.statistics = .{};
         self.yield = null;
+        self.storage_work = .{};
         self.seeks.reset();
         return self;
     }
@@ -49,7 +52,7 @@ pub const Loader = struct {
     fn poll(context: *anyopaque) callconv(.c) bool {
         const self: *Loader = @ptrCast(@alignCast(context));
         x.Watchdog.kick();
-        return if (self.yield) |hook| hook.poll(hook.context) else false;
+        return worker_service.poll(self.yield, &self.storage_work);
     }
 
     fn read(context: *anyopaque, at: u32, output: [*]u8, count: u32) callconv(.c) u32 {
@@ -131,6 +134,10 @@ pub const Loader = struct {
         self.api = api;
     }
 
+    pub fn serviceWithYield(self: *Loader, hook: worker_service.Yield) void {
+        worker_service.withYield(self, hook, Loader.service);
+    }
+
     pub fn service(self: *Loader) void {
         if (self.busy) return;
         self.busy = true;
@@ -176,6 +183,8 @@ pub const Loader = struct {
     }
 
     pub fn deinit(self: *Loader) void {
+        self.storage_work.hook = null;
+        self.yield = null;
         if (self.api) |api| api.shutdown();
         self.api = null;
     }

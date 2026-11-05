@@ -1,7 +1,7 @@
 """Deterministic trace interpretations, including pauses and counter wrap."""
 
 import unittest
-from analyse_display_trace import BUDGETS, analyse, qualify
+from analyse_display_trace import BUDGETS, analyse, cover_readiness, qualify
 
 
 def event(kind, at, value):
@@ -9,6 +9,28 @@ def event(kind, at, value):
 
 
 class TimingTests(unittest.TestCase):
+    def test_cover_readiness_distinguishes_loading_from_known_missing_and_idle(self):
+        trace = [
+            event(5, 0, 1 << 31),
+            event(8, 1, 7 | (1 << 7) | (1 << 21)),
+            event(8, 2, 7 | (7 << 7) | (1 << 21) | (1 << 22)),
+            event(8, 3, 7 | (3 << 7) | (4 << 14) | (1 << 21)),
+            event(5, 4, 0),
+            event(8, 5, 7 | (1 << 21)),
+        ]
+        result = cover_readiness(trace)
+        self.assertEqual(2, result["center_samples"])
+        self.assertEqual(1, result["center_ready"])
+        self.assertEqual(0.5, result["center_ready_fraction"])
+        self.assertEqual(8, result["visible_samples"])
+        self.assertEqual(6, result["visible_ready"])
+
+    def test_older_traces_do_not_invent_cover_readiness(self):
+        result = cover_readiness([event(5, 0, 1 << 31), event(2, 1, 76800)])
+        self.assertEqual(0, result["center_samples"])
+        self.assertIsNone(result["center_ready_fraction"])
+        self.assertIsNone(result["visible_ready_fraction"])
+
     def test_release_gate_requires_all_profiles_and_real_motion_samples(self):
         self.assertFalse(qualify({})["passed"])
         profiles = {

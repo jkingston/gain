@@ -44,6 +44,7 @@ pub const Loader = struct {
     }
 
     pub fn service(self: *Loader, volume: *library.Volume) void {
+        if (self.active_load != null) return;
         const cache = &self.cache;
         if (!self.work.pending(cache.request_revision.load(.acquire))) return;
         // UI may preempt this task. Snapshot only these small descriptors with
@@ -71,7 +72,10 @@ pub const Loader = struct {
         cache.begin(job);
         const result: Result = self.load(volume, job) catch |failure| if (failure == error.Cancelled) .cancelled else .missing;
         switch (result) {
-            .ready => cache.publish(job),
+            .ready => {
+                cache.noteLoad(x.Timer.elapsed(began) / x.Timer.milliseconds(1));
+                cache.publish(job);
+            },
             .missing => cache.publishMissing(job),
             .cancelled => self.cancelled_loads +|= 1,
         }

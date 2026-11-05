@@ -3,6 +3,7 @@ pub const engine = @import("text/engine.zig");
 test {
     std.testing.refAllDecls(engine);
     _ = @import("text/cache.zig");
+    _ = @import("text/worker_service.zig");
     _ = @import("text/pack.zig");
     _ = @import("text/component.zig");
     _ = @import("text/runtime.zig");

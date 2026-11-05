@@ -5,7 +5,7 @@ const core = @import("library.zig");
 pub const Cache = struct {
     pub const slots = 12;
 
-    pub const Request = struct { id: u64 = 0, art: core.Artwork = .{} };
+    pub const Request = struct { id: u64 = 0, art: core.Artwork = .{}, eligible: bool = true };
     tiles: [slots]@import("cover_flow.zig").Prepared = undefined,
     ids: [slots]u64 = @splat(0),
     identities: [slots]u64 = @splat(0),
@@ -13,6 +13,7 @@ pub const Cache = struct {
     use_generation: u32 = 0,
     evictions: u32 = 0,
     failed_loads: u32 = 0,
+    load_estimate_ms: u16 = 30,
     // One acquire observes readiness for the whole lookup. The storage owner
     // alone updates this mask; tile borrows still require serialized UI access.
     ready_mask: std.atomic.Value(u32) = .init(0),
@@ -25,13 +26,19 @@ pub const Cache = struct {
         self.requested[at] = .{ .id = id, .art = value };
     }
 
-    const RequestKey = struct { id: u64 = 0, artwork: u64 = 0 };
+    const RequestKey = struct { id: u64 = 0, artwork: u64 = 0, eligible: bool = true };
+
+    /// Feed completed ready loads only; cancellation is not service latency.
+    pub fn noteLoad(self: *Cache, milliseconds: u32) void {
+        const sample = std.math.clamp(milliseconds, 4, 100);
+        self.load_estimate_ms = @intCast((@as(u32, self.load_estimate_ms) * 3 + sample + 2) / 4);
+    }
 
     pub fn publishRequests(self: *Cache) void {
         var changed = false;
         for (self.requested, &self.published_requests) |request_value, *previous| {
-            const next = RequestKey{ .id = request_value.id, .artwork = if (request_value.id != 0) identity(request_value.art) else 0 };
-            changed = changed or previous.id != next.id or previous.artwork != next.artwork;
+            const next = RequestKey{ .id = request_value.id, .artwork = if (request_value.id != 0) identity(request_value.art) else 0, .eligible = request_value.eligible };
+            changed = changed or previous.id != next.id or previous.artwork != next.artwork or previous.eligible != next.eligible;
             previous.* = next;
         }
         if (changed) _ = self.request_revision.fetchAdd(1, .release);
@@ -67,7 +74,7 @@ pub const Cache = struct {
             };
         }
         for (requests, keys) |requested, key| {
-            if (requested.id == 0 or self.find(key, ready) != null or !std.mem.startsWith(u8, requested.art.cache_path, "atlas:")) continue;
+            if (requested.id == 0 or !requested.eligible or self.find(key, ready) != null or !std.mem.startsWith(u8, requested.art.cache_path, "atlas:")) continue;
             // An album's new artwork supersedes its old pixels, including a
             // negative entry. Do not retain both identities in separate slots.
             for (self.ids, 0..) |id, slot| if (id == requested.id and protected & slotBit(slot) == 0) return .{ .request = requested, .slot = slot };
@@ -326,6 +333,64 @@ test "cover queue drains every request, retries cancellation and sleeps only whe
     // Clearing one ready bit must not hide another prepared slot.
     cache.begin(.{ .slot = cancelled.slot, .request = cancelled.request });
     try std.testing.expect(cache.get(2, art) != null);
+}
+
+test "eligibility alone wakes deferred work without cancelling a wanted in-flight load" {
+    const cache = try std.testing.allocator.create(Cache);
+    defer std.testing.allocator.destroy(cache);
+    cache.* = .{};
+    var queue = Cache.WorkQueue{};
+    const art = core.Artwork{ .key = "synthetic", .cache_path = "atlas:0" };
+    cache.request(0, 1, art);
+    cache.requested[0].eligible = false;
+    cache.publishRequests();
+    const deferred = cache.request_revision.load(.acquire);
+    try std.testing.expect(queue.next(cache, cache.requested, deferred) == null);
+    try std.testing.expect(!queue.pending(deferred));
+    cache.requested[0].eligible = true;
+    cache.publishRequests();
+    const admitted = cache.request_revision.load(.acquire);
+    try std.testing.expect(admitted != deferred);
+    const job = queue.next(cache, cache.requested, admitted).?;
+    try std.testing.expectEqual(1, job.request.id);
+    cache.begin(job);
+    cache.requested[0].eligible = false;
+    cache.publishRequests();
+    try std.testing.expect(cache.wants(job.request.id, Cache.identity(job.request.art)));
+    try std.testing.expect(queue.next(cache, cache.requested, cache.request_revision.load(.acquire)) == null);
+    cache.tiles[job.slot].width = 128;
+    cache.tiles[job.slot].height = 128;
+    cache.publish(job);
+    try std.testing.expect(cache.get(1, art) != null);
+
+    // Ineligible describes admission, never eviction protection. A current
+    // visible cover remains pinned while other requested work fills the cache.
+    for (1..Cache.slots) |slot| {
+        const load = Cache.Load{ .slot = slot, .request = .{ .id = slot + 1, .art = art } };
+        cache.begin(load);
+        cache.publish(load);
+    }
+    cache.request(1, 100, art);
+    cache.publishRequests();
+    const replacement = queue.next(cache, cache.requested, cache.request_revision.load(.acquire)).?;
+    try std.testing.expectEqual(100, replacement.request.id);
+    try std.testing.expect(replacement.slot != job.slot);
+    cache.begin(replacement);
+    try std.testing.expect(cache.get(1, art) != null);
+}
+
+test "completed load estimates remain bounded and smooth abrupt latency changes" {
+    const cache = try std.testing.allocator.create(Cache);
+    defer std.testing.allocator.destroy(cache);
+    cache.* = .{};
+    const initial = cache.load_estimate_ms;
+    for (0..32) |_| cache.noteLoad(0);
+    try std.testing.expect(cache.load_estimate_ms >= 4 and cache.load_estimate_ms < initial);
+    const low = cache.load_estimate_ms;
+    cache.noteLoad(std.math.maxInt(u32));
+    try std.testing.expect(cache.load_estimate_ms > low and cache.load_estimate_ms < 100);
+    for (0..32) |_| cache.noteLoad(std.math.maxInt(u32));
+    try std.testing.expect(cache.load_estimate_ms >= 4 and cache.load_estimate_ms <= 100);
 }
 
 test "long forward and reverse browsing uses every slot and retains the recent return path" {
