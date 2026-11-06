@@ -135,6 +135,7 @@ pub const Report = extern struct {
 var clocks: @import("executive.zig").Clock = .{ .previous = 0 };
 var started: u32 = 0;
 var power_sampling: @import("battery.zig").Sampling = .{};
+pub var power_gauge: @import("battery.zig").Gauge = .{};
 var last_health: u64 = 0;
 var allocators: [2]std.heap.FixedBufferAllocator = undefined;
 var current_slot: u1 = 0;
@@ -154,6 +155,7 @@ var boot_recorded = false;
 
 pub fn initialize(build_identity: u64, painted: bool) void {
     power_sampling = .{};
+    power_gauge = .{};
     stack_painted = painted;
     boot_recorded = false;
     started = x.Timer.now();
@@ -538,6 +540,7 @@ pub fn samplePower(pmic: *@import("f20_power.zig").Controller) void {
         return;
     };
     report.battery_mv = telemetry.battery_mv orelse 0;
+    _ = power_gauge.update(report.battery_mv, telemetry.status.charging, telemetry.status.usb_present);
     report.charge_ua = telemetry.charge_microamps orelse 0;
     report.discharge_ua = telemetry.discharge_microamps orelse 0;
     report.usb_mv = telemetry.usb_mv orelse 0;

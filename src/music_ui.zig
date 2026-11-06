@@ -187,6 +187,7 @@ pub fn Controller(comptime Platform: type) type {
         last_scan_phase: []const u8 = "",
         last_active: u32 = 0,
         battery_mv: u32 = 0,
+        battery_gauge: battery_status.Gauge = .{},
         charging: bool = false,
         external_power: bool = false,
         failure: bool = false,
@@ -195,9 +196,7 @@ pub fn Controller(comptime Platform: type) type {
         rendered_selection: usize = 0,
         rendered_revision: u32 = 0,
         rendered_count: usize = 0,
-        rendered_battery: u32 = 0,
-        rendered_charging: bool = false,
-        rendered_external_power: bool = false,
+        rendered_power: battery_status.Status = .{},
         rendered_scan_active: u32 = 0,
         rendered_scan_width: u16 = 0,
         rendered_flow: f32 = 0,
@@ -1247,8 +1246,8 @@ pub fn Controller(comptime Platform: type) type {
         fn changeVolume(self: *State, steps: i8, now: u64) media.PlaybackCommand {
             // ES9018K2M volume codes are half-decibel attenuation. Preserve
             // the established -64..-8 dB range; every isolated tap is one code.
-            const minimum_attenuation = 16;
-            const maximum_attenuation = 128;
+            const minimum_attenuation = @import("volume_control.zig").loudest;
+            const maximum_attenuation = @import("volume_control.zig").silent;
             const next: u8 = @intCast(std.math.clamp(@as(i16, self.attenuation) - steps, minimum_attenuation, maximum_attenuation));
             const changed = next != self.attenuation;
             const level = @as(f32, @floatFromInt(maximum_attenuation - next)) * 100 / (maximum_attenuation - minimum_attenuation);
@@ -1533,15 +1532,20 @@ pub fn Controller(comptime Platform: type) type {
             return self.menu == null and ((self.screen == .albums and @abs(self.flow - @as(f32, @floatFromInt(self.selection))) > 0.005) or (self.screen == .player and self.animation.isAnimating(now)));
         }
 
+        fn batteryPresentation(self: *const State) battery_status.Status {
+            return if (self.battery_gauge.value.kind != .unknown) self.battery_gauge.value else battery_status.Status.fromPower(self.battery_mv, self.charging, self.external_power);
+        }
+
         pub fn refreshBattery(self: *State, millivolts: u32, charging: bool, external_power: bool, now: u64) void {
             // A header-only change must not replace a region transfer during
             // the short volume fade. A stable volume hold can refresh normally.
             if (self.screen == .player and self.animation.isAnimating(now)) return;
-            const previous = battery_status.Status.fromPower(self.battery_mv, self.charging, self.external_power);
+            const previous = self.batteryPresentation();
+            const next = self.battery_gauge.update(millivolts, charging, external_power);
             self.battery_mv = millivolts;
             self.charging = charging;
             self.external_power = external_power;
-            if (std.meta.eql(previous, battery_status.Status.fromPower(millivolts, charging, external_power))) return;
+            if (std.meta.eql(previous, next)) return;
             self.dirty = true;
             self.major = true;
         }
@@ -1915,7 +1919,7 @@ pub fn Controller(comptime Platform: type) type {
                 .track = self.playing_track,
                 .artwork = artwork,
                 .artwork_id = artwork_id,
-                .power = battery_status.Status.fromPower(self.battery_mv, self.charging, self.external_power),
+                .power = self.batteryPresentation(),
                 .flow_position = self.flow,
                 .scanning = diag.report.scan_active != 0,
                 .scan_visited = diag.report.scan_visited,
@@ -2004,7 +2008,7 @@ pub fn Controller(comptime Platform: type) type {
             model.cards = cards[0..visible_count];
             const span = plan.pages[@backingInt(self.page())];
             const data_changed = (span.flags & theme.Flags.track_metadata != 0 and self.rendered_track_id != if (self.playing_track) |track| track.id else @as(u64, 0)) or (span.flags & theme.Flags.playback_phase != 0 and self.rendered_phase != self.status.phase) or (span.flags & theme.Flags.scan_phase != 0 and !std.mem.eql(u8, self.rendered_scan_phase, self.index.phase));
-            const header_changed = data_changed or !retained or self.rendered_selection != self.selection or self.rendered_count != view.album_count or self.rendered_battery != self.battery_mv or self.rendered_charging != self.charging or self.rendered_external_power != self.external_power;
+            const header_changed = data_changed or !retained or self.rendered_selection != self.selection or self.rendered_count != view.album_count or !std.meta.eql(self.rendered_power, model.power);
             const caption_changed = !retained or self.rendered_selection != self.selection or self.rendered_revision != view.revision;
             const widgets = @import("music_widgets.zig");
             if (retained and !header_changed and !caption_changed) {
@@ -2021,9 +2025,7 @@ pub fn Controller(comptime Platform: type) type {
             self.rendered_selection = self.selection;
             self.rendered_revision = view.revision;
             self.rendered_count = view.album_count;
-            self.rendered_battery = self.battery_mv;
-            self.rendered_charging = self.charging;
-            self.rendered_external_power = self.external_power;
+            self.rendered_power = model.power;
             self.rendered_scan_active = diag.report.scan_active;
             self.rendered_scan_width = scan_width;
             self.rendered_flow = self.flow;
@@ -4146,4 +4148,25 @@ test "only navigation input claims a delayed restore, not first-frame activity o
         try std.testing.expectEqual(48000, state.requested_start_frame);
         try std.testing.expect(state.resume_paused);
     }
+}
+
+test "full battery stays full across USB removal and badge clears on every music page" {
+    var fixture: Fixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    var state = fixture.state();
+    state.refreshBattery(4150, false, true, 0);
+    try std.testing.expectEqual(@as(u3, 4), state.batteryPresentation().level);
+    state.frame(0);
+    state.refreshBattery(4075, false, false, 100);
+    try std.testing.expectEqual(@as(u3, 4), state.batteryPresentation().level);
+    try std.testing.expectEqual(battery_status.Badge.none, state.batteryPresentation().badge());
+    state.frame(100);
+    for ([_]Screen{ .albums, .artists, .player, .home }) |screen| {
+        state.navigate(screen);
+        state.frame(200);
+        try std.testing.expectEqual(@as(u3, 4), state.batteryPresentation().level);
+    }
+    state.refreshBattery(4030, false, false, 300);
+    try std.testing.expectEqual(@as(u3, 3), state.batteryPresentation().level);
 }

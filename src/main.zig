@@ -377,7 +377,7 @@ fn runUsbMode(pmic: *@import("f20_power.zig").Controller) void {
             .ejecting => .ejecting,
             else => .connected,
         };
-        const power = @import("battery.zig").Status.fromPower(if (diag.report.power_valid & 1 != 0) diag.report.battery_mv else 0, diag.report.power_valid & (1 << 5) != 0, diag.report.power_valid & (1 << 3) != 0);
+        const power = diag.power_gauge.value;
         if (previous_phase == null or previous_phase.? != phase or !std.meta.eql(previous_power, power)) {
             view.renderPalette(@import("canvas.zig").Canvas.init(LcdDma.framebuffer), phase, power, usb_palette);
             LcdDma.transferChecked(0, 0, Display.width, Display.height) catch |failure| startupDisplayFailed(panicCode("USBD"), failure);
@@ -1012,7 +1012,7 @@ fn browseMusic(volume: *Volume, battery_mv: u32, attenuation: *u8, input: *Input
         text.deinit();
     }
     index.request(false);
-    var state = @import("f20_music_ui.zig").State{ .index = &index, .covers = &covers.cache, .text_cache = &text.cache, .attenuation = attenuation.*, .battery_mv = battery_mv, .appearance = appearance, .track_store = @import("track_selection.zig").Store.init(memory.scan_artwork.cachedSlice(u8)) };
+    var state = @import("f20_music_ui.zig").State{ .index = &index, .covers = &covers.cache, .text_cache = &text.cache, .attenuation = attenuation.*, .battery_mv = battery_mv, .battery_gauge = diag.power_gauge, .appearance = appearance, .track_store = @import("track_selection.zig").Store.init(memory.scan_artwork.cachedSlice(u8)) };
     state.theme_store = retained_themes;
     state.applyPreferences(preferences);
     var session = MusicSession{ .state = &state, .input = input, .pmic = pmic, .preferences_store = &preference_store, .preferences_seen = preferences, .listening_store = &listening_store, .activity_state = &activity_state, .activity_store = &activity_store, .playlist_store = &playlist_store, .resume_pending = resume_record, .listening_ready = resume_record == null, .fat_seeks = fat_seeks };

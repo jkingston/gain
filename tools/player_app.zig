@@ -815,7 +815,7 @@ export fn gain_player_environment(millivolts: u32, charging: u32, usb: u32, exte
         serviceListening(milliseconds, true);
     }
     if (usb != 0) state.cancelInput(0);
-    power = gain.battery.Status.fromPower(millivolts, charging != 0, external_power != 0);
+    power = state.battery_gauge.update(millivolts, charging != 0, external_power != 0);
     usb_phase = if (usb == 0) null else @fromBackingInt(@intCast(usb - 1));
     usb_dirty = true;
     state.refreshBattery(millivolts, charging != 0, external_power != 0, milliseconds);

@@ -527,6 +527,13 @@ only need the pixel/input contract may import `src/simulator.zig` directly. The
 module ABI is desktop development tooling, independent of any future firmware
 extension system.
 
+The empty volume bar is a true mute: both DAC channels and the board's output
+mute remain asserted through playback startup, track changes and output routing.
+The first step above zero restores the quietest non-muted setting. Battery level
+uses coarse voltage bands with a 50 mV falling margin, shared across USB and
+music mode, so unplugging or modest load changes do not instantly remove a bar.
+This is display hysteresis, not a calibrated percentage or a charging-policy change.
+
 Home provides Albums, Artists, Songs, Shuffle Songs, Playlists, Favourites,
 Recently Added and Settings. A current-track subtitle is pinned below Home's
 heading while a session exists; Previous from the first menu item selects it,
@@ -1030,6 +1037,11 @@ frame. Font I/O remains cooperative on the storage owner. Across a matching-card
 remount, component identity and its validated envelope allow the verified engine
 code to remain resident. Font sources, pages, faces and label masks are rebound
 or cleared so host edits cannot reuse stale text.
+
+Regional CJK punctuation follows the same checked fallback as Han, while kana
+remains Japanese. This avoids introducing a third CJK face into mixed Latin /
+Japanese labels and repeatedly reopening fonts during shaping and truncation.
+The generic font fixture includes full-width punctuation to exercise this path.
 
 Only the storage owner shapes and rasterises. Twelve immutable label slots,
 two open font faces, a 128 KiB page cache, a resident coverage index and fixed

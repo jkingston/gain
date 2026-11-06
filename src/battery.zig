@@ -40,6 +40,50 @@ pub const Status = struct {
     }
 };
 
+/// Preserve a coarse level across load/USB voltage changes. Rising thresholds
+/// are unchanged; falling needs 50 mV of margin. This is display hysteresis,
+/// not a calibrated fuel gauge or a change to PMIC charging policy.
+pub const Gauge = struct {
+    value: Status = .{},
+    const falling_margin_mv = 50;
+    const thresholds_mv = [_]u32{ 3500, 3700, 3900, 4100 };
+
+    pub fn update(self: *Gauge, millivolts: u32, charging: bool, external_power: bool) Status {
+        if (millivolts == 0) return self.value;
+        var next = Status.fromPower(millivolts, charging, external_power);
+        if (self.value.kind != .unknown and next.level < self.value.level) {
+            var level = self.value.level;
+            while (level > next.level and millivolts +| falling_margin_mv < thresholds_mv[level - 1]) level -= 1;
+            next.level = level;
+            next.kind = switch (level) {
+                0 => .empty,
+                1 => .low,
+                4 => .full,
+                else => .normal,
+            };
+        }
+        self.value = next;
+        return next;
+    }
+};
+
+test "unplugging and voltage noise do not immediately lower a full icon" {
+    var gauge: Gauge = .{};
+    try std.testing.expectEqual(@as(u3, 4), gauge.update(4150, false, true).level);
+    const unplugged = gauge.update(4075, false, false);
+    try std.testing.expectEqual(@as(u3, 4), unplugged.level);
+    try std.testing.expectEqual(Badge.none, unplugged.badge());
+    for ([_]u32{ 4090, 4060, 4105, 4070 }) |mv| try std.testing.expectEqual(@as(u3, 4), gauge.update(mv, false, false).level);
+    try std.testing.expectEqual(@as(u3, 3), gauge.update(4040, false, false).level);
+    try std.testing.expectEqual(@as(u3, 3), gauge.update(4080, false, false).level);
+    try std.testing.expectEqual(@as(u3, 4), gauge.update(4120, false, false).level);
+    // Cold estimates remain honest; plugged in alone does not imply full.
+    gauge = .{};
+    try std.testing.expectEqual(@as(u3, 3), gauge.update(4080, false, true).level);
+    try std.testing.expectEqual(@as(u3, 1), gauge.update(3600, false, false).level);
+    try std.testing.expectEqual(gauge.value, gauge.update(0, false, false));
+}
+
 pub const Sampling = struct {
     last_ms: ?u64 = null,
 
