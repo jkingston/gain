@@ -4,9 +4,9 @@
   "retained_full_families": [
     "NotoSansDuployan"
   ],
-  "sha256": "b4d22fe674a45b926d36f7239242582d61dd7c1e82bd2933a6a170e97cff3736",
-  "bytes": 5815584,
-  "codepoints": 783,
+  "sha256": "0280ceb3ba58f0085138e4ba44da9d9c782ec26f4f4bad3c6a32029a5ccdbedd",
+  "bytes": 5815624,
+  "codepoints": 784,
   "families": [
     {
       "name": "Inter",
@@ -218,7 +218,7 @@
     },
     {
       "name": "NotoSansHK",
-      "codepoints": 147
+      "codepoints": 148
     },
     {
       "name": "NotoSansImperialAramaic",
@@ -242,7 +242,7 @@
     },
     {
       "name": "NotoSansJP",
-      "codepoints": 149
+      "codepoints": 150
     },
     {
       "name": "NotoSansKaithi",
@@ -286,7 +286,7 @@
     },
     {
       "name": "NotoSansKR",
-      "codepoints": 157
+      "codepoints": 158
     },
     {
       "name": "NotoSansLao",
@@ -534,7 +534,7 @@
     },
     {
       "name": "NotoSansSC",
-      "codepoints": 151
+      "codepoints": 152
     },
     {
       "name": "NotoSansSharada",
@@ -638,7 +638,7 @@
     },
     {
       "name": "NotoSansTC",
-      "codepoints": 147
+      "codepoints": 148
     },
     {
       "name": "NotoSansTelugu",
@@ -2230,6 +2230,11 @@
       65039,
       65039,
       2
+    ],
+    [
+      65374,
+      65374,
+      52
     ],
     [
       65533,

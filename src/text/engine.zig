@@ -56,6 +56,7 @@ var missing: u16 = 0;
 var statistics: abi.Statistics = .{};
 var attempt_failures: u32 = 0;
 var selected_locale: abi.Locale = .automatic;
+var face_open_count: u32 = 0;
 
 pub const api = abi.Api{ .initialize = initialize, .prepare = prepare, .shutdown = shutdown, .statistics = snapshot };
 
@@ -305,6 +306,7 @@ fn openFace(family: u16, role: abi.Role) !void {
     var args = std.mem.zeroes(c.FT_Open_Args);
     args.flags = c.FT_OPEN_STREAM;
     args.stream = &slot.stream;
+    if (comptime @import("builtin").is_test) face_open_count += 1;
     if (c.FT_Open_Face(ft_library, &args, 0, &slot.face) != 0) return error.InvalidFont;
     errdefer releaseFace(slot);
     if (c.FT_Set_Pixel_Sizes(slot.face, 0, pixelSize(role)) != 0) return error.InvalidFont;
@@ -323,7 +325,10 @@ fn familyFor(cp: u32, regional: bool) !u16 {
     // may be another region's pan-CJK font; mixing that with Japanese Han
     // changes typography and needlessly opens two large CJK faces.
     if (regional and isKana(cp) and h.cjk[0] != 0xffff) return h.cjk[0];
-    if (regional and ((cp >= 0x3400 and cp <= 0x9fff) or (cp >= 0x20000 and cp <= 0x323af))) {
+    // Shared East Asian punctuation belongs with the regional CJK face too.
+    // First-coverage mapping can otherwise introduce a third, Hong Kong face
+    // into Latin/Japanese titles and thrash the two-face cache on every pass.
+    if (regional and (isCjkPunctuation(cp) or (cp >= 0x3400 and cp <= 0x9fff) or (cp >= 0x20000 and cp <= 0x323af))) {
         const index: usize = switch (selected_locale) {
             .automatic, .japanese => 0,
             .simplified_chinese => 1,
@@ -350,6 +355,12 @@ fn isKana(cp: u32) bool {
     return (cp >= 0x3040 and cp <= 0x30ff) or (cp >= 0x31f0 and cp <= 0x31ff) or
         (cp >= 0xff66 and cp <= 0xff9f) or (cp >= 0x1aff0 and cp <= 0x1afff) or
         (cp >= 0x1b000 and cp <= 0x1b16f);
+}
+
+fn isCjkPunctuation(cp: u32) bool {
+    return (cp >= 0x3000 and cp <= 0x303f) or (cp >= 0xfe10 and cp <= 0xfe1f) or
+        (cp >= 0xfe30 and cp <= 0xfe4f) or (cp >= 0xff01 and cp <= 0xff60) or
+        (cp >= 0xffe0 and cp <= 0xffee);
 }
 
 fn ignorable(cp: u32) bool {
@@ -692,6 +703,19 @@ fn snapshot(output: *abi.Statistics) callconv(.c) void {
 /// Test builds compare the complete layout path with a direct, independently
 /// itemised HarfBuzz buffer using the same pinned font and FT load settings.
 pub const testing = if (@import("builtin").is_test) struct {
+    pub fn faceOpens() u32 {
+        return face_open_count;
+    }
+
+    pub fn expectLatinJapaneseFamilies() !void {
+        var latin = false;
+        var japanese = false;
+        for (glyphs[0..glyph_count]) |g| {
+            if (g.family == 0) latin = true else if (g.family == header.?.cjk[0]) japanese = true else return error.UnexpectedFallbackFace;
+        }
+        try std.testing.expect(latin and japanese);
+    }
+
     pub fn expectJapaneseFamily() !void {
         try std.testing.expect(glyph_count != 0);
         for (glyphs[0..glyph_count]) |g| try std.testing.expectEqual(header.?.cjk[0], g.family);

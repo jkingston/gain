@@ -272,11 +272,32 @@ test "Kana remains Japanese across Han locale choices including halfwidth and co
         try std.testing.expectEqual(0, label.missing);
         try engine.testing.expectJapaneseFamily();
         for ([_]u32{ 0x304b, 0x3099, 0x30ab, 0x31f0, 0xff76, 0xff9e, 0x1aff0, 0x1b000, 0x1b130 }) |cp| try engine.testing.expectRegionalFamily(cp, 0);
-        try engine.testing.expectRegionalFamily(0x65e5, switch (locale) {
+        for ([_]u32{ 0x65e5, 0x3002, 0xff5e }) |cp| try engine.testing.expectRegionalFamily(cp, switch (locale) {
             .automatic, .japanese => 0,
             .simplified_chinese => 1,
             .traditional_chinese => 2,
             .korean => 3,
         });
     }
+}
+
+test "mixed Latin Japanese and fullwidth punctuation keep two resident faces across truncation" {
+    var source: Fixture = .{};
+    const input = abi.Source{ .context = &source, .bytes = fixture.len, .read = Fixture.read, .poll = Fixture.poll };
+    try std.testing.expectEqual(abi.Result.ready, engine.api.initialize(&input, &workspace));
+    defer engine.api.shutdown();
+    var label: abi.Label = .{};
+    const request = try abi.Request.init("Tokyo ～日本の音楽 • かなカナ～", .reading, 160, .automatic, true);
+    try std.testing.expectEqual(abi.Result.ready, engine.api.prepare(&request, &label));
+    try std.testing.expectEqual(0, label.missing);
+    try std.testing.expectEqual(1, label.truncated);
+    try engine.testing.expectLatinJapaneseFamilies();
+    const opens = engine.testing.faceOpens();
+    for (0..20) |_| {
+        try std.testing.expectEqual(abi.Result.ready, engine.api.prepare(&request, &label));
+        try std.testing.expectEqual(0, label.missing);
+        try std.testing.expect(label.width <= 160);
+    }
+    try std.testing.expectEqual(opens, engine.testing.faceOpens());
+    for ([_]u32{ 0x3000, 0x3002, 0x300c, 0x3030, 0xfe10, 0xfe30, 0xff01, 0xff5e, 0xffe5 }) |cp| try engine.testing.expectRegionalFamily(cp, 0);
 }
