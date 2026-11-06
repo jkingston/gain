@@ -369,11 +369,21 @@ pub fn wait() bool {
 }
 
 pub fn transfer(left: usize, top: usize, width: usize, height: usize) bool {
-    if (!resetForDirect()) return false;
-    if (left > board.width or top > board.height or width > board.width or height > board.height) return false;
-    prepare(.{ .x = @intCast(left), .y = @intCast(top), .width = @intCast(width), .height = @intCast(height) }) catch return false;
-    commit() catch return false;
-    return wait();
+    transferChecked(left, top, width, height) catch |failure| {
+        last_failure = last_failure orelse failure;
+        return false;
+    };
+    return true;
+}
+
+/// Startup needs the actual error before SD logging is available. Keep the
+/// boolean API for existing callers without dropping that diagnostic reason.
+pub fn transferChecked(left: usize, top: usize, width: usize, height: usize) !void {
+    if (!resetForDirect()) return last_failure orelse error.DisplayShutdown;
+    if (left > board.width or top > board.height or width > board.width or height > board.height) return error.DisplayGeometry;
+    try prepare(.{ .x = @intCast(left), .y = @intCast(top), .width = @intCast(width), .height = @intCast(height) });
+    try commit();
+    if (!wait()) return last_failure orelse error.DisplayTransfer;
 }
 
 /// Panic rendering can take over only after an acknowledged normal shutdown.

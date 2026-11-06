@@ -528,7 +528,10 @@ module ABI is desktop development tooling, independent of any future firmware
 extension system.
 
 Home provides Albums, Artists, Songs, Shuffle Songs, Playlists, Favourites,
-Recently Added and Settings; Now Playing appears when a session exists. Lists
+Recently Added and Settings. A current-track subtitle is pinned below Home's
+heading while a session exists; Previous from the first menu item selects it,
+and Play opens Now Playing without replacing the queue. A fixed header icon
+shows playing, paused or preparing state across music screens. Lists
 use one column with an overflow thumb. Artists retain both their complete song
 list and individual albums. Shuffle Songs starts the entire song library;
 collection actions retain their narrower scope.
@@ -928,6 +931,12 @@ to prefer `.gain/previous.f20`. A missing or invalid candidate falls back to the
 other slot. Board, addresses, lengths and both CRCs must pass before execution.
 This detects corruption; it is not a signed-image security system.
 
+The first visible screen is the themed Home or USB view. Startup does not draw
+a separate splash. LCD initialization and USB-view transfer failures preserve
+their stage and error name in the RAM fault capsule, turn the backlight off and
+enter processor USB recovery instead of blinking. This recovery path is present
+in both the normal and maintenance images.
+
 `mise run build` produces `firmware.f20`, `gain-loader.bin` and
 `gain-loader.uimage`. `mise run test-boot` tests partial copies, mutation,
 fragmented reads, fallback and boot-attempt acknowledgement in three build modes.
@@ -1012,7 +1021,15 @@ image stays within its 2.5 MiB reservation. The loader validates the
 component version, addresses, length and CRC before execution. The build gate
 checks the ELF for memory bounds, OS syscalls, TLS and constructors. No OS
 startup runs. All authored adapters and runtime helpers are Zig. Missing or
-invalid packs retain the embedded text path and do not prevent boot/recovery.
+invalid packs do not prevent boot/recovery. Pending complex-script labels show
+a bounded loading mark; unavailable labels have a distinct failure mark instead
+of substituting question marks for their metadata.
+
+Libraries with complex-script metadata queue engine warmup after the first UI
+frame. Font I/O remains cooperative on the storage owner. Across a matching-card
+remount, component identity and its validated envelope allow the verified engine
+code to remain resident. Font sources, pages, faces and label masks are rebound
+or cleared so host edits cannot reuse stale text.
 
 Only the storage owner shapes and rasterises. Twelve immutable label slots,
 two open font faces, a 128 KiB page cache, a resident coverage index and fixed

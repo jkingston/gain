@@ -111,6 +111,7 @@ pub fn build(b: *std.Build) void {
     firmware_options.addOption(u64, "build_id", build_identity);
     stage2_module.addOptions("firmware_options", firmware_options);
     stage2_module.addAssemblyFile(b.path("src/start.S"));
+    stage2_module.addAssemblyFile(b.path("src/boot/fresh_rom.S"));
     stage2_module.addAssemblyFile(b.path("src/x1000_context.S"));
     @import("build_codecs.zig").add(b, stage2_module, target, .ReleaseFast, true);
     _ = @import("build_usb.zig").add(b, stage2_module, target, .ReleaseFast, true);

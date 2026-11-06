@@ -19,7 +19,6 @@ const Watchdog = x1000.Watchdog;
 var retained_themes: @import("runtime_theme.zig").Store = .{};
 var usb_palette: @import("music_chrome.zig").Palette = @import("music_chrome.zig").light;
 var appearance: @import("music_chrome.zig").Appearance = .light;
-var text_loader: ?*@import("f20_text.zig").Loader = null;
 
 const Display = struct {
     const width = board.display.width;
@@ -30,11 +29,6 @@ const Display = struct {
     const red: u16 = 0xf800;
     const cyan: u16 = 0x07ff;
     const yellow: u16 = 0xffe0;
-
-    fn init() bool {
-        LcdDma.initialize() catch return false;
-        return true;
-    }
 
     fn clear(color: u16) void {
         surface.clear(color);
@@ -60,6 +54,7 @@ const Display = struct {
 };
 
 var display_ready = false;
+const fault_signature = 0x47464155;
 
 fn panicCode(comptime value: *const [4]u8) u32 {
     return @as(u32, value[0]) << 24 |
@@ -95,21 +90,32 @@ fn decimal4(value_initial: u32, output: *[4]u8) void {
     }
 }
 
-fn rawPanicBlink() noreturn {
+fn recoverWithoutDisplay() noreturn {
+    // A failed display cannot present a useful error. Keep its light off and
+    // expose the independent ROM transport, including release builds.
     board.display.backlight.output(false);
-    while (true) {
-        board.display.backlight.set(true);
-        Timer.delayMicroseconds(150_000);
-        board.display.backlight.set(false);
-        Timer.delayMicroseconds(150_000);
-    }
+    maintenance.returnRom();
+}
+
+fn startupDisplayFailed(stage: u32, failure: anyerror) noreturn {
+    // The first four words retain the existing panic ABI. A bounded name is
+    // useful before SD logging and the normal USB endpoint can be started.
+    const message: *[128]u8 = @ptrFromInt(memory.fault_capsule.uncached() + 16);
+    @memset(message, 0);
+    const name = @errorName(failure);
+    const length = @min(message.len - 1, name.len);
+    @memcpy(message[0..length], name[0..length]);
+    const capsule: *volatile [4]u32 = @ptrFromInt(memory.fault_capsule.uncached());
+    capsule.* = .{ fault_signature, stage, @intFromError(failure), x1000.Lcd.mcu_state.read() };
+    x1000.memoryBarrier();
+    recoverWithoutDisplay();
 }
 
 fn showPanic(cause: u32, epc: u32, status: u32) noreturn {
     const capsule: *volatile [4]u32 = @ptrFromInt(memory.fault_capsule.uncached());
-    capsule.* = .{ 0x47464155, cause, epc, status };
+    capsule.* = .{ fault_signature, cause, epc, status };
     if (options.maintenance) maintenance.returnRom();
-    if (!display_ready) rawPanicBlink();
+    if (!display_ready) recoverWithoutDisplay();
     var cause_text: [8]u8 = undefined;
     var epc_text: [8]u8 = undefined;
     var status_text: [8]u8 = undefined;
@@ -127,8 +133,8 @@ fn showPanic(cause: u32, epc: u32, status: u32) noreturn {
     Display.text(16, 130, "STATUS", Display.white, 2);
     Display.text(130, 130, &status_text, Display.yellow, 2);
     Display.text(16, 188, "WATCHDOG RESET", Display.cyan, 1);
-    if (!LcdDma.resetForDirect()) rawPanicBlink();
-    if (!Display.presentRegionCpu(0, 0, Display.width, Display.height)) rawPanicBlink();
+    if (!LcdDma.resetForDirect()) recoverWithoutDisplay();
+    if (!Display.presentRegionCpu(0, 0, Display.width, Display.height)) recoverWithoutDisplay();
     while (true) asm volatile ("nop");
 }
 
@@ -276,11 +282,15 @@ fn waitForErrorDismiss(input: *Input) void {
 }
 
 export fn gain_main() callconv(.c) noreturn {
+    // Preserve a fresh loader report, but never attribute an old panic to a
+    // later successful RAM upload or intentional return to recovery.
+    const prior_fault: *volatile u32 = @ptrFromInt(memory.fault_capsule.uncached());
+    if (prior_fault.* == fault_signature) prior_fault.* = 0;
     if (options.maintenance) maintenance.saveRom();
     // SPL (or the warm RAM monitor) already runs OST2. Resetting it here
     // races the first measurement against the hardware counter clear.
     diag.initialize(options.build_id, options.maintenance);
-    if (!Display.init()) rawPanicBlink();
+    LcdDma.initialize() catch |failure| startupDisplayFailed(panicCode("LCDI"), failure);
     display_ready = true;
     Watchdog.start(.external, .by_1024, board.watchdog_timeout_ticks);
     Watchdog.kick();
@@ -292,11 +302,6 @@ export fn gain_main() callconv(.c) noreturn {
     pmic.enableCoulombCounting() catch |failure| diag.failed(4, failure);
     diag.samplePower(&pmic);
     const battery_mv = diag.report.battery_mv;
-
-    Display.clear(Display.black);
-    Display.text(102, 92, "GAIN", Display.white, 3);
-    Display.text(112, 132, "LOADING", Display.cyan, 1);
-    if (!Display.present()) rawPanicBlink();
 
     const resources = storage.Controller.Resources{
         .descriptor = sd_descriptor,
@@ -375,7 +380,7 @@ fn runUsbMode(pmic: *@import("f20_power.zig").Controller) void {
         const power = @import("battery.zig").Status.fromPower(if (diag.report.power_valid & 1 != 0) diag.report.battery_mv else 0, diag.report.power_valid & (1 << 5) != 0, diag.report.power_valid & (1 << 3) != 0);
         if (previous_phase == null or previous_phase.? != phase or !std.meta.eql(previous_power, power)) {
             view.renderPalette(@import("canvas.zig").Canvas.init(LcdDma.framebuffer), phase, power, usb_palette);
-            _ = Display.present();
+            LcdDma.transferChecked(0, 0, Display.width, Display.height) catch |failure| startupDisplayFailed(panicCode("USBD"), failure);
             previous_phase = phase;
             previous_power = power;
         }
@@ -436,6 +441,8 @@ const MusicSession = struct {
     unplug_pause: @import("listening_power.zig").PauseRequest = .{},
     fat_seeks: *@import("file_seek_index.zig").Cache,
     theme_pending: bool = true,
+    font_warmup_revision: ?u32 = null,
+    font_warmup_queued: bool = false,
     return_rom: bool = false,
     playing: bool = false,
     flush_pending: bool = false,
@@ -835,8 +842,85 @@ const MusicSession = struct {
         x1000.Interrupts.restoreCpu(masks);
     }
 
+    fn warmAlbumLabel(
+        self: *@This(),
+        text: *@import("f20_text.zig").Loader,
+        value: []const u8,
+        binding: @import("runtime_theme.zig").Binding,
+        default_role: @import("text/contract.zig").Role,
+    ) bool {
+        if (@import("text/cache.zig").warmupPriority(value) != .fallback) return false;
+        var role = default_role;
+        var width: u16 = @import("music_chrome.zig").Layout.width;
+        for (self.state.theme_store.current().slice(.albums)) |op| {
+            if (op.kind == .text and op.binding == binding) {
+                role = op.role;
+                width = op.rect.w;
+                break;
+            }
+        }
+        text.requestWarmupLabel(value, role, width);
+        self.font_warmup_queued = true;
+        return true;
+    }
+
+    fn warmText(self: *@This(), service: player.StorageService) void {
+        if (self.font_warmup_queued) return;
+        const text = self.state.index.text orelse return;
+        const view = self.state.snapshot();
+        if (self.font_warmup_revision == view.revision) return;
+        const priority = @import("text/cache.zig").warmupPriority;
+        var shaping: ?[]const u8 = null;
+        // Collection captions are likely next destinations from Home. Their
+        // actual theme role/width primes the same faces and reusable mask.
+        for (view.albums[0..view.album_count], 0..) |album, rank| {
+            if (rank % 32 == 0 and service.poll(service.context)) return;
+            if (self.warmAlbumLabel(text, album.artist, .album_artist, .caption) or
+                self.warmAlbumLabel(text, album.title, .album_title, .body)) return;
+        }
+        for (view.tracks[0..view.track_count], 0..) |track, rank| {
+            if (rank % 64 == 0 and service.poll(service.context)) return;
+            for ([_][]const u8{ track.meta.title, track.meta.artist, track.meta.album, track.meta.album_artist }) |value| {
+                switch (priority(value)) {
+                    .embedded => {},
+                    .shaping => if (shaping == null) {
+                        shaping = value;
+                    },
+                    .fallback => {
+                        text.requestWarmupLabel(value, .reading, @import("music_chrome.zig").Layout.width);
+                        self.font_warmup_queued = true;
+                        return;
+                    },
+                }
+            }
+        }
+        for (view.playlists) |playlist| {
+            switch (priority(playlist.name)) {
+                .embedded => {},
+                .shaping => if (shaping == null) {
+                    shaping = playlist.name;
+                },
+                .fallback => {
+                    text.requestWarmupLabel(playlist.name, .reading, @import("music_chrome.zig").Layout.width);
+                    self.font_warmup_queued = true;
+                    return;
+                },
+            }
+        }
+        if (shaping) |value| {
+            text.requestWarmupLabel(value, .reading, @import("music_chrome.zig").Layout.width);
+            self.font_warmup_queued = true;
+            return;
+        }
+        // A later progressive publication may introduce another script. A
+        // negative result belongs to this revision, not the whole mount.
+        self.font_warmup_revision = view.revision;
+    }
+
     fn storageWork(context: *anyopaque, service: player.StorageService) void {
         const self: *@This() = @ptrCast(@alignCast(context));
+        if (service.poll(service.context)) return;
+        self.warmText(service);
         if (service.poll(service.context)) return;
         if (self.theme_pending and !self.playing) {
             self.theme_pending = false;
@@ -922,11 +1006,9 @@ fn browseMusic(volume: *Volume, battery_mv: u32, attenuation: *u8, input: *Input
     index.covers = covers;
     const text = @import("f20_text.zig").Loader.init(volume);
     index.text = text;
-    text_loader = text;
     LcdDma.text_cache = &text.cache;
     defer {
         LcdDma.text_cache = null;
-        text_loader = null;
         text.deinit();
     }
     index.request(false);
