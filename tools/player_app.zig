@@ -55,6 +55,7 @@ var base_frames: u64 = 0;
 var usb_phase: ?gain.usb_view.Phase = null;
 var usb_dirty = true;
 var power = gain.battery.Status{};
+var power_gauge: gain.battery.Gauge = .{};
 var started_at: u64 = 0;
 var presented_revision: u64 = 0;
 var host_io: std.Io.Threaded = undefined;
@@ -400,6 +401,7 @@ fn init(at: u64) callconv(.c) void {
     usb_phase = null;
     usb_dirty = true;
     power = .{};
+    power_gauge = .{};
     playing = false;
     paused = false;
     base_frames = 0;
@@ -815,7 +817,7 @@ export fn gain_player_environment(millivolts: u32, charging: u32, usb: u32, exte
         serviceListening(milliseconds, true);
     }
     if (usb != 0) state.cancelInput(0);
-    power = state.battery_gauge.update(millivolts, charging != 0, external_power != 0);
+    power = power_gauge.update(millivolts, charging != 0, external_power != 0);
     usb_phase = if (usb == 0) null else @fromBackingInt(@intCast(usb - 1));
     usb_dirty = true;
     state.refreshBattery(millivolts, charging != 0, external_power != 0, milliseconds);
