@@ -126,10 +126,30 @@ fn artwork(c: C, op: *const theme.Op, context: Context) void {
     }
 }
 
+const scrollbar_width = 2;
+const scrollbar_gutter = 6;
+const minimum_thumb_height = 6;
+
+const ScrollThumb = struct { top: u16, height: u16 };
+
+fn scrollThumb(extent: u16, visible_rows: usize, total_rows: usize, first_row: usize) ?ScrollThumb {
+    if (extent == 0 or visible_rows == 0 or total_rows <= visible_rows) return null;
+    // Firmware counts are 32-bit. Wider host fixtures keep the same exact
+    // endpoint arithmetic without overflowing on adversarial simulator input.
+    const Wide = if (@bitSizeOf(usize) > 32) u128 else u64;
+    const height: u16 = @intCast(@min(extent, @max(@min(extent, minimum_thumb_height), @as(Wide, extent) * visible_rows / total_rows)));
+    const first = @min(first_row, total_rows - visible_rows);
+    const top: u16 = @intCast(@as(Wide, first) * (extent - height) / (total_rows - visible_rows));
+    return .{ .top = top, .height = height };
+}
+
 fn list(c: C, op: *const theme.Op, context: Context, muted: u16) void {
-    const cell_width = op.cell_width;
+    // Reserve the same trailing gutter for short and long lists, keeping text
+    // and chevrons aligned when an overflow indicator appears or disappears.
+    const gutter: u16 = @min(scrollbar_gutter, op.cell_width -| 16);
     for (context.items, 0..) |item, i| {
         const column = i % op.columns;
+        const cell_width = op.cell_width - (if (column + 1 == op.columns) gutter else 0);
         const row = i / op.columns;
         const y = op.rect.y + @as(i32, @intCast(row * @as(usize, op.row_stride)));
         if (y + op.row_height > @as(i32, op.rect.y) + op.rect.h) break;
@@ -153,10 +173,16 @@ fn list(c: C, op: *const theme.Op, context: Context, muted: u16) void {
         }
         if (item.chevron and item.detail.len == 0 and op.columns == 1) c.chevron(x + cell_width - 14, y + op.detail_label_offset, muted);
         if (op.detail != 0 or item.detail.len != 0) {
-            const detail_rect = if (op.columns > 1) theme.Rect{ .x = @intCast(x + inset), .y = @intCast(y + 30), .w = cell_width - 2 * inset, .h = 18 } else theme.Rect{ .x = @intCast(x + cell_width - 132), .y = @intCast(y + op.detail_label_offset), .w = 124, .h = 18 };
+            const detail_width = @min(124, cell_width - 2 * inset);
+            const detail_rect = if (op.columns > 1) theme.Rect{ .x = @intCast(x + inset), .y = @intCast(y + 30), .w = cell_width - 2 * inset, .h = 18 } else theme.Rect{ .x = @intCast(x + cell_width - inset - detail_width), .y = @intCast(y + op.detail_label_offset), .w = detail_width, .h = 18 };
             label(c, detail_rect, item.detail, .caption, if (selected) op.focus_text else muted, if (op.columns > 1) .left else .right);
         }
         if (op.detail == 0 and op.literal_length > 0) c.chevron(x + cell_width - 14, y + op.detail_label_offset, muted);
+    }
+    if (gutter >= scrollbar_width) {
+        const rows = op.rect.h / @max(1, op.row_stride);
+        const total_rows = context.total / op.columns + @intFromBool(context.total % op.columns != 0);
+        if (scrollThumb(op.rect.h, rows, total_rows, context.first / op.columns)) |thumb| c.fill(@as(i32, op.rect.x) + op.rect.w - scrollbar_width, @as(i32, op.rect.y) + thumb.top, scrollbar_width, thumb.height, muted);
     }
 }
 
@@ -303,4 +329,42 @@ fn renderPass(plan: *const theme.Plan, pixels: *[320 * 240]u16, context: Context
         }
     }
     context.cache.publishRequests();
+}
+
+test "overflow thumb is proportional, bounded and reaches both ends for rows and grids" {
+    try std.testing.expect(scrollThumb(160, 6, 6, 0) == null);
+    try std.testing.expect(scrollThumb(160, 0, 9, 0) == null);
+    try std.testing.expectEqual(ScrollThumb{ .top = 0, .height = 106 }, scrollThumb(160, 6, 9, 0).?);
+    try std.testing.expectEqual(ScrollThumb{ .top = 54, .height = 106 }, scrollThumb(160, 6, 9, 3).?);
+    for (1..241) |extent| for ([_]usize{ 7, 9, 1024, 8192, std.math.maxInt(usize) }) |total| {
+        const first = scrollThumb(@intCast(extent), 6, total, 0).?;
+        const last = scrollThumb(@intCast(extent), 6, total, std.math.maxInt(usize)).?;
+        try std.testing.expectEqual(0, first.top);
+        try std.testing.expect(first.height > 0 and first.height <= extent);
+        try std.testing.expectEqual(extent, @as(usize, last.top) + last.height);
+    };
+}
+
+test "list overflow paint stays in its trailing gutter and respects damage clips" {
+    var pixels: [320 * 240]u16 = @splat(0x1234);
+    const view = try std.testing.allocator.create(views.Snapshot);
+    defer std.testing.allocator.destroy(view);
+    try view.build(&.{}, &.{}, 1, true, 1);
+    const cache = try std.testing.allocator.create(covers.Cache);
+    defer std.testing.allocator.destroy(cache);
+    cache.* = .{};
+    var context = Context{ .page = .home, .title = "", .empty_message = "", .jump_title = "", .detail = "", .phase = "", .snapshot = view, .cache = cache, .items = &.{}, .first = 0, .selection = 0, .total = 9, .track = null, .artwork = .{}, .artwork_id = 0, .power = .{}, .flow_position = 0, .scanning = false, .scan_visited = 0, .scan_total = 0, .elapsed = 0, .duration = 0, .sample_rate = 0, .volume_mix = 0, .volume_value = 0, .playing = false, .jump = 0 };
+    const op = theme.Op{ .kind = .list, .rect = .{ .x = 8, .y = 64, .w = 304, .h = 168 }, .columns = 1, .row_height = 28, .row_stride = 28, .cell_width = 304, .cell_stride = 304 };
+    var c = C.init(&pixels);
+    c.surface.clip = .{ .x = 0, .y = 80, .width = 320, .height = 20 };
+    list(c, &op, context, 0xffff);
+    for (pixels, 0..) |pixel, i| {
+        const x = i % 320;
+        const y = i / 320;
+        try std.testing.expectEqual(if (x >= 310 and x < 312 and y >= 80 and y < 100) @as(u16, 0xffff) else @as(u16, 0x1234), pixel);
+    }
+    @memset(&pixels, 0x1234);
+    context.total = 6;
+    list(C.init(&pixels), &op, context, 0xffff);
+    for (pixels) |pixel| try std.testing.expectEqual(0x1234, pixel);
 }

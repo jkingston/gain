@@ -1,5 +1,5 @@
-//! Application-owned measurement and persistence. Never writes while playback
-//! workers or the USB host own SD; no file allocation and no text hot-path logs.
+//! Application-owned measurement and persistence. The sole storage owner may
+//! persist catalogues during playback; USB ownership always excludes writes.
 const std = @import("std");
 const x = @import("x1000.zig");
 const memory = @import("f20_memory.zig");
@@ -167,10 +167,14 @@ pub fn initialize(build_identity: u64, painted: bool) void {
 }
 
 pub fn now() u64 {
+    const status = x.Interrupts.disableCpu();
+    defer x.Interrupts.restoreCpu(status);
     return clocks.sample(x.Timer.now());
 }
 
 pub fn event(kind: portable.Kind, values: [12]u32) void {
+    const status = x.Interrupts.disableCpu();
+    defer x.Interrupts.restoreCpu(status);
     log.record(.{ .kind = kind, .ticks = now(), .values = values });
 }
 
@@ -376,7 +380,7 @@ pub const IndexSummary = struct {
     verify: bool = false,
 };
 
-/// Emit one bounded set of summaries after storage/playback ownership joins.
+/// Emit one bounded set of summaries from the catalogue storage owner.
 pub fn recordIndex(summary: IndexSummary) void {
     event(.library, .{
         report.index_ticks,
@@ -438,16 +442,33 @@ pub fn recordIndex(summary: IndexSummary) void {
 }
 
 pub fn flush() void {
+    if (report.stage == 2) return;
+    flushOwned(null, 8);
+}
+
+/// The persistent player's sole storage task drains one bounded page without
+/// waiting for the queue to end. Polling starts only after the page and cursor
+/// consume their shared DMA bounce buffer.
+pub fn flushStorage(service: @import("f20_player.zig").StorageService) void {
+    if (service.poll(service.context)) return;
+    flushOwned(service, 1);
+}
+
+fn flushOwned(service: ?@import("f20_player.zig").StorageService, budget: usize) void {
     const volume = volume_ptr orelse return;
     const file = log_file orelse return;
-    if (report.stage == 2 or (!usb.session().playerAllowed() and !usb.needsHandoff())) return;
-    if (log.count == 0) return;
+    if (!usb.session().playerAllowed() and !usb.needsHandoff()) return;
     const pages = (file.size - managed.prefix_bytes) / portable.page_bytes;
+    if (pages == 0) return;
     const block: *[portable.page_bytes]u8 = @ptrCast(memory.storage_burst.uncachedSlice(u8).ptr);
     var writer = volume.overwrite(file) catch return;
-    var budget: usize = 8;
-    while (log.count != 0 and budget != 0) : (budget -= 1) {
-        const n = log.page(block, build, session);
+    for (0..budget) |_| {
+        var snapshot: portable.Capture = undefined;
+        const status = x.Interrupts.disableCpu();
+        log.capture(&snapshot);
+        x.Interrupts.restoreCpu(status);
+        if (snapshot.ticket.count == 0) break;
+        snapshot.encode(block, build, session);
         writer.seekTo(managed.prefix_bytes + (log_page % pages) * portable.page_bytes) catch |err| {
             disableLog(err);
             return;
@@ -460,25 +481,34 @@ pub fn flush() void {
             disableLog(err);
             return;
         };
-        log.committed(n);
+        // UI events can append or evict records while SD waits. Retire only
+        // the still-present part of this captured prefix, never its new tail.
+        const masks = x.Interrupts.disableCpu();
+        log.commitTicket(snapshot.ticket) catch {
+            x.Interrupts.restoreCpu(masks);
+            return;
+        };
         log_page = (log_page + 1) % pages;
+        const cursor = portable.Cursor{ .sequence = log.sequence, .page = log_page };
         report.log_pages += 1;
+        x.Interrupts.restoreCpu(masks);
+        portable.cursorEncode(cursor, @ptrCast(block));
+        // Alternate cursors; never rewrite the immutable provisioning header.
+        writer.seekTo(512 + @as(u32, @intCast(cursor.sequence & 1)) * 512) catch |err| {
+            disableLog(err);
+            return;
+        };
+        writer.write(block[0..512]) catch |err| {
+            disableLog(err);
+            return;
+        };
+        writer.sync() catch |err| {
+            disableLog(err);
+            return;
+        };
+        report.log_dropped = log.dropped +| log.suppressed_faults;
+        if (service) |hook| if (hook.poll(hook.context)) return;
     }
-    portable.cursorEncode(.{ .sequence = log.sequence, .page = log_page }, @ptrCast(block));
-    // Alternate cursors; never rewrite the immutable provisioning header.
-    writer.seekTo(512 + @as(u32, @intCast(log.sequence & 1)) * 512) catch |err| {
-        disableLog(err);
-        return;
-    };
-    writer.write(block[0..512]) catch |err| {
-        disableLog(err);
-        return;
-    };
-    writer.sync() catch |err| {
-        disableLog(err);
-        return;
-    };
-    report.log_dropped = log.dropped +| log.suppressed_faults;
 }
 
 fn disableLog(failure: anyerror) void {
@@ -607,27 +637,36 @@ pub fn booted() void {
     event(.boot, .{ report.boot_ticks, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 });
 }
 
-// Called only after prior playback workers have joined or by its sole storage
-// owner. The live catalogue remains pinned until finishBackground runs outside
-// the executive, including the metadata used by Now Playing.
+// Only the sole storage owner allocates. The other arena remains pinned until
+// its final projection replaces every borrowed UI descriptor.
 pub fn backgroundAllocator() std.mem.Allocator {
     const target = current_slot ^ 1;
     allocators[target].reset();
     return allocators[target].allocator();
 }
 
-pub fn finishBackground(next: library.Owned) void {
+pub fn persistBackground(next: *const library.Catalog, service: ?@import("f20_player.zig").StorageService) void {
+    if (service) |hook| if (hook.poll(hook.context)) return;
     if (catalogue_file) |file| if (volume_ptr) |volume| {
         const began = x.Timer.now();
         if (volume.overwrite(file)) |raw| {
-            var writer = raw;
-            committed = store.save(&writer, &next.value, committed, (file.size - managed.prefix_bytes) / 2, memory.scan_io.uncachedSlice(u8)[0..65536]) catch |failure| failed_save: {
-                failed(2, failure);
+            var raw_writer = raw;
+            var cancelled = false;
+            var writer = @import("owned_io.zig").wrap(&raw_writer, service, &cancelled);
+            // Poll only the playback storage service. Cover loading shares
+            // scan_io and must not re-enter while this encoded chunk is live.
+            committed = store.save(&writer, next, committed, (file.size - managed.prefix_bytes) / 2, memory.scan_io.uncachedSlice(u8)[0..4096]) catch |failure| failed_save: {
+                if (!cancelled) failed(2, failure);
                 break :failed_save committed;
             };
         } else |_| {}
         report.index_save_ticks = x.Timer.elapsed(began);
     };
+}
+
+/// Caller has withdrawn borrowed artwork and excluded UI publication until
+/// adoption completes. No card I/O or cooperative service may happen here.
+pub fn adoptBackground(next: library.Owned) void {
     if (catalog) |*old| old.deinit();
     catalog = next;
     current_slot ^= 1;

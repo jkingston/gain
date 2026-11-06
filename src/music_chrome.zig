@@ -24,20 +24,20 @@ pub const Appearance = enum {
 };
 
 pub const light = Palette{
-    .paper = draw.rgb(247, 247, 242),
-    .ink = draw.rgb(31, 42, 44),
-    .muted = draw.rgb(102, 114, 113),
-    .line = draw.rgb(217, 222, 216),
-    .accent = draw.rgb(35, 101, 91),
-    .selected = draw.rgb(226, 234, 225),
+    .paper = draw.rgb(246, 242, 233),
+    .ink = draw.rgb(46, 48, 43),
+    .muted = draw.rgb(112, 109, 99),
+    .line = draw.rgb(222, 219, 209),
+    .accent = draw.rgb(133, 83, 54),
+    .selected = draw.rgb(232, 223, 209),
 };
 pub const dark = Palette{
-    .paper = draw.rgb(22, 28, 29),
-    .ink = draw.rgb(235, 239, 232),
-    .muted = draw.rgb(159, 176, 172),
-    .line = draw.rgb(60, 74, 71),
-    .accent = draw.rgb(142, 207, 184),
-    .selected = draw.rgb(43, 65, 59),
+    .paper = draw.rgb(27, 30, 27),
+    .ink = draw.rgb(238, 236, 227),
+    .muted = draw.rgb(170, 169, 156),
+    .line = draw.rgb(56, 61, 53),
+    .accent = draw.rgb(221, 179, 140),
+    .selected = draw.rgb(53, 60, 48),
 };
 // Compatibility for static callers; live controllers carry their own palette.
 pub const paper = light.paper;

@@ -275,10 +275,6 @@ fn waitForErrorDismiss(input: *Input) void {
     }
 }
 
-fn playbackPower(context: *anyopaque) void {
-    diag.samplePower(@ptrCast(@alignCast(context)));
-}
-
 export fn gain_main() callconv(.c) noreturn {
     if (options.maintenance) maintenance.saveRom();
     // SPL (or the warm RAM monitor) already runs OST2. Resetting it here
@@ -402,16 +398,48 @@ export fn tud_vendor_control_xfer_cb(port: u8, stage: u8, request: ?*const @impo
 var idle_music_session: ?*MusicSession = null;
 
 const MusicSession = struct {
+    const SavedCompletion = struct { slot: u3, success: bool, count: u16 };
+    const LibraryCompletion = struct {
+        summary: [8]@import("saved_playlists.zig").Summary,
+        activity_available: bool,
+        saved_available: bool,
+        save: ?SavedCompletion = null,
+        notice: ?[]const u8 = null,
+    };
+
     state: *@import("f20_music_ui.zig").State,
     input: *Input,
     pmic: *@import("f20_power.zig").Controller,
     preferences_store: *@import("f20_preferences.zig").Store,
     preferences_seen: @import("preferences.zig").Options,
     preferences_due: ?u64 = null,
+    listening_store: *@import("f20_session.zig").Store,
+    activity_store: *@import("f20_activity.zig").Store,
+    activity_state: *@import("listening_activity.zig").State,
+    playlist_store: *@import("f20_playlists.zig").Store,
+    library_loaded: bool = false,
+    activity_view_revision: u32 = 0,
+    library_completion: ?LibraryCompletion = null,
+    resume_pending: ?@import("listening_session.zig").Record = null,
+    resume_revision: ?u32 = null,
+    listening_ready: bool = false,
+    checkpoint: @import("listening_session.zig").Checkpoint = .{},
+    power_policy: @import("listening_power.zig").Policy = .{},
+    power_poll_at: u64 = 0,
+    jack_poll_at: u32 = 0,
+    sleep_seen: u32 = 0,
+    output_policy: @import("listening_power.zig").OutputPolicy = .{ .settle_ticks = Timer.milliseconds(40) },
+    jack_pause_event: std.atomic.Value(bool) = .init(false),
+    desired_output: std.atomic.Value(u32) = .init(@backingInt(@import("f20_audio.zig").Output.headphones)),
+    active_output: std.atomic.Value(u32) = .init(@backingInt(@import("f20_audio.zig").Output.headphones)),
+    activity_seen: ?u64 = null,
+    unplug_pause: @import("listening_power.zig").PauseRequest = .{},
+    fat_seeks: *@import("file_seek_index.zig").Cache,
     theme_pending: bool = true,
     return_rom: bool = false,
     playing: bool = false,
     flush_pending: bool = false,
+    last_log_flush: u64 = 0,
     reconnect_pending: bool = false,
     power_started: ?u64 = null,
     power_off: bool = false,
@@ -419,16 +447,291 @@ const MusicSession = struct {
     clock: @import("executive.zig").Clock = .{ .previous = 0 },
 
     fn now(self: *@This()) u64 {
+        // UI and storage share this wrapping hardware clock. Sample and extend
+        // it as one tiny operation so preemption cannot invent an epoch.
+        const masks = x1000.Interrupts.disableCpu();
+        defer x1000.Interrupts.restoreCpu(masks);
         const counter = Timer.now();
         if (counter < self.clock.previous) diag.report.ui_clock_wraps += 1;
         return self.clock.sample(counter) / Timer.milliseconds(1);
+    }
+
+    fn sourceIdentity(track: *const @import("library.zig").Track) u64 {
+        var bytes: [40]u8 = undefined;
+        std.mem.writeInt(u64, bytes[0..8], track.id, .little);
+        std.mem.writeInt(u64, bytes[8..16], track.stamp.size, .little);
+        std.mem.writeInt(i64, bytes[16..24], track.stamp.modified, .little);
+        std.mem.writeInt(u64, bytes[24..32], track.stamp.device, .little);
+        std.mem.writeInt(u64, bytes[32..40], track.stamp.inode, .little);
+        return std.hash.Wyhash.hash(0x47534f55, &bytes) | 1;
+    }
+
+    fn storageCancelled(context: *anyopaque) bool {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        Watchdog.kick();
+        return self.return_rom or self.power_off or self.reconnect_pending or self.state.requested_track != null or usb.needsHandoff();
+    }
+
+    fn prepareReader(self: *@This(), reader: *Volume.Reader, identity: u64) void {
+        reader.enableAudioSeeks(self.fat_seeks.forSource(identity), identity);
+        reader.seek_control = .{ .context = self, .cancelled = storageCancelled };
+    }
+
+    fn openNext(context: *anyopaque, storage_reader: *anyopaque, previous: player.SequenceTrack) anyerror!?player.SequenceTrack {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        const order = &self.state.track_store.order;
+        if (storageCancelled(self) or order.membership_revision != previous.revision or order.repeat == .one) return null;
+        const previous_position = order.positionOf(previous.occurrence) orelse return null;
+        var cursor = order.*;
+        cursor.cursor = previous_position;
+        const Resolver = struct {
+            view: *const @import("progressive_view.zig").Snapshot,
+            pub fn contains(resolver: @This(), id: u64) bool {
+                return resolver.view.trackById(id) != null;
+            }
+        };
+        const id = cursor.adjacent(1, Resolver{ .view = self.state.snapshot() }) orelse return null;
+        // Repeat wrapping is a controlled main-loop boundary in this first
+        // release; no occurrence is decoded twice inside the admission window.
+        if (cursor.cursor <= previous_position) return null;
+        const occurrence = cursor.occurrenceAt(cursor.cursor).?;
+        const track = self.state.snapshot().trackById(id) orelse return null;
+        const identity = sourceIdentity(track);
+        const gain = self.state.replay_gain.gain(track.meta.gain);
+        const entry = try self.state.index.volume.findPath(track.path);
+        var reader = try self.state.index.volume.reader(try entry.file());
+        if (storageCancelled(self) or order.membership_revision != previous.revision) return null;
+        const admission = order.prepareCommit(occurrence) catch return null;
+        self.prepareReader(&reader, identity);
+        const target: *Volume.Reader = @ptrCast(@alignCast(storage_reader));
+        // No I/O or unbounded searches inside the commit. UI sees either no
+        // admission or a complete queue fence and matching storage reader.
+        const masks = x1000.Interrupts.disableCpu();
+        defer x1000.Interrupts.restoreCpu(masks);
+        if (storageCancelled(self) or order.membership_revision != previous.revision) return null;
+        order.commitPrepared(admission) catch return null;
+        target.* = reader;
+        return .{ .occurrence = occurrence, .revision = previous.revision, .length = entry.size, .gain_q24 = gain, .source_identity = identity };
+    }
+
+    fn audible(context: *anyopaque, track: player.SequenceTrack) void {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        if (self.state.requested_track != null or track.occurrence == self.state.playing_occurrence) return;
+        const order = &self.state.track_store.order;
+        const position = order.positionOf(track.occurrence) orelse return;
+        const id = order.at(position).?;
+        const fallback = @import("library.zig").Track{ .id = id, .path = "", .stamp = .{}, .meta = .{ .title = "Unavailable track" } };
+        const metadata = self.state.snapshot().trackById(id) orelse &fallback;
+        _ = self.state.track_store.queue(metadata) catch self.state.track_store.queue(&fallback) catch |failure| {
+            diag.failed(9, failure);
+            self.state.failure = true;
+            return;
+        };
+        if (!order.advanceCommitted(track.occurrence)) {
+            self.state.track_store.pending = false;
+            return;
+        }
+        self.state.playing_track = self.state.track_store.begin();
+        self.state.playing_occurrence = track.occurrence;
+        self.state.pending_frame.ready = false;
+        self.state.major = true;
+        self.state.dirty = true;
+    }
+
+    /// This callback is the sole I2C owner while audio runs. The UI consumes a
+    /// compact observation, never starting a bus transaction during painting.
+    fn background(context: *anyopaque) void {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        diag.samplePower(self.pmic);
+        const ticks = Timer.now();
+        if (ticks -% self.jack_poll_at < Timer.milliseconds(100)) return;
+        self.jack_poll_at = ticks;
+        const jacks = self.pmic.jacks() catch {
+            _ = self.output_policy.observe(ticks, null, self.outputRoute(), self.playing and self.state.status.phase != .paused);
+            @import("health.zig").snapshot.jack_flags = 0;
+            return;
+        };
+        if (self.output_policy.observe(ticks, jacks, self.outputRoute(), self.playing and self.state.status.phase != .paused)) |decision| {
+            if (decision.pause) self.jack_pause_event.store(true, .release);
+            self.desired_output.store(@backingInt(if (decision.route == .headphone) @import("f20_audio.zig").Output.headphones else .line_out), .release);
+        }
+        @import("health.zig").snapshot.jack_flags = 1 | (@as(u32, @intFromBool(jacks.headphone)) << 1) | (@as(u32, @intFromBool(jacks.line)) << 2);
+    }
+
+    fn outputRoute(self: *@This()) @import("listening_power.zig").Route {
+        return switch (@as(@import("f20_audio.zig").Output, @fromBackingInt(@as(u2, @intCast(self.active_output.load(.acquire)))))) {
+            .headphones => .headphone,
+            .line_out => .line,
+            .muted => .none,
+        };
+    }
+
+    fn route(context: *anyopaque, actual: @import("f20_audio.zig").Output) ?@import("f20_audio.zig").Output {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        self.active_output.store(@backingInt(actual), .release);
+        @import("health.zig").snapshot.output_route = @backingInt(actual);
+        return @fromBackingInt(@as(u2, @intCast(self.desired_output.load(.acquire))));
+    }
+
+    fn restoreListening(self: *@This()) void {
+        const record = self.resume_pending orelse {
+            self.listening_ready = true;
+            return;
+        };
+        // An explicit song choice always wins over automatic paused restore.
+        if (self.state.requested_track != null) {
+            self.resume_pending = null;
+            self.listening_ready = true;
+            return;
+        }
+        const view = self.state.snapshot();
+        if (!self.state.index.complete or !view.complete or self.resume_revision == view.revision) return;
+        self.resume_revision = view.revision;
+        self.state.restoreListening(record) catch return;
+        self.resume_pending = null;
+        self.listening_ready = true;
+    }
+
+    fn saveListening(self: *@This(), force: bool) void {
+        if (!self.listening_ready or self.listening_store.disabled or self.listening_store.file == null) return;
+        const masks = x1000.Interrupts.disableCpu();
+        const due = self.checkpoint.due(self.now(), force);
+        const serial = self.checkpoint.serial;
+        const revision = self.state.track_store.order.revision;
+        const position = self.state.listeningPosition();
+        const location = self.state.listeningNavigation();
+        x1000.Interrupts.restoreCpu(masks);
+        if (!due) return;
+        self.listening_store.save(self.state.index.volume, &self.state.track_store.order, revision, self.state.snapshot().source, position, location);
+        if (self.listening_store.cancelled) return;
+        const completed = x1000.Interrupts.disableCpu();
+        self.checkpoint.saved(self.now(), serial);
+        x1000.Interrupts.restoreCpu(completed);
+    }
+
+    fn publishLibrary(self: *@This(), save: ?SavedCompletion, notice: ?[]const u8) void {
+        const masks = x1000.Interrupts.disableCpu();
+        defer x1000.Interrupts.restoreCpu(masks);
+        var completion = self.library_completion orelse LibraryCompletion{
+            .summary = self.playlist_store.value.summary,
+            .activity_available = self.activity_store.file != null,
+            .saved_available = self.playlist_store.file != null,
+        };
+        completion.summary = self.playlist_store.value.summary;
+        completion.activity_available = self.activity_store.file != null;
+        completion.saved_available = self.playlist_store.file != null;
+        if (save) |value| completion.save = value;
+        if (notice) |value| completion.notice = value;
+        self.library_completion = completion;
+    }
+
+    fn consumeLibrary(self: *@This()) void {
+        const masks = x1000.Interrupts.disableCpu();
+        const completion = self.library_completion;
+        self.library_completion = null;
+        x1000.Interrupts.restoreCpu(masks);
+        if (completion) |value| {
+            self.state.activity_available = value.activity_available;
+            self.state.saved_available = value.saved_available;
+            self.state.saved_summary = value.summary;
+            if (value.save) |saved| self.state.savedPlaylistResult(saved.slot, saved.success, saved.count);
+            if (value.notice) |notice| self.state.libraryNotice(notice);
+        }
+    }
+
+    fn libraryNeedsWork(self: *@This()) bool {
+        return self.listening_ready and (!self.library_loaded or self.state.favourite_request != null or self.state.saved_request != null or self.activity_view_revision != self.state.snapshot().revision or self.activity_state.revision != self.state.snapshot().activity_revision or (self.activity_store.file != null and !self.activity_store.disabled and self.activity_store.saved_revision != self.activity_state.revision));
+    }
+
+    fn serviceLibrary(self: *@This(), service: player.StorageService) void {
+        if (!self.listening_ready or !self.state.index.complete) return;
+        const observer = struct {
+            service: player.StorageService,
+            pub fn cancelled(value: @This()) bool {
+                return value.service.poll(value.service.context);
+            }
+        }{ .service = service };
+        if (!self.library_loaded) {
+            self.activity_store.load(self.state.index.volume, self.activity_state);
+            if (self.activity_store.cancelled or observer.cancelled()) return;
+            self.playlist_store.open(self.state.index.volume, self.state.snapshot().source);
+            if (self.playlist_store.cancelled) return;
+            self.publishLibrary(null, null);
+            self.state.index.projection.activity = self.activity_state;
+            self.library_loaded = true;
+        }
+        if (observer.cancelled()) return;
+        var changed = self.activity_view_revision != self.state.snapshot().revision or self.activity_state.revision != self.state.snapshot().activity_revision;
+        if (changed and self.state.snapshot().complete) self.activity_state.reconcile(self.state.snapshot(), memory.session_scratch.cachedSlice(u8), observer) catch return;
+        const claim = x1000.Interrupts.disableCpu();
+        const favourite = self.state.favourite_request;
+        self.state.favourite_request = null;
+        x1000.Interrupts.restoreCpu(claim);
+        if (favourite) |request| {
+            const resolved = @import("listening_activity.zig").resolveFavouriteId(self.state.snapshot(), request.kind, request.id, request.anchor);
+            const before = self.activity_state.revision;
+            self.activity_state.applyFavourite(request.kind, resolved, request.anchor, request.enabled) catch |failure| {
+                self.publishLibrary(null, if (failure == error.ActivityCapacity) "Favourites full" else "Cannot update favourites");
+                return;
+            };
+            changed = changed or before != self.activity_state.revision;
+        }
+        if (changed) {
+            const revision = self.state.index.projection.prepareActivity(observer) catch return;
+            self.state.index.projection.commit(revision);
+            self.activity_view_revision = revision;
+        }
+        if (observer.cancelled()) return;
+        self.activity_store.save(self.state.index.volume, self.activity_state);
+        if (observer.cancelled()) return;
+        const saved_claim = x1000.Interrupts.disableCpu();
+        const saved = self.state.saved_request;
+        if (saved == null or saved.?.action != .load or !self.playing) self.state.saved_request = null;
+        const expected_revision = self.state.track_store.order.revision;
+        x1000.Interrupts.restoreCpu(saved_claim);
+        if (saved) |request| {
+            if (request.action == .load and self.playing) return;
+            if (request.action == .save) {
+                if (request.membership_revision != self.state.track_store.order.membershipRevision()) {
+                    self.publishLibrary(null, "Queue changed");
+                    return;
+                }
+                const success = self.playlist_store.save(self.state.index.volume, request.slot, &self.state.track_store.order, expected_revision, self.state.snapshot().source);
+                if (!self.playlist_store.cancelled) self.publishLibrary(.{ .slot = request.slot, .success = success, .count = self.playlist_store.value.summary[request.slot].count }, null);
+            } else {
+                // Audio workers have joined. This idle owner may restore the
+                // queue synchronously; restoration performs no I/O or yields.
+                if (self.playlist_store.load(self.state.index.volume, request.slot, self.state.snapshot().source)) |data| {
+                    if (self.state.requested_track == null) self.state.loadedSavedPlaylist(data) catch self.publishLibrary(null, "Playlist unavailable");
+                } else if (!self.playlist_store.cancelled) self.publishLibrary(null, "Playlist unavailable");
+            }
+            if (self.playlist_store.cancelled) {
+                const retry = x1000.Interrupts.disableCpu();
+                if (self.state.saved_request == null) self.state.saved_request = request;
+                x1000.Interrupts.restoreCpu(retry);
+            } else self.publishLibrary(null, null);
+        }
+    }
+
+    fn flushLibrary(self: *@This()) void {
+        if (!self.library_loaded) return;
+        if (self.state.favourite_request) |request| {
+            self.state.favourite_request = null;
+            const resolved = @import("listening_activity.zig").resolveFavouriteId(self.state.snapshot(), request.kind, request.id, request.anchor);
+            self.activity_state.applyFavourite(request.kind, resolved, request.anchor, request.enabled) catch {};
+        }
+        self.activity_store.save(self.state.index.volume, self.activity_state);
+        if (self.state.saved_request) |request| {
+            if (request.action == .save and request.membership_revision == self.state.track_store.order.membershipRevision()) _ = self.playlist_store.save(self.state.index.volume, request.slot, &self.state.track_store.order, self.state.track_store.order.revision, self.state.snapshot().source);
+            self.state.saved_request = null;
+        }
     }
 
     fn control(context: *anyopaque, status: media.PlaybackStatus) media.PlaybackCommand {
         const self: *@This() = @ptrCast(@alignCast(context));
         Watchdog.kick();
         usb.poll();
-        if (usb.needsHandoff()) return .stop;
+        if (usb.needsHandoff() or self.power_off or self.return_rom or self.reconnect_pending) return .stop;
         var remote: ?UiEvent = null;
         if (options.maintenance) if (maintenance.take()) |command| switch (command.action) {
             .quick => self.state.index.request(false),
@@ -456,11 +759,34 @@ const MusicSession = struct {
             },
             .flush => self.flush_pending = true,
         };
-        self.state.status = status;
+        self.consumeLibrary();
+        self.state.setPlaybackStatus(status);
         @import("health.zig").snapshot.playback_phase = @backingInt(status.phase);
         @import("health.zig").snapshot.queue_count = @intCast(self.state.track_store.order.count);
         @import("health.zig").snapshot.queue_cursor = @intCast(self.state.track_store.order.cursor);
         const now_ms = self.now();
+        if (self.sleep_seen != self.state.sleep_revision) {
+            self.sleep_seen = self.state.sleep_revision;
+            self.power_policy.setSleep(now_ms, self.state.sleep_timer);
+        }
+        if (self.activity_seen != self.state.last_activity) {
+            self.activity_seen = self.state.last_activity;
+            self.power_policy.activity(now_ms);
+        }
+        self.unplug_pause.observe(self.playing, status.phase, self.state.requested_track != null);
+        if (self.jack_pause_event.swap(false, .acq_rel) and self.playing and status.phase != .paused) self.unplug_pause.request();
+        if (now_ms >= self.power_poll_at) {
+            self.power_poll_at = now_ms +| 100;
+            if (!self.playing) background(self);
+            // Physical jack edges are captured by the control owner before
+            // changing its output route. This UI policy owns timer decisions.
+            const policy_action = self.power_policy.tick(now_ms, self.state.paused_idle, .{ .playing = self.playing and status.phase != .paused, .host_owned = false, .route = self.outputRoute(), .jacks = null });
+            if (policy_action == .shutdown) {
+                self.power_off = true;
+                return .stop;
+            }
+            if (policy_action == .pause) self.unplug_pause.request();
+        }
         const at = Timer.now();
         const sample = self.input.injected;
         self.input.music.observe(.{ .at = at, .buttons = if (sample) |value| @truncate(value) else buttonState(), .wheel = if (sample) |value| @truncate(value >> 8) else wheelState() });
@@ -491,8 +817,9 @@ const MusicSession = struct {
         health.ui_appearance = @backingInt(self.state.appearance);
         health.ui_attenuation = self.state.attenuation;
         health.ui_backlight_active = @intFromBool(board.display.backlight.get());
+        if (self.listening_ready) self.checkpoint.observe(now_ms, self.state.track_store.order.revision, self.state.track_store.order.cursor, self.playing and status.phase != .paused);
         if (self.state.failure) return .stop;
-        return result;
+        return self.unplug_pause.command(status.phase, result);
     }
 
     fn savePreferences(self: *@This(), force: bool) void {
@@ -501,7 +828,9 @@ const MusicSession = struct {
         const value = self.state.preferences();
         self.preferences_store.save(self.state.index.volume, value);
         // A cooperative card operation may have serviced a newer user choice.
+        const masks = x1000.Interrupts.disableCpu();
         if (std.meta.eql(value, self.state.preferences())) self.preferences_due = null;
+        x1000.Interrupts.restoreCpu(masks);
     }
 
     fn storageWork(context: *anyopaque, service: player.StorageService) void {
@@ -511,8 +840,33 @@ const MusicSession = struct {
             self.theme_pending = false;
             @import("f20_themes.zig").load(self.state.index.volume, self.state);
         }
+        self.listening_store.service = service;
+        self.activity_store.service = service;
+        self.playlist_store.service = service;
+        defer {
+            self.listening_store.service = null;
+            self.activity_store.service = null;
+            self.playlist_store.service = null;
+        }
         self.savePreferences(false);
+        self.saveListening(false);
+        if (service.poll(service.context)) return;
+        self.serviceLibrary(service);
+        if (service.poll(service.context)) return;
         @import("f20_index.zig").State.run(self.state.index, service);
+        if (service.poll(service.context)) return;
+        const claim = x1000.Interrupts.disableCpu();
+        const forced = self.flush_pending;
+        self.flush_pending = false;
+        x1000.Interrupts.restoreCpu(claim);
+        if (forced or self.now() -| self.last_log_flush >= 60_000) {
+            const pages: usize = if (forced) 8 else 1;
+            for (0..pages) |_| {
+                if (service.poll(service.context)) break;
+                diag.flushStorage(service);
+            }
+            self.last_log_flush = self.now();
+        }
     }
 
     fn idlePoll(context: *anyopaque) bool {
@@ -522,6 +876,11 @@ const MusicSession = struct {
         if (!self.state.isAnimating(self.now())) diag.samplePower(self.pmic);
         return usb.needsHandoff() or self.return_rom or self.power_off or self.reconnect_pending or
             self.state.requested_track != null;
+    }
+
+    fn retireCatalogue(context: *anyopaque) void {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        self.state.catalogueRetired();
     }
 
     fn serviceCovers(context: *anyopaque) void {
@@ -538,6 +897,18 @@ const MusicSession = struct {
 };
 
 fn browseMusic(volume: *Volume, battery_mv: u32, attenuation: *u8, input: *Input, pmic: *@import("f20_power.zig").Controller) !void {
+    const seek_cache: *@import("audio_seek.zig").Cache = @ptrFromInt(memory.audio_seek.cached());
+    const fat_seeks: *@import("file_seek_index.zig").Cache = @ptrFromInt(std.mem.alignForward(usize, memory.audio_seek.cached() + @sizeOf(@import("audio_seek.zig").Cache), @alignOf(@import("file_seek_index.zig").Cache)));
+    comptime {
+        if (@sizeOf(@import("audio_seek.zig").Cache) + @sizeOf(@import("file_seek_index.zig").Cache) + 16 > memory.audio_seek.bytes) @compileError("audio seek workspace exceeds reservation");
+    }
+    seek_cache.reset();
+    fat_seeks.reset();
+    var activity_state = try @import("listening_activity.zig").State.init(memory.activity_records.cachedSlice(u8), volume.serial);
+    var activity_store = @import("f20_activity.zig").Store{};
+    var playlist_store = @import("f20_playlists.zig").Store{};
+    var listening_store = @import("f20_session.zig").Store{};
+    const resume_record = listening_store.load(volume, volume.serial);
     var preference_store = @import("f20_preferences.zig").Store{};
     var preferences = preference_store.load(volume);
     if (preference_store.journal.saved == null) {
@@ -560,7 +931,8 @@ fn browseMusic(volume: *Volume, battery_mv: u32, attenuation: *u8, input: *Input
     var state = @import("f20_music_ui.zig").State{ .index = &index, .covers = &covers.cache, .text_cache = &text.cache, .attenuation = attenuation.*, .battery_mv = battery_mv, .appearance = appearance, .track_store = @import("track_selection.zig").Store.init(memory.scan_artwork.cachedSlice(u8)) };
     state.theme_store = retained_themes;
     state.applyPreferences(preferences);
-    var session = MusicSession{ .state = &state, .input = input, .pmic = pmic, .preferences_store = &preference_store, .preferences_seen = preferences };
+    var session = MusicSession{ .state = &state, .input = input, .pmic = pmic, .preferences_store = &preference_store, .preferences_seen = preferences, .listening_store = &listening_store, .activity_state = &activity_state, .activity_store = &activity_store, .playlist_store = &playlist_store, .resume_pending = resume_record, .listening_ready = resume_record == null, .fat_seeks = fat_seeks };
+    index.retirement = .{ .context = &session, .withdraw = MusicSession.retireCatalogue };
     // Font source polls occur between card transactions, so a long font read
     // can give urgent artwork a turn without adding a second storage owner.
     text.storage_work.hook = .{ .context = &session, .run = MusicSession.serviceCovers };
@@ -582,10 +954,14 @@ fn browseMusic(volume: *Volume, battery_mv: u32, attenuation: *u8, input: *Input
     diag.booted();
     while (true) {
         _ = MusicSession.control(&session, state.status);
+        session.restoreListening();
         session.savePreferences(false);
+        session.saveListening(false);
         if (session.power_off) {
             index.finish();
             session.savePreferences(true);
+            session.saveListening(true);
+            session.flushLibrary();
             diag.flush();
             powerOff(pmic);
         }
@@ -596,6 +972,8 @@ fn browseMusic(volume: *Volume, battery_mv: u32, attenuation: *u8, input: *Input
         if (session.reconnect_pending) {
             index.finish();
             session.savePreferences(true);
+            session.saveListening(true);
+            session.flushLibrary();
             diag.flush();
             usb.reconnect();
             return;
@@ -603,12 +981,18 @@ fn browseMusic(volume: *Volume, battery_mv: u32, attenuation: *u8, input: *Input
         if (options.maintenance and session.return_rom) {
             index.finish();
             session.savePreferences(true);
+            session.saveListening(true);
+            session.flushLibrary();
             diag.flush();
             maintenance.returnRom();
         }
         if (usb.needsHandoff()) {
+            session.power_policy.setSleep(session.now(), .off);
+            state.sleep_timer = .off;
             index.finish();
             session.savePreferences(true);
+            session.saveListening(true);
+            session.flushLibrary();
             return;
         }
         if (state.requested_track) |track| {
@@ -616,10 +1000,25 @@ fn browseMusic(volume: *Volume, battery_mv: u32, attenuation: *u8, input: *Input
             if (track.path.len > path_buffer.len) return error.PathTooLong;
             @memcpy(path_buffer[0..track.path.len], track.path);
             const path = path_buffer[0..track.path.len];
+            const selected_id = track.id;
+            const selected_occurrence = state.playing_occurrence;
+            const start_frame = state.requested_start_frame;
+            const initially_paused = state.resume_paused or session.unplug_pause.pending;
+            const identity = MusicSession.sourceIdentity(track);
             state.requested_track = null;
-            const entry = try volume.findPath(path);
+            const entry = volume.findPath(path) catch |failure| {
+                if (state.requested_track != null) continue;
+                return failure;
+            };
+            if (state.requested_track != null) continue;
             var reader = try volume.reader(try entry.file());
+            // Filesystem waits may service input. A newer explicit selection
+            // owns the pending metadata slot and wins before this reader starts.
+            if (state.requested_track != null) continue;
+            session.prepareReader(&reader, identity);
             state.playing_track = state.track_store.begin() orelse return error.InvalidSelection;
+            if (state.playing_track.?.id != selected_id) return error.InvalidSelection;
+            state.playing_occurrence = selected_occurrence;
             state.pending_frame.ready = false;
             state.major = true;
             state.dirty = true;
@@ -632,13 +1031,17 @@ fn browseMusic(volume: *Volume, battery_mv: u32, attenuation: *u8, input: *Input
             diag.report.stage = 2;
             const result = player.playFile(&reader, entry.size, volume.device, .{
                 .attenuation = state.attenuation,
+                .seek_cache = seek_cache,
+                .source_identity = identity,
+                .sequence = if (state.playing_occurrence != 0) .{ .context = &session, .first = .{ .occurrence = state.playing_occurrence, .revision = state.track_store.order.membership_revision, .length = entry.size, .gain_q24 = state.replay_gain.gain(state.playing_track.?.meta.gain), .source_identity = identity }, .open_next = MusicSession.openNext, .audible = MusicSession.audible } else null,
                 .force_output_24 = true,
                 .gain_q24 = state.replay_gain.gain(state.playing_track.?.meta.gain),
-                .start_frame = state.requested_start_frame,
-                .initially_paused = state.resume_paused,
+                .start_frame = start_frame,
+                .initially_paused = initially_paused,
                 .measure_stacks = options.maintenance,
                 .report_out = &measured,
-                .background = .{ .context = pmic, .poll = playbackPower },
+                .background = .{ .context = &session, .poll = MusicSession.background },
+                .routing = .{ .context = &session, .poll = MusicSession.route },
                 .storage_work = .{ .context = &session, .run = MusicSession.storageWork },
             }, .{ .context = &session, .poll = MusicSession.control }) catch |failure| failed: {
                 diag.failed(1, failure);
@@ -653,6 +1056,8 @@ fn browseMusic(volume: *Volume, battery_mv: u32, attenuation: *u8, input: *Input
             if (state.failure and diag.report.failure != 0) diag.failed(9, @errorFromInt(@as(u16, @intCast(diag.report.failure))));
             diag.playback(result);
             state.attenuation = result.playback.attenuation;
+            if (result.final_status) |final| state.setPlaybackStatus(final);
+            state.track_store.order.committed_count = 0;
             state.playbackFinished(result.playback, playback_failed);
             const handoff_began = Timer.now();
             // A completed scan already published its new catalogue, and a
@@ -660,6 +1065,8 @@ fn browseMusic(volume: *Volume, battery_mv: u32, attenuation: *u8, input: *Input
             // Track changes alone do not change library membership or order.
             index.finish();
             session.savePreferences(true);
+            session.saveListening(true);
+            session.flushLibrary();
             diag.flush();
             input.resync();
             _ = LcdDma.resetForDirect();
@@ -669,7 +1076,7 @@ fn browseMusic(volume: *Volume, battery_mv: u32, attenuation: *u8, input: *Input
             diag.report.playback_handoff_max = @max(diag.report.playback_handoff_max, Timer.elapsed(handoff_began));
             continue;
         }
-        if (index.requested or session.theme_pending) MusicSession.storageWork(&session, .{ .context = &session, .poll = MusicSession.idlePoll });
+        if (index.requested or session.theme_pending or session.libraryNeedsWork()) MusicSession.storageWork(&session, .{ .context = &session, .poll = MusicSession.idlePoll });
         covers.service(volume);
         text.serviceWithYield(.{ .context = &session, .poll = MusicSession.idlePoll });
         @import("f20_display.zig").idleLaunch();

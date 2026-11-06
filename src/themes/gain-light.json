@@ -1,14 +1,14 @@
 {
   "version": 1,
-  "name": "Classic / Dark",
+  "name": "Gain / Light",
   "palette": {
-    "paper": "#161c1d",
-    "ink": "#ebefe8",
-    "muted": "#9fb0ac",
-    "line": "#3c4a47",
-    "accent": "#8ecfb8",
-    "selected": "#2b413b",
-    "selected_text": "#8ecfb8"
+    "paper": "#f6f2e9",
+    "ink": "#2e302b",
+    "muted": "#706d63",
+    "line": "#dedbd1",
+    "accent": "#855336",
+    "selected": "#e8dfd1",
+    "selected_text": "#633c27"
   },
   "header": [
     {
@@ -101,18 +101,19 @@
           "x": 8,
           "y": 0,
           "w": 304,
-          "h": 160,
+          "h": 168,
           "after": "header"
         },
         "binding": "home",
         "role": "reading",
-        "row_height": 32,
+        "row_height": 28,
         "radius": 4,
         "alignment": "left",
         "detail": false,
         "value": ">",
         "background": "paper",
-        "focus_text": "selected_text"
+        "focus_text": "selected_text",
+        "columns": 1
       }
     ],
     "albums": [
@@ -249,17 +250,18 @@
           "x": 144,
           "y": 64,
           "w": 160,
-          "h": 28
+          "h": 52
         },
         "binding": "track_title",
         "role": "title",
-        "when": "track"
+        "when": "track",
+        "lines": 2
       },
       {
         "kind": "text",
         "rect": {
           "x": 144,
-          "y": 100,
+          "y": 120,
           "w": 160,
           "h": 21
         },
@@ -271,7 +273,7 @@
         "kind": "text",
         "rect": {
           "x": 144,
-          "y": 124,
+          "y": 145,
           "w": 160,
           "h": 19
         },

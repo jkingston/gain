@@ -167,12 +167,11 @@ pub const Store = struct {
     }
 
     pub fn select(self: *Store, family: @import("preferences.zig").Theme, appearance: @import("music_chrome.zig").Appearance) void {
-        if (family == .custom) {
-            if (!self.has_custom) return;
+        if (family == .custom and self.has_custom) {
             self.using_custom = true;
         } else {
             self.using_custom = false;
-            self.selected = &@import("builtin_themes.zig").plans[@as(usize, @backingInt(family)) * 2 + @backingInt(appearance)];
+            self.selected = &@import("builtin_themes.zig").plans[@backingInt(appearance)];
         }
         self.revision +%= 1;
     }
@@ -449,13 +448,7 @@ pub fn validate(plan: *const Plan) !void {
 }
 
 test "bundled runtime JSON lowers to the same owned plans as the compiled fallback" {
-    const sources = .{
-        @embedFile("themes/classic-light.json"),        @embedFile("themes/classic-dark.json"),
-        @embedFile("themes/archive-light.json"),        @embedFile("themes/archive-dark.json"),
-        @embedFile("themes/studio-light.json"),         @embedFile("themes/studio-dark.json"),
-        @embedFile("themes/sleeve-light.json"),         @embedFile("themes/sleeve-dark.json"),
-        @embedFile("themes/sleeve-classic-light.json"), @embedFile("themes/sleeve-classic-dark.json"),
-    };
+    const sources = .{ @embedFile("themes/gain-light.json"), @embedFile("themes/gain-dark.json") };
     var scratch: [96 * 1024]u8 = undefined;
     var output: Plan = undefined;
     inline for (sources, 0..) |source, i| {
@@ -467,7 +460,7 @@ test "bundled runtime JSON lowers to the same owned plans as the compiled fallba
 test "invalid custom themes retain the active plan and scratch ownership never escapes parsing" {
     var store = Store{};
     var scratch: [96 * 1024]u8 = undefined;
-    const source = @embedFile("themes/sleeve-light.json");
+    const source = @embedFile("themes/gain-light.json");
     try store.load(source, &scratch);
     const first = store.current().*;
     @memset(&scratch, 0xaa);
@@ -481,4 +474,21 @@ test "invalid custom themes retain the active plan and scratch ownership never e
     var copy = store;
     try std.testing.expect(copy.current() != store.current());
     try std.testing.expectEqualDeep(first, copy.current().*);
+}
+
+test "missing custom theme uses requested fallback appearance without replacing a valid custom plan" {
+    var scratch: [96 * 1024]u8 = undefined;
+    for ([_]@import("music_chrome.zig").Appearance{ .light, .dark }) |appearance| {
+        var fallback = Store{};
+        fallback.select(.classic, appearance);
+        var requested = Store{};
+        requested.select(.custom, appearance);
+        try std.testing.expect(!requested.using_custom and !requested.has_custom);
+        try std.testing.expectEqualDeep(fallback.current().*, requested.current().*);
+        try requested.load(@embedFile("themes/gain-light.json"), &scratch);
+        const custom = requested.current().*;
+        requested.select(.custom, appearance);
+        try std.testing.expect(requested.using_custom);
+        try std.testing.expectEqualDeep(custom, requested.current().*);
+    }
 }

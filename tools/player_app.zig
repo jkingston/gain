@@ -28,6 +28,23 @@ var state: State = undefined;
 var preferences_store: @import("host_preferences.zig").Store = .{};
 var preferences_seen: gain.preferences.Options = .{};
 var preferences_due: ?u64 = null;
+var listening_store: @import("host_session.zig").Store = .{};
+var listening_loaded = false;
+var activity_memory: [gain.listening_activity.state_bytes]u8 = undefined;
+var activity_state: gain.listening_activity.State = undefined;
+var activity_store: @import("host_activity.zig").Store = .{};
+var playlist_store: @import("host_playlists.zig").Store = .{};
+var library_loaded = false;
+var activity_view_revision: u32 = 0;
+var listening_checkpoint: gain.listening_session.Checkpoint = .{};
+var listening_pending: ?gain.listening_session.Record = null;
+var power_policy: gain.listening_power.Policy = .{};
+var power_activity: ?u64 = null;
+var power_sleep_revision: u32 = 0;
+var power_jacks: ?gain.Jacks = null;
+var powered_off = false;
+var powered_off_presented = false;
+var restart_requested = false;
 var theme_attempted: ?u64 = null;
 var theme_poll_at: u64 = 0;
 var index: Platform.Index.State = .{};
@@ -136,7 +153,8 @@ fn scanProgress(_: *anyopaque, phase: []const u8, stats: core.Stats, _: u32) voi
 fn publish(previous: *const core.Catalog, tracks: []const core.Track, source: u64, complete: bool) !void {
     // The worker alone builds inactive slots. Commit under the callback lock;
     // no UI callback can still hold the slot that becomes inactive afterward.
-    const revision = try projection.prepare(previous, tracks, source, complete);
+    const baseline = gain.progressive_view.previewBaseline(previous, source);
+    const revision = try projection.prepare(&baseline, tracks, source, complete);
     lock();
     defer unlock();
     projection.commit(revision);
@@ -153,7 +171,9 @@ fn scanCheckpoint(_: *anyopaque, previous: *const core.Catalog, tracks: []const 
 }
 
 fn scanAborted(_: *anyopaque, previous: *const core.Catalog) void {
-    publish(previous, previous.tracks, previous.source, true) catch {};
+    const source = if (sd_root) |root| core.hash(root) else previous.source;
+    const baseline = gain.progressive_view.previewBaseline(previous, source);
+    publish(&baseline, baseline.tracks, source, true) catch {};
 }
 
 fn replaceText(_: *anyopaque, destination: *[]const u8, text: []const u8) void {
@@ -393,6 +413,18 @@ fn init(at: u64) callconv(.c) void {
     loadTheme();
     preferences_seen = state.preferences();
     preferences_due = null;
+    listening_loaded = false;
+    library_loaded = false;
+    activity_view_revision = 0;
+    listening_checkpoint = .{};
+    listening_pending = null;
+    power_policy = .{};
+    power_activity = null;
+    power_sleep_revision = 0;
+    power_jacks = null;
+    powered_off = false;
+    powered_off_presented = false;
+    restart_requested = false;
     index.requested = sd_root != null;
     startText();
     cover_loader.start(sd_root, host_io.io(), &cache, &stopping, lock, unlock);
@@ -433,6 +465,10 @@ fn input(event: api.Event, at: u64) callconv(.c) void {
     lock();
     defer unlock();
     milliseconds = at;
+    if (powered_off) {
+        if (event.input == .power and event.phase == .release) restart_requested = true;
+        return;
+    }
     if (usb_phase != null) return;
     // The host forwards OS repeats for apps that want them; this player owns
     // its repeat clock and deliberately consumes only physical press/release.
@@ -469,8 +505,128 @@ fn transportStatus(at: u64) void {
     }
 }
 
+fn serviceListening(at: u64, force: bool) void {
+    if (scan_finished.load(.acquire) and !index.requested and !listening_loaded) {
+        listening_pending = listening_store.load(sd_root, host_io.io(), state.snapshot().source, getenv("GAIN_UI_READ_ONLY") != null);
+        listening_loaded = true;
+    }
+    if (!listening_loaded) return;
+    if (listening_pending) |record| {
+        if (state.requested_track != null or playing) {
+            listening_pending = null;
+        } else if (state.snapshot().complete) {
+            state.restoreListening(record) catch return;
+            listening_pending = null;
+            apply(.none, at);
+            transportStatus(at);
+        } else return;
+    }
+    listening_checkpoint.observe(at, state.track_store.order.revision, state.track_store.order.cursor, playing and !paused);
+    if (listening_checkpoint.due(at, force)) {
+        const serial = listening_checkpoint.serial;
+        listening_store.save(state.track_store.order, state.snapshot().source, state.listeningPosition(), state.listeningNavigation());
+        listening_checkpoint.saved(at, serial);
+    }
+}
+
+const Uninterrupted = struct {
+    pub fn cancelled(_: @This()) bool {
+        return false;
+    }
+};
+
+fn serviceLibrary(at: u64, force: bool) void {
+    if (!listening_loaded or listening_pending != null or !scan_finished.load(.acquire) or index.requested or !state.snapshot().complete) return;
+    const scratch = &listening_store.scratch;
+    if (!library_loaded) {
+        activity_state = gain.listening_activity.State.init(&activity_memory, state.snapshot().source) catch return;
+        activity_store.load(sd_root, host_io.io(), getenv("GAIN_UI_READ_ONLY") != null, &activity_state, scratch);
+        playlist_store.open(sd_root, host_io.io(), state.snapshot().source, getenv("GAIN_UI_READ_ONLY") != null, scratch);
+        state.activity_available = activity_store.file != null;
+        state.saved_available = playlist_store.file.file != null and !playlist_store.file.read_only;
+        state.saved_summary = playlist_store.value.summary;
+        projection.activity = &activity_state;
+        library_loaded = true;
+    }
+    var changed = activity_view_revision != state.snapshot().revision or activity_state.revision != state.snapshot().activity_revision;
+    if (changed) activity_state.reconcile(state.snapshot(), scratch, Uninterrupted{}) catch return;
+    if (state.favourite_request) |request| {
+        state.favourite_request = null;
+        const resolved = gain.listening_activity.resolveFavouriteId(state.snapshot(), request.kind, request.id, request.anchor);
+        const before = activity_state.revision;
+        activity_state.applyFavourite(request.kind, resolved, request.anchor, request.enabled) catch |failure| {
+            state.libraryNotice(if (failure == error.ActivityCapacity) "Favourites full" else "Cannot update favourites");
+            return;
+        };
+        changed = changed or before != activity_state.revision;
+    }
+    if (changed) {
+        const revision = projection.prepareActivity(Uninterrupted{}) catch return;
+        projection.commit(revision);
+        activity_view_revision = revision;
+    }
+    activity_store.save(&activity_state, scratch);
+    if (state.saved_request) |request| {
+        state.saved_request = null;
+        if (request.action == .save) {
+            if (request.membership_revision != state.track_store.order.membershipRevision()) {
+                state.libraryNotice("Queue changed");
+                return;
+            }
+            const count: u16 = @intCast(state.track_store.order.count);
+            state.savedPlaylistResult(request.slot, playlist_store.save(request.slot, state.track_store.order, state.snapshot().source, scratch), count);
+        } else if (!force) {
+            if (playlist_store.load(request.slot, state.snapshot().source, scratch)) |data| state.loadedSavedPlaylist(data) catch state.libraryNotice("Playlist unavailable") else state.libraryNotice("Playlist unavailable");
+            apply(.none, at);
+            transportStatus(at);
+        }
+        state.saved_summary = playlist_store.value.summary;
+    }
+}
+
+fn servicePower(at: u64) void {
+    if (power_sleep_revision != state.sleep_revision) {
+        power_sleep_revision = state.sleep_revision;
+        power_policy.setSleep(at, state.sleep_timer);
+    }
+    if (power_activity != state.last_activity) {
+        power_activity = state.last_activity;
+        power_policy.activity(at);
+    }
+    switch (power_policy.tick(at, state.paused_idle, .{
+        .playing = playing and !paused,
+        .host_owned = usb_phase != null,
+        .route = if (power_jacks != null and power_jacks.?.line) .line else .headphone,
+        .jacks = power_jacks,
+    })) {
+        .none => {},
+        .pause => if (playing and !paused) {
+            apply(.toggle_pause, at);
+            transportStatus(at);
+        },
+        .shutdown => {
+            serviceListening(at, true);
+            serviceLibrary(at, true);
+            preferences_store.save(state.preferences());
+            powered_off = true;
+            powered_off_presented = false;
+        },
+    }
+}
+
 fn frame(pixels: *api.Pixels, at: u64) callconv(.c) bool {
+    if (restart_requested) {
+        deinit();
+        init(at);
+    }
     lock();
+    if (powered_off) {
+        defer unlock();
+        if (powered_off_presented) return false;
+        @memset(pixels, 0);
+        powered_off_presented = true;
+        return true;
+    }
     if (usb_phase) |phase| {
         defer unlock();
         milliseconds = at;
@@ -490,8 +646,17 @@ fn frame(pixels: *api.Pixels, at: u64) callconv(.c) bool {
         index.requested = false;
         loadCatalogue() catch |failure| std.debug.print("Player UI catalogue: {s}\n", .{@errorName(failure)});
     }
+    transportStatus(at);
+    serviceListening(at, false);
+    serviceLibrary(at, false);
     apply(state.repeat(at, state.input_policy.held, playing), at);
     transportStatus(at);
+    servicePower(at);
+    if (powered_off) {
+        @memset(pixels, 0);
+        powered_off_presented = true;
+        return true;
+    }
     if (playing and !paused and state.status.total_frames != 0 and state.status.played_frames == state.status.total_frames) {
         state.playbackFinished(.{ .sample_rate = state.status.sample_rate, .output_format = state.status.output_format, .frames = state.status.played_frames, .chunks = 0, .underruns = 0, .minimum_fifo_level = 0 }, false);
         if (state.requested_track != null) {
@@ -523,6 +688,12 @@ fn frame(pixels: *api.Pixels, at: u64) callconv(.c) bool {
 }
 
 fn deinit() callconv(.c) void {
+    transportStatus(milliseconds);
+    serviceListening(milliseconds, true);
+    serviceLibrary(milliseconds, true);
+    activity_store.close();
+    playlist_store.close();
+    listening_store.close();
     stopping.store(true, .release);
     cover_loader.close();
     if (scan_thread) |thread| thread.join();
@@ -622,6 +793,18 @@ export fn gain_player_environment(millivolts: u32, charging: u32, usb: u32, exte
     if (millivolts > 5000 or charging > 1 or usb > 3 or external_power > 1) return false;
     lock();
     defer unlock();
+    if (usb != 0 and usb_phase == null) {
+        power_policy.setSleep(milliseconds, .off);
+        state.sleep_timer = .off;
+        state.sleep_revision +%= 1;
+        transportStatus(milliseconds);
+        if (playing) {
+            base_frames = state.status.played_frames;
+            paused = true;
+            transportStatus(milliseconds);
+        }
+        serviceListening(milliseconds, true);
+    }
     if (usb != 0) state.cancelInput(0);
     power = gain.battery.Status.fromPower(millivolts, charging != 0, external_power != 0);
     usb_phase = if (usb == 0) null else @fromBackingInt(@intCast(usb - 1));
@@ -695,4 +878,13 @@ export fn gain_player_preferences_status(output: *PreferencesStatus) callconv(.c
         .covers_ready = @popCount(cache.ready_mask.load(.acquire)),
         .cover_failures = cache.failed_loads,
     };
+}
+
+/// App-only environmental fixture; the simulator host has no audio-jack model.
+export fn gain_player_jacks(headphone: u32, line: u32) callconv(.c) bool {
+    if (headphone > 1 or line > 1) return false;
+    lock();
+    defer unlock();
+    power_jacks = .{ .headphone = headphone != 0, .line = line != 0 };
+    return true;
 }

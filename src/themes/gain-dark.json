@@ -1,14 +1,14 @@
 {
   "version": 1,
-  "name": "Sleeve-Classic / Light",
+  "name": "Gain / Dark",
   "palette": {
-    "paper": "#f8efdd",
-    "ink": "#372b24",
-    "muted": "#7f6c5a",
-    "line": "#e0d1bc",
-    "accent": "#a44b2a",
-    "selected": "#eedcc4",
-    "selected_text": "#a44b2a"
+    "paper": "#1b1e1b",
+    "ink": "#eeece3",
+    "muted": "#aaa99c",
+    "line": "#383d35",
+    "accent": "#ddb38c",
+    "selected": "#353c30",
+    "selected_text": "#f0cfaa"
   },
   "header": [
     {
@@ -17,7 +17,7 @@
         "x": 0,
         "y": 0,
         "w": 320,
-        "h": 80
+        "h": 64
       },
       "id": "header",
       "color": "paper"
@@ -35,10 +35,44 @@
       "focus": "accent"
     },
     {
+      "kind": "text",
+      "rect": {
+        "x": 16,
+        "y": 16,
+        "w": 252,
+        "h": 40
+      },
+      "binding": "page_title",
+      "role": "serif"
+    },
+    {
+      "kind": "text",
+      "rect": {
+        "x": 164,
+        "y": 21,
+        "w": 84,
+        "h": 18
+      },
+      "binding": "page_detail",
+      "role": "caption",
+      "color": "muted",
+      "alignment": "right"
+    },
+    {
+      "kind": "rect",
+      "rect": {
+        "x": 16,
+        "y": 54,
+        "w": 288,
+        "h": 1
+      },
+      "color": "line"
+    },
+    {
       "kind": "rect",
       "rect": {
         "x": 273,
-        "y": 16,
+        "y": 21,
         "w": 3,
         "h": 3
       },
@@ -52,7 +86,7 @@
         "kind": "progress",
         "rect": {
           "x": 16,
-          "y": 78,
+          "y": 54,
           "w": 288,
           "h": 1
         },
@@ -60,31 +94,6 @@
         "color": "line",
         "focus": "accent",
         "when": "scanning"
-      },
-      {
-        "kind": "text",
-        "rect": {
-          "x": 16,
-          "y": 13,
-          "w": 248,
-          "h": 18
-        },
-        "binding": "page_detail",
-        "role": "caption",
-        "color": "muted",
-        "value": ""
-      },
-      {
-        "kind": "text",
-        "rect": {
-          "x": 16,
-          "y": 40,
-          "w": 288,
-          "h": 40
-        },
-        "binding": "page_title",
-        "role": "serif",
-        "alignment": "center"
       },
       {
         "kind": "list",
@@ -92,18 +101,19 @@
           "x": 8,
           "y": 0,
           "w": 304,
-          "h": 140,
+          "h": 168,
           "after": "header"
         },
         "binding": "home",
         "role": "reading",
         "row_height": 28,
         "radius": 4,
-        "alignment": "center",
+        "alignment": "left",
         "detail": false,
-        "value": "",
+        "value": ">",
         "background": "paper",
-        "focus_text": "selected_text"
+        "focus_text": "selected_text",
+        "columns": 1
       }
     ],
     "albums": [
@@ -111,7 +121,7 @@
         "kind": "progress",
         "rect": {
           "x": 16,
-          "y": 78,
+          "y": 54,
           "w": 288,
           "h": 1
         },
@@ -121,53 +131,40 @@
         "when": "scanning"
       },
       {
-        "kind": "text",
-        "rect": {
-          "x": 16,
-          "y": 13,
-          "w": 248,
-          "h": 18
-        },
-        "binding": "page_detail",
-        "role": "caption",
-        "color": "muted",
-        "value": ""
-      },
-      {
-        "kind": "text",
-        "rect": {
-          "x": 16,
-          "y": 40,
-          "w": 288,
-          "h": 40
-        },
-        "binding": "album_title",
-        "role": "serif",
-        "alignment": "center"
-      },
-      {
         "kind": "covers",
         "rect": {
           "x": 0,
           "y": 0,
           "w": 320,
-          "h": 132,
+          "h": 129,
           "after": "header"
         },
-        "edge": 128,
-        "reflection": 0,
+        "edge": 112,
+        "reflection": 16,
         "background": "paper"
       },
       {
         "kind": "text",
         "rect": {
           "x": 16,
-          "y": 216,
+          "y": 200,
           "w": 288,
-          "h": 21
+          "h": 23
+        },
+        "binding": "album_title",
+        "role": "reading",
+        "alignment": "center"
+      },
+      {
+        "kind": "text",
+        "rect": {
+          "x": 16,
+          "y": 215,
+          "w": 288,
+          "h": 20
         },
         "binding": "album_artist",
-        "role": "body",
+        "role": "caption",
         "alignment": "center",
         "color": "muted"
       },
@@ -191,7 +188,7 @@
         "kind": "progress",
         "rect": {
           "x": 16,
-          "y": 78,
+          "y": 54,
           "w": 288,
           "h": 1
         },
@@ -201,42 +198,17 @@
         "when": "scanning"
       },
       {
-        "kind": "text",
-        "rect": {
-          "x": 16,
-          "y": 13,
-          "w": 248,
-          "h": 18
-        },
-        "binding": "page_detail",
-        "role": "caption",
-        "color": "muted",
-        "value": ""
-      },
-      {
-        "kind": "text",
-        "rect": {
-          "x": 16,
-          "y": 40,
-          "w": 288,
-          "h": 40
-        },
-        "binding": "page_title",
-        "role": "serif",
-        "alignment": "center"
-      },
-      {
         "kind": "list",
         "rect": {
           "x": 8,
           "y": 0,
           "w": 304,
-          "h": 140,
+          "h": 160,
           "after": "header"
         },
         "binding": "tracks",
         "role": "reading",
-        "row_height": 28,
+        "row_height": 32,
         "radius": 4,
         "alignment": "left",
         "detail": false,
@@ -248,7 +220,7 @@
         "kind": "text",
         "rect": {
           "x": 16,
-          "y": 90,
+          "y": 74,
           "w": 288,
           "h": 24
         },
@@ -261,37 +233,12 @@
     ],
     "player": [
       {
-        "kind": "text",
-        "rect": {
-          "x": 16,
-          "y": 13,
-          "w": 248,
-          "h": 18
-        },
-        "binding": "page_detail",
-        "role": "caption",
-        "color": "muted",
-        "value": ""
-      },
-      {
-        "kind": "text",
-        "rect": {
-          "x": 16,
-          "y": 40,
-          "w": 288,
-          "h": 40
-        },
-        "binding": "page_title",
-        "role": "serif",
-        "alignment": "center"
-      },
-      {
         "kind": "artwork",
         "rect": {
           "x": 16,
-          "y": 80,
-          "w": 96,
-          "h": 96
+          "y": 64,
+          "w": 112,
+          "h": 112
         },
         "background": "line",
         "radius": 2,
@@ -300,21 +247,22 @@
       {
         "kind": "text",
         "rect": {
-          "x": 128,
-          "y": 80,
-          "w": 176,
-          "h": 28
+          "x": 144,
+          "y": 64,
+          "w": 160,
+          "h": 52
         },
         "binding": "track_title",
         "role": "title",
-        "when": "track"
+        "when": "track",
+        "lines": 2
       },
       {
         "kind": "text",
         "rect": {
-          "x": 128,
-          "y": 112,
-          "w": 176,
+          "x": 144,
+          "y": 120,
+          "w": 160,
           "h": 21
         },
         "binding": "track_artist",
@@ -324,9 +272,9 @@
       {
         "kind": "text",
         "rect": {
-          "x": 128,
-          "y": 136,
-          "w": 176,
+          "x": 144,
+          "y": 145,
+          "w": 160,
           "h": 19
         },
         "binding": "track_album",
@@ -337,9 +285,9 @@
       {
         "kind": "text",
         "rect": {
-          "x": 128,
+          "x": 144,
           "y": 167,
-          "w": 116,
+          "w": 100,
           "h": 19
         },
         "binding": "codec",
@@ -393,7 +341,7 @@
         "kind": "progress",
         "rect": {
           "x": 16,
-          "y": 78,
+          "y": 54,
           "w": 288,
           "h": 1
         },
@@ -406,32 +354,7 @@
         "kind": "text",
         "rect": {
           "x": 16,
-          "y": 13,
-          "w": 248,
-          "h": 18
-        },
-        "binding": "page_detail",
-        "role": "caption",
-        "color": "muted",
-        "value": ""
-      },
-      {
-        "kind": "text",
-        "rect": {
-          "x": 16,
-          "y": 40,
-          "w": 288,
-          "h": 40
-        },
-        "binding": "page_title",
-        "role": "serif",
-        "alignment": "center"
-      },
-      {
-        "kind": "text",
-        "rect": {
-          "x": 16,
-          "y": 90,
+          "y": 74,
           "w": 288,
           "h": 24
         },
@@ -442,7 +365,7 @@
         "kind": "list",
         "rect": {
           "x": 8,
-          "y": 128,
+          "y": 112,
           "w": 304,
           "h": 64
         },
@@ -458,7 +381,7 @@
         "kind": "progress",
         "rect": {
           "x": 16,
-          "y": 78,
+          "y": 54,
           "w": 288,
           "h": 1
         },
@@ -468,42 +391,17 @@
         "when": "scanning"
       },
       {
-        "kind": "text",
-        "rect": {
-          "x": 16,
-          "y": 13,
-          "w": 248,
-          "h": 18
-        },
-        "binding": "page_detail",
-        "role": "caption",
-        "color": "muted",
-        "value": ""
-      },
-      {
-        "kind": "text",
-        "rect": {
-          "x": 16,
-          "y": 40,
-          "w": 288,
-          "h": 40
-        },
-        "binding": "page_title",
-        "role": "serif",
-        "alignment": "center"
-      },
-      {
         "kind": "list",
         "rect": {
           "x": 8,
           "y": 0,
           "w": 304,
-          "h": 140,
+          "h": 160,
           "after": "header"
         },
         "binding": "artists",
         "role": "reading",
-        "row_height": 28,
+        "row_height": 32,
         "radius": 4,
         "alignment": "left",
         "detail": false,
@@ -515,7 +413,7 @@
         "kind": "text",
         "rect": {
           "x": 16,
-          "y": 90,
+          "y": 74,
           "w": 288,
           "h": 24
         },
@@ -531,7 +429,7 @@
         "kind": "progress",
         "rect": {
           "x": 16,
-          "y": 78,
+          "y": 54,
           "w": 288,
           "h": 1
         },
@@ -541,42 +439,17 @@
         "when": "scanning"
       },
       {
-        "kind": "text",
-        "rect": {
-          "x": 16,
-          "y": 13,
-          "w": 248,
-          "h": 18
-        },
-        "binding": "page_detail",
-        "role": "caption",
-        "color": "muted",
-        "value": ""
-      },
-      {
-        "kind": "text",
-        "rect": {
-          "x": 16,
-          "y": 40,
-          "w": 288,
-          "h": 40
-        },
-        "binding": "page_title",
-        "role": "serif",
-        "alignment": "center"
-      },
-      {
         "kind": "list",
         "rect": {
           "x": 8,
           "y": 0,
           "w": 304,
-          "h": 140,
+          "h": 160,
           "after": "header"
         },
         "binding": "artist",
         "role": "reading",
-        "row_height": 28,
+        "row_height": 32,
         "radius": 4,
         "alignment": "left",
         "detail": false,
@@ -588,7 +461,7 @@
         "kind": "text",
         "rect": {
           "x": 16,
-          "y": 90,
+          "y": 74,
           "w": 288,
           "h": 24
         },
@@ -604,7 +477,7 @@
         "kind": "progress",
         "rect": {
           "x": 16,
-          "y": 78,
+          "y": 54,
           "w": 288,
           "h": 1
         },
@@ -612,31 +485,6 @@
         "color": "line",
         "focus": "accent",
         "when": "scanning"
-      },
-      {
-        "kind": "text",
-        "rect": {
-          "x": 16,
-          "y": 13,
-          "w": 248,
-          "h": 18
-        },
-        "binding": "page_detail",
-        "role": "caption",
-        "color": "muted",
-        "value": ""
-      },
-      {
-        "kind": "text",
-        "rect": {
-          "x": 16,
-          "y": 40,
-          "w": 288,
-          "h": 40
-        },
-        "binding": "page_title",
-        "role": "serif",
-        "alignment": "center"
       },
       {
         "kind": "text",
@@ -682,7 +530,7 @@
         "kind": "progress",
         "rect": {
           "x": 16,
-          "y": 78,
+          "y": 54,
           "w": 288,
           "h": 1
         },
@@ -692,42 +540,17 @@
         "when": "scanning"
       },
       {
-        "kind": "text",
-        "rect": {
-          "x": 16,
-          "y": 13,
-          "w": 248,
-          "h": 18
-        },
-        "binding": "page_detail",
-        "role": "caption",
-        "color": "muted",
-        "value": ""
-      },
-      {
-        "kind": "text",
-        "rect": {
-          "x": 16,
-          "y": 40,
-          "w": 288,
-          "h": 40
-        },
-        "binding": "page_title",
-        "role": "serif",
-        "alignment": "center"
-      },
-      {
         "kind": "list",
         "rect": {
           "x": 8,
           "y": 0,
           "w": 304,
-          "h": 140,
+          "h": 160,
           "after": "header"
         },
         "binding": "menu",
         "role": "reading",
-        "row_height": 28,
+        "row_height": 32,
         "radius": 4,
         "alignment": "left",
         "detail": false,
@@ -739,7 +562,7 @@
         "kind": "text",
         "rect": {
           "x": 16,
-          "y": 90,
+          "y": 74,
           "w": 288,
           "h": 24
         },

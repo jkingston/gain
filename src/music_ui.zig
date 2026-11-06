@@ -15,20 +15,42 @@ const battery_status = @import("battery.zig");
 
 pub const Input = enum(u3) { select, back, home, up, down, volume_up, volume_down, menu };
 
-pub const Screen = enum { home, albums, tracks, player, library, artists, artist, settings, music, folders, themes, display };
-pub const TrackScope = enum { album, artist, all, queue, folder };
-const MusicItem = enum { albums, artists, songs, shuffle_all };
-const music_items = [_]MusicItem{ .albums, .artists, .songs, .shuffle_all };
-const Collection = struct { scope: TrackScope, album: u64 = 0, artist: u64 = 0, directory: []const u8 = "" };
+pub const Screen = enum { home, albums, tracks, player, library, artists, artist, settings, playlists, folders, themes, display, favourites, album_list, saved };
+pub const TrackScope = enum { album, artist, all, queue, folder, playlist, favourites };
+const HomeItem = enum { albums, artists, songs, playlists, favourites, recent, shuffle_all, settings, now_playing };
+const home_items = [_]HomeItem{ .albums, .artists, .songs, .shuffle_all, .playlists, .favourites, .recent, .settings, .now_playing };
+const Collection = struct { scope: TrackScope, album: u64 = 0, artist: u64 = 0, directory: []const u8 = "", playlist: u64 = 0 };
+const CollectionAction = enum { play_all, shuffle_songs, shuffle_albums, play_next, add, favourite, jump };
 const ContextMenu = struct {
-    kind: enum { collection, player },
+    kind: enum { collection, player, queue_item },
+    track: u64 = 0,
+    occurrence: @import("play_queue.zig").Occurrence = 0,
     collection: Collection = .{ .scope = .all },
     selection: usize = 0,
     jump: bool = false,
     empty: bool = false,
+    favourite: bool = false,
+    save: bool = false,
+    notice: []const u8 = "",
+
+    fn hasAlbumShuffle(self: ContextMenu) bool {
+        return self.collection.scope == .all;
+    }
 
     fn count(self: ContextMenu) usize {
-        return if (self.empty) 0 else if (self.kind == .player) 3 else if (self.jump) 3 else 2;
+        return if (self.empty) 0 else if (self.kind == .player) 5 + @as(usize, @intFromBool(self.favourite)) + @as(usize, @intFromBool(self.save)) else if (self.kind == .queue_item) 2 else 4 + @as(usize, @intFromBool(self.jump)) + @as(usize, @intFromBool(self.hasAlbumShuffle())) + @as(usize, @intFromBool(self.favourite));
+    }
+
+    fn collectionAction(self: ContextMenu, position: usize) CollectionAction {
+        if (position == 0) return .play_all;
+        if (position == 1) return .shuffle_songs;
+        if (self.hasAlbumShuffle() and position == 2) return .shuffle_albums;
+        return switch (position - 2 - @as(usize, @intFromBool(self.hasAlbumShuffle()))) {
+            0 => .play_next,
+            1 => .add,
+            2 => if (self.favourite) .favourite else .jump,
+            else => .jump,
+        };
     }
 };
 const Location = struct {
@@ -40,7 +62,13 @@ const Location = struct {
     scope: TrackScope,
     selected_id: u64,
     track_anchor: u64,
+    playlist: u64,
+    occurrence: @import("play_queue.zig").Occurrence,
 };
+pub const FavouriteRequest = struct { kind: @import("listening_activity.zig").Kind, id: u64, anchor: u64 = 0, enabled: bool = true };
+pub const SavedRequest = struct { action: enum { load, save }, slot: u3, membership_revision: u32 = 0 };
+const saved_selection_base: u64 = 0x4750534156450000;
+const saved_names = [_][]const u8{ "Saved 1", "Saved 2", "Saved 3", "Saved 4", "Saved 5", "Saved 6", "Saved 7", "Saved 8" };
 const theme = @import("runtime_theme.zig");
 const builtin_theme_count = @import("builtin_themes.zig").names.len;
 
@@ -75,6 +103,9 @@ pub fn Controller(comptime Platform: type) type {
         rendered_scan_phase: []const u8 = "",
         theme_family: @import("preferences.zig").Theme = .classic,
         display_timeout: @import("preferences.zig").Timeout = .seconds30,
+        paused_idle: @import("listening_power.zig").Idle = .minutes5,
+        sleep_timer: @import("listening_power.zig").Sleep = .off,
+        sleep_revision: u32 = 0,
         display_asleep: bool = false,
         last_activity: ?u64 = null,
         power_wake_only: bool = false,
@@ -84,6 +115,15 @@ pub fn Controller(comptime Platform: type) type {
         shuffle_seed: u64 = 0x4741494e,
 
         album_id: u64 = 0,
+        playlist_id: u64 = 0,
+        album_list_scope: enum { favourites, recent } = .recent,
+        activity_available: bool = false,
+        saved_available: bool = false,
+        favourite_request: ?FavouriteRequest = null,
+        saved_request: ?SavedRequest = null,
+        saved_summary: [8]@import("saved_playlists.zig").Summary = @splat(.{}),
+        saved_notice: []const u8 = "",
+        library_notice: []const u8 = "",
         artist_id: u64 = 0,
         album_rank: ?usize = null,
         artist_rank: ?usize = null,
@@ -96,6 +136,9 @@ pub fn Controller(comptime Platform: type) type {
         jump_position: ?usize = null,
         selected_id: u64 = 0,
         selected_track_anchor: u64 = 0,
+        selected_occurrence: @import("play_queue.zig").Occurrence = 0,
+        playing_occurrence: @import("play_queue.zig").Occurrence = 0,
+        queue_revision: u32 = 0,
         flow: f32 = 0,
         flow_at: u64 = 0,
         revision: u32 = 0,
@@ -167,12 +210,22 @@ pub fn Controller(comptime Platform: type) type {
             return Platform.now();
         }
 
+        /// Called after the replacement view is published, before its old
+        /// catalogue arena is reclaimed. Only numeric/pixel cache state stays;
+        /// queued artwork descriptors must release their borrowed strings now.
+        pub fn catalogueRetired(self: *State) void {
+            self.cover_plan = null;
+            self.cover_plan_revision = 0;
+            self.covers.clearRequests();
+        }
+
         pub fn snapshot(self: *const State) *const views.Snapshot {
             return self.index.projection.current();
         }
 
         pub fn queue(self: *State, track: *const core.Track) void {
             self.cancelInput(self.input_policy.held);
+            self.playing_occurrence = if (self.track_store.order.at(self.track_store.order.cursor) == track.id) self.track_store.order.occurrenceAt(self.track_store.order.cursor).? else 0;
             self.requested_start_frame = 0;
             self.resume_paused = false;
             self.requested_track = self.track_store.queue(track) catch |failure| {
@@ -185,6 +238,7 @@ pub fn Controller(comptime Platform: type) type {
             self.cancelInput(self.input_policy.held);
             self.jump_position = null;
             self.menu = null;
+            self.library_notice = "";
             self.screen = screen;
             self.rendered_screen = null;
             self.pending_frame.ready = false;
@@ -192,6 +246,7 @@ pub fn Controller(comptime Platform: type) type {
             self.first = 0;
             self.selected_id = 0;
             self.selected_track_anchor = 0;
+            self.selected_occurrence = 0;
             self.revision = 0;
             self.flow = 0;
             self.dirty = true;
@@ -205,8 +260,114 @@ pub fn Controller(comptime Platform: type) type {
                 .artist => view.artistTrack(self.artistRank() orelse return null, position),
                 .all => if (position < view.track_count) view.tracks[view.title_order[position]] else null,
                 .queue => view.trackById(self.track_store.order.at(position) orelse return null),
-                .folder => self.collectionTrack(.{ .scope = .folder, .directory = self.folderPath() }, position),
+                .playlist => self.playlistTrack(self.playlist_id, position),
+                .favourites => if (position < view.favourite_song_count) view.tracks[view.favourite_song_order[position]] else null,
+                .folder => self.collectionTrack(.{ .scope = .folder, .directory = self.folderPath(), .playlist = self.playlist_id }, position),
             };
+        }
+
+        fn playlist(self: *const State, id: u64) ?*const core.Playlist {
+            return self.snapshot().playlistAt(self.snapshot().playlistIndex(id) orelse return null);
+        }
+
+        fn playlistTrack(self: *const State, id: u64, position: usize) ?*const core.Track {
+            const value = self.playlist(id) orelse return null;
+            if (position >= value.items.len) return null;
+            const item = value.items[position];
+            return self.snapshot().trackById(item.track_id) orelse self.snapshot().trackByPath(item.path);
+        }
+
+        fn listedAlbum(self: *const State, position: usize) ?*const views.Album {
+            const view = self.snapshot();
+            const count = if (self.album_list_scope == .recent) view.recent_album_count else view.favourite_album_count;
+            if (position >= count) return null;
+            return &view.albums[if (self.album_list_scope == .recent) view.recent_album_order[position] else view.favourite_album_order[position]];
+        }
+
+        fn savedCount(self: *const State) usize {
+            var count: usize = 0;
+            for (self.saved_summary) |summary| if (summary.present and summary.count != 0) {
+                count += 1;
+            };
+            return count;
+        }
+
+        fn savedSlot(self: *const State, position: usize) ?u3 {
+            var rank: usize = 0;
+            for (self.saved_summary, 0..) |summary, slot| {
+                if (!summary.present or summary.count == 0) continue;
+                if (rank == position) return @intCast(slot);
+                rank += 1;
+            }
+            return null;
+        }
+
+        pub fn loadedSavedPlaylist(self: *State, data: @import("saved_playlists.zig").Data) !void {
+            if (data.source != self.snapshot().source) return error.ForeignPlaylist;
+            var available = false;
+            for (0..data.count) |rank| if (self.snapshot().trackById(data.id(rank)) != null) {
+                available = true;
+                break;
+            };
+            if (!available) return error.PlaylistUnavailable;
+            try data.restore(&self.track_store.order);
+            for (0..self.track_store.order.count) |rank| {
+                if (self.snapshot().trackById(self.track_store.order.at(rank).?)) |track| {
+                    _ = self.track_store.order.selectOccurrence(self.track_store.order.occurrenceAt(rank).?);
+                    self.queue(track);
+                    if (self.screen != .player) self.push(.player);
+                    return;
+                }
+            }
+            return error.PlaylistUnavailable;
+        }
+
+        pub fn libraryNotice(self: *State, message: []const u8) void {
+            if (self.menu) |*menu| menu.notice = message else self.library_notice = message;
+            self.dirty = true;
+            self.major = true;
+            self.rendered_screen = null;
+        }
+
+        pub fn savedPlaylistResult(self: *State, slot: u3, success: bool, count: u16) void {
+            if (success) {
+                self.saved_summary[slot] = .{ .present = count != 0, .count = count };
+                self.saved_notice = "";
+                if (self.screen == .saved) self.goBack();
+            } else self.saved_notice = "Cannot save queue";
+            self.dirty = true;
+            self.major = true;
+            self.rendered_screen = null;
+        }
+
+        fn favouriteIsSet(self: *const State, kind: @import("listening_activity.zig").Kind, id: u64) bool {
+            const view = self.snapshot();
+            return switch (kind) {
+                .song => if (view.trackIndexById(id)) |rank| view.favourite_songs.isSet(rank) else false,
+                .album => if (view.albumIndex(id)) |rank| view.favourite_albums.isSet(rank) else false,
+            };
+        }
+
+        fn favouriteTarget(self: *const State, menu: ContextMenu) ?FavouriteRequest {
+            var request: FavouriteRequest = undefined;
+            if (menu.kind == .player) {
+                const track = self.playing_track orelse return null;
+                request = .{ .kind = .song, .id = track.id };
+            } else if (menu.track != 0) {
+                request = .{ .kind = .song, .id = menu.track };
+            } else if (menu.collection.scope == .album) {
+                request = .{ .kind = .album, .id = menu.collection.album };
+            } else return null;
+            if (request.kind == .album) if (self.snapshot().albumIndex(request.id)) |rank| {
+                request.anchor = self.snapshot().albums[rank].representative.id;
+            };
+            request.enabled = !self.favouriteIsSet(request.kind, request.id);
+            return request;
+        }
+
+        fn targetFavourite(self: *const State, menu: ContextMenu) bool {
+            const target = self.favouriteTarget(menu) orelse return false;
+            return !target.enabled;
         }
 
         fn albumRank(self: *const State) ?usize {
@@ -269,7 +430,7 @@ pub fn Controller(comptime Platform: type) type {
         }
 
         fn location(self: *const State) Location {
-            return .{ .screen = self.screen, .selection = self.selection, .first = self.first, .album = self.album_id, .artist = self.artist_id, .scope = self.track_scope, .selected_id = self.selected_id, .track_anchor = self.selected_track_anchor };
+            return .{ .screen = self.screen, .selection = self.selection, .first = self.first, .album = self.album_id, .artist = self.artist_id, .scope = self.track_scope, .selected_id = self.selected_id, .track_anchor = self.selected_track_anchor, .occurrence = self.selected_occurrence, .playlist = self.playlist_id };
         }
 
         fn push(self: *State, screen: Screen) void {
@@ -299,7 +460,7 @@ pub fn Controller(comptime Platform: type) type {
                 return;
             }
             if (self.history_count == 0) {
-                self.navigate(if (self.screen == .home or self.screen == .music) .home else .music);
+                self.navigate(.home);
                 return;
             }
             self.history_count -= 1;
@@ -307,9 +468,11 @@ pub fn Controller(comptime Platform: type) type {
             self.navigate(previous.screen);
             self.album_id = previous.album;
             self.artist_id = previous.artist;
+            self.playlist_id = previous.playlist;
             self.track_scope = previous.scope;
             self.selected_id = previous.selected_id;
             self.selected_track_anchor = previous.track_anchor;
+            self.selected_occurrence = previous.occurrence;
             self.selection = previous.selection;
             self.first = previous.first;
             self.flow = @floatFromInt(self.selection);
@@ -324,6 +487,15 @@ pub fn Controller(comptime Platform: type) type {
                 .album => if (view.albumIndex(collection.album)) |i| view.albums[i].count else 0,
                 .artist => if (view.artistIndex(collection.artist)) |i| view.artists[i].track_count else 0,
                 .queue => self.track_store.order.count,
+                .favourites => view.favourite_song_count,
+                .playlist => count: {
+                    const value = self.playlist(collection.playlist) orelse break :count 0;
+                    var count: usize = 0;
+                    for (0..value.items.len) |rank| if (self.playlistTrack(collection.playlist, rank) != null) {
+                        count += 1;
+                    };
+                    break :count count;
+                },
                 .folder => count: {
                     Platform.trace(.library_work, benchmarkClock(), @intCast(view.track_count));
                     var count: usize = 0;
@@ -342,6 +514,16 @@ pub fn Controller(comptime Platform: type) type {
                 .album => view.albumTrack(view.albumIndex(collection.album) orelse return null, position),
                 .artist => view.artistTrack(view.artistIndex(collection.artist) orelse return null, position),
                 .queue => view.trackById(self.track_store.order.at(position) orelse return null),
+                .favourites => if (position < view.favourite_song_count) view.tracks[view.favourite_song_order[position]] else null,
+                .playlist => available: {
+                    const value = self.playlist(collection.playlist) orelse break :available null;
+                    var found: usize = 0;
+                    for (0..value.items.len) |rank| if (self.playlistTrack(collection.playlist, rank)) |track| {
+                        if (found == position) break :available track;
+                        found += 1;
+                    };
+                    break :available null;
+                },
                 .folder => match: {
                     var rank: usize = 0;
                     for (view.tracks[0..view.track_count]) |track| {
@@ -357,11 +539,13 @@ pub fn Controller(comptime Platform: type) type {
         fn currentCollection(self: *const State) ?Collection {
             const view = self.snapshot();
             return switch (self.screen) {
-                .home, .music => .{ .scope = .all },
+                .home => if (home_items[self.selection] == .songs or home_items[self.selection] == .shuffle_all) .{ .scope = .all } else null,
+                .playlists => if (self.snapshot().playlistAt(self.selection)) |value| .{ .scope = .playlist, .playlist = core.hash(value.path) } else null,
+                .album_list => if (self.listedAlbum(self.selection)) |album| .{ .scope = .album, .album = album.id } else null,
                 .albums => if (self.selection < view.album_count) .{ .scope = .album, .album = view.albums[self.selection].id } else null,
                 .artists => if (self.selection < view.artist_count) .{ .scope = .artist, .artist = view.artistId(self.selection) } else null,
                 .artist => if (view.artistIndex(self.artist_id)) |i| if (self.selection == 0) .{ .scope = .artist, .artist = self.artist_id } else .{ .scope = .album, .album = view.albums[view.artists[i].first_album + self.selection - 1].id } else null,
-                .tracks => .{ .scope = self.track_scope, .album = self.album_id, .artist = self.artist_id, .directory = self.folderPath() },
+                .tracks => .{ .scope = self.track_scope, .album = self.album_id, .artist = self.artist_id, .directory = self.folderPath(), .playlist = self.playlist_id },
                 .folders => .{ .scope = .folder, .directory = if (self.folderRow(self.selection)) |row| if (row.directory) row.path else self.folderPath() else self.folderPath() },
                 else => null,
             };
@@ -378,14 +562,22 @@ pub fn Controller(comptime Platform: type) type {
             if (source.scope == .queue) {
                 // The queue already owns its membership; do not clear it while
                 // resolving itself or replace it from the latest catalogue.
-                if (selected_track) |id| _ = self.track_store.order.select(id);
+                if (self.track_store.order.occurrenceAt(self.selection)) |occurrence| _ = self.track_store.order.selectOccurrence(occurrence);
             } else {
                 if (count > self.track_store.order.capacity()) {
                     self.fail(error.QueueFull);
                     return;
                 }
                 self.track_store.order.clear();
-                if (source.scope == .folder) {
+                if (source.scope == .playlist) {
+                    const value = self.playlist(source.playlist) orelse return;
+                    var selected_rank: usize = 0;
+                    for (0..value.items.len) |rank| if (self.playlistTrack(source.playlist, rank)) |track| {
+                        if (selected_track != null and rank == self.selection) selected_rank = self.track_store.order.count;
+                        self.track_store.order.append(track.id) catch unreachable;
+                    };
+                    if (selected_track != null) _ = self.track_store.order.selectOccurrence(self.track_store.order.occurrenceAt(selected_rank).?);
+                } else if (source.scope == .folder) {
                     const view = self.snapshot();
                     for (view.tracks[0..view.track_count]) |track| {
                         if (!std.mem.eql(u8, std.fs.path.dirname(track.path) orelse "", source.directory)) continue;
@@ -393,6 +585,7 @@ pub fn Controller(comptime Platform: type) type {
                     }
                     const Sort = struct {
                         view: *const views.Snapshot,
+
                         pub fn less(ctx: @This(), left: u64, right: u64) bool {
                             return core.lessText(ctx.view.trackById(left).?.path, ctx.view.trackById(right).?.path);
                         }
@@ -408,7 +601,9 @@ pub fn Controller(comptime Platform: type) type {
                         return;
                     };
                 }
-                if (selected_track) |id| _ = self.track_store.order.select(id);
+                if (source.scope != .playlist) if (selected_track) |id| {
+                    _ = self.track_store.order.select(id);
+                };
                 if (shuffled) self.track_store.order.shuffle(self.nextSeed(now), false);
             }
             if (self.track_store.order.at(self.track_store.order.cursor)) |id| {
@@ -416,18 +611,156 @@ pub fn Controller(comptime Platform: type) type {
             }
         }
 
+        fn startAlbumShuffle(self: *State, now: u64) void {
+            const view = self.snapshot();
+            if (view.track_count == 0 or view.track_count > self.track_store.order.capacity()) return;
+            self.track_store.order.clear();
+            for (view.track_order[0..view.track_count]) |track_index| self.track_store.order.append(view.tracks[track_index].id) catch unreachable;
+            const Albums = struct {
+                view: *const views.Snapshot,
+
+                pub fn trackCount(source: @This()) usize {
+                    return source.view.track_count;
+                }
+
+                pub fn albumCount(source: @This()) usize {
+                    return source.view.album_count;
+                }
+
+                pub fn first(source: @This(), i: usize) usize {
+                    return source.view.albums[i].first_track;
+                }
+
+                pub fn count(source: @This(), i: usize) usize {
+                    return source.view.albums[i].count;
+                }
+            };
+            self.track_store.order.shuffleAlbums(self.nextSeed(now), Albums{ .view = view }) catch unreachable;
+            if (view.trackById(self.track_store.order.at(0).?)) |track| self.queue(track);
+        }
+
         fn startContext(self: *State, track: *const core.Track) void {
-            self.startCollection(.{ .scope = self.track_scope, .album = self.album_id, .artist = self.artist_id, .directory = self.folderPath() }, track.id, false, 0);
+            self.startCollection(.{ .scope = self.track_scope, .album = self.album_id, .artist = self.artist_id, .directory = self.folderPath(), .playlist = self.playlist_id }, track.id, false, 0);
+        }
+
+        fn addCollection(self: *State, menu: ContextMenu, next: bool) !void {
+            const Source = struct {
+                state: *const State,
+                menu: ContextMenu,
+                raw_position: usize = 0,
+
+                pub fn len(source: @This()) usize {
+                    return if (source.menu.track != 0) 1 else source.state.collectionCount(source.menu.collection);
+                }
+
+                pub fn id(source: *@This(), i: usize) u64 {
+                    if (source.menu.track == 0 and source.menu.collection.scope == .playlist) {
+                        if (i == 0) source.raw_position = 0;
+                        const value = source.state.playlist(source.menu.collection.playlist) orelse return 0;
+                        while (source.raw_position < value.items.len) {
+                            const row = source.raw_position;
+                            source.raw_position += 1;
+                            if (source.state.playlistTrack(source.menu.collection.playlist, row)) |track| return track.id;
+                        }
+                        return 0;
+                    }
+                    return if (source.menu.track != 0) source.menu.track else if (source.state.collectionTrack(source.menu.collection, i)) |track| track.id else 0;
+                }
+            };
+            var source = Source{ .state = self, .menu = menu };
+            try self.track_store.order.insertFrom(&source, next);
+        }
+
+        fn goToRelated(self: *State, artist: bool) void {
+            const track = self.playing_track orelse return;
+            const view = self.snapshot();
+            const album = view.albumForTrack(track.id) orelse return;
+            if (artist) {
+                self.push(.artist);
+                self.artist_id = view.artistId(album.artist_index);
+            } else {
+                self.push(.tracks);
+                self.track_scope = .album;
+                self.album_id = album.id;
+                self.selected_id = track.id;
+            }
+            self.reconcile();
+            self.ensureVisible();
+        }
+
+        /// Decoder frame counts take precedence over metadata estimates. Some
+        /// containers reveal the exact end only later; their known library
+        /// duration can still supply useful progress and seeking meanwhile.
+        pub fn effectiveTotalFrames(self: *const State, incoming: media.PlaybackStatus) u64 {
+            if (incoming.total_frames != 0) return incoming.total_frames;
+            const track = self.playing_track orelse return 0;
+            const scaled = std.math.mul(u64, track.meta.duration_ms, incoming.sample_rate) catch return 0;
+            return scaled / 1000;
+        }
+
+        pub fn setPlaybackStatus(self: *State, incoming: media.PlaybackStatus) void {
+            const total = self.effectiveTotalFrames(incoming);
+            if (self.screen == .player and self.status.total_frames != total) self.dirty = true;
+            self.status = incoming;
+            self.status.total_frames = total;
+        }
+
+        pub fn listeningPosition(self: *const State) @import("listening_session.zig").Position {
+            const track = self.requested_track orelse self.playing_track;
+            return .{
+                .cursor = @intCast(self.track_store.order.cursor),
+                .frame = if (self.requested_track != null) self.requested_start_frame else self.status.played_frames,
+                .sample_rate = if (self.requested_track) |pending| pending.meta.sample_rate else self.status.sample_rate,
+                .stamp = if (track) |value| value.stamp else .{},
+            };
+        }
+
+        pub fn listeningNavigation(self: *const State) @import("listening_session.zig").Navigation {
+            return .{ .screen = @intCast(@backingInt(self.screen)), .scope = @intCast(@backingInt(self.track_scope)), .album = if (self.track_scope == .playlist) self.playlist_id else self.album_id, .artist = self.artist_id, .selected = self.selected_id, .anchor = self.selected_track_anchor };
+        }
+
+        pub fn restoreListening(self: *State, record: @import("listening_session.zig").Record) !void {
+            const view = self.snapshot();
+            if (!view.complete or record.data.source != view.source) return error.LibraryNotReady;
+            try record.restore(&self.track_store.order);
+            var position = self.track_store.order.cursor;
+            for (0..self.track_store.order.count) |_| {
+                const id = self.track_store.order.at(position).?;
+                if (view.trackById(id)) |track| {
+                    self.track_store.order.cursor = position;
+                    self.queue(track);
+                    const rate = track.meta.sample_rate;
+                    self.requested_start_frame = if (position == record.position.cursor) record.position.validatedFrame(track.stamp, rate, track.meta.duration_ms * rate / 1000) else 0;
+                    self.resume_paused = true;
+                    const previous = record.navigation;
+                    const screen = std.enums.fromInt(Screen, previous.screen) orelse .home;
+                    self.navigate(if (screen == .folders or screen == .themes or screen == .display) .home else screen);
+                    self.track_scope = std.enums.fromInt(TrackScope, previous.scope) orelse .all;
+                    self.album_id = previous.album;
+                    if (self.track_scope == .playlist) self.playlist_id = previous.album;
+                    self.artist_id = previous.artist;
+                    self.selected_id = previous.selected;
+                    self.selected_track_anchor = previous.anchor;
+                    self.reconcile();
+                    self.ensureVisible();
+                    return;
+                }
+                position = (position + 1) % self.track_store.order.count;
+            }
+            // Preserve missing occurrences in the saved queue so a temporary
+            // card/library change does not erase it. Nothing auto-plays.
         }
 
         fn openMenu(self: *State) void {
             if (self.menu != null) {
                 self.menu = null;
-            } else if (self.screen == .player or (self.screen == .tracks and self.track_scope == .queue)) {
+            } else if (self.screen == .tracks and self.track_scope == .queue) {
+                if (self.selection <= self.track_store.order.cursor) return;
+                self.menu = .{ .kind = .queue_item, .occurrence = self.track_store.order.occurrenceAt(self.selection) orelse return };
+            } else if (self.screen == .player) {
                 if (self.playing_track == null) return;
-                self.menu = .{ .kind = .player };
+                self.menu = .{ .kind = .player, .favourite = self.activity_available, .save = self.saved_available and self.track_store.order.count != 0 };
             } else if (self.currentCollection()) |source| {
-                if (self.screen == .home and self.selection != 0) return;
                 const count = self.collectionCount(source);
                 if (count == 0 and self.screen != .folders) return;
                 var captured = source;
@@ -436,7 +769,7 @@ pub fn Controller(comptime Platform: type) type {
                     @memcpy(self.menu_directory[0..source.directory.len], source.directory);
                     captured.directory = self.menu_directory[0..source.directory.len];
                 }
-                self.menu = .{ .kind = .collection, .collection = captured, .jump = self.rows() > 8, .empty = count == 0 };
+                self.menu = .{ .kind = .collection, .collection = captured, .jump = self.rows() > 8, .empty = count == 0, .favourite = self.activity_available and (self.screen == .tracks or source.scope == .album), .track = if (self.screen == .tracks) if (self.trackAt(self.selection)) |track| track.id else 0 else 0 };
             } else return;
             self.cancelInput(self.input_policy.held);
             if (self.menu != null) self.covers.clearRequests();
@@ -455,33 +788,60 @@ pub fn Controller(comptime Platform: type) type {
                     if (self.screen != .tracks or self.track_scope != .queue) self.push(.tracks);
                     self.track_scope = .queue;
                     self.selection = self.track_store.order.cursor;
+                    self.selected_occurrence = self.track_store.order.occurrenceAt(self.selection) orelse 0;
                     self.ensureVisible();
                 },
                 1 => {
-                    const selected_track = if (self.screen == .tracks and self.track_scope == .queue) self.trackAt(self.selection) else null;
+                    const selected = if (self.screen == .tracks and self.track_scope == .queue) self.track_store.order.occurrenceAt(self.selection) else null;
                     if (self.track_store.order.shuffled) self.track_store.order.unshuffle() else self.track_store.order.shuffle(self.nextSeed(now), true);
-                    if (selected_track) |track| for (0..self.track_store.order.count) |i| {
-                        if (self.track_store.order.at(i).? == track.id) {
-                            self.selection = i;
-                            break;
-                        }
-                    };
+                    if (selected) |occurrence| self.selection = self.track_store.order.positionOf(occurrence) orelse self.selection;
                     self.ensureVisible();
                 },
-                2 => self.track_store.order.repeat = switch (self.track_store.order.repeat) {
-                    .off => .all,
-                    .all => .one,
-                    .one => .off,
+                2 => self.track_store.order.cycleRepeat(),
+                3, 4 => self.goToRelated(menu.selection == 3),
+                5, 6 => {
+                    self.menu = null;
+                    if (menu.favourite and menu.selection == 5) self.favourite_request = self.favouriteTarget(menu) else self.push(.saved);
                 },
                 else => unreachable,
-            } else if (menu.selection == 2) {
+            } else if (menu.kind == .queue_item) {
+                const changed = if (menu.selection == 0) self.track_store.order.moveNext(menu.occurrence) else self.track_store.order.remove(menu.occurrence);
+                changed catch |failure| {
+                    self.menu.?.notice = if (failure == error.CommittedOccurrence) "Already buffered" else "Queue changed";
+                    self.dirty = true;
+                    self.major = true;
+                    self.rendered_screen = null;
+                    return .none;
+                };
+
                 self.menu = null;
-                return self.act(.jump, now, playing);
-            } else {
-                self.menu = null;
-                self.startCollection(menu.collection, null, menu.selection == 1, now);
-                if (self.requested_track != null) self.push(.player);
-                if (playing and self.requested_track != null) return .stop;
+                self.reconcile();
+                self.ensureVisible();
+            } else switch (menu.collectionAction(menu.selection)) {
+                .favourite => {
+                    self.favourite_request = self.favouriteTarget(menu);
+                    self.menu = null;
+                },
+                .jump => {
+                    self.menu = null;
+                    return self.act(.jump, now, playing);
+                },
+                .play_next, .add => |action| {
+                    self.addCollection(menu, action == .play_next) catch |failure| {
+                        self.menu.?.notice = if (failure == error.QueueFull) "Queue full" else "Cannot add tracks";
+                        self.rendered_screen = null;
+                        self.dirty = true;
+                        self.major = true;
+                        return .none;
+                    };
+                    self.menu = null;
+                },
+                .play_all, .shuffle_songs, .shuffle_albums => |action| {
+                    self.menu = null;
+                    if (action == .shuffle_albums) self.startAlbumShuffle(now) else self.startCollection(menu.collection, null, action == .shuffle_songs, now);
+                    if (self.requested_track != null) self.push(.player);
+                    if (playing and self.requested_track != null) return .stop;
+                },
             }
             self.rendered_screen = null;
             self.pending_frame.ready = false;
@@ -493,7 +853,12 @@ pub fn Controller(comptime Platform: type) type {
         /// A newer explicit choice wins over a retiring worker's skip/seek.
         /// Faults never masquerade as EOF and advance through the queue.
         pub fn playbackFinished(self: *State, result: media.Result, failed: bool) void {
-            if (self.requested_track != null or failed) return;
+            if (self.requested_track != null) return;
+            if (failed) {
+                self.status.phase = .paused;
+                self.libraryNotice("Playback error");
+                return;
+            }
             switch (result.exit) {
                 .stopped => {},
                 .seek => if (self.playing_track) |track| {
@@ -503,11 +868,33 @@ pub fn Controller(comptime Platform: type) type {
                     self.resume_paused = paused;
                 },
                 .next, .previous, .completed => {
-                    if (result.exit == .completed and result.frames == 0) return;
+                    if (result.exit == .completed and result.frames == 0) {
+                        self.status.phase = .paused;
+                        self.dirty = true;
+                        return;
+                    }
+                    const remain_paused = result.exit != .completed and self.status.phase == .paused;
                     const next = if (result.exit == .completed) self.finishedTrack() else self.neighbouringTrack(if (result.exit == .previous) -1 else 1);
-                    if (next) |track| self.queue(track);
+                    if (next) |track| {
+                        self.queue(track);
+                        self.resume_paused = remain_paused;
+                    } else {
+                        self.status.phase = .paused;
+                        self.dirty = true;
+                    }
                 },
             }
+        }
+
+        fn manualTrack(self: *State, direction: i2, running: bool) media.PlaybackCommand {
+            if (running) return if (direction < 0) .previous else .next;
+            if (self.screen != .player or self.playing_track == null) return .none;
+            const paused = self.status.phase == .paused;
+            if (self.neighbouringTrack(direction)) |track| {
+                self.queue(track);
+                self.resume_paused = paused;
+            }
+            return .none;
         }
 
         pub fn finishedTrack(self: *State) ?*const core.Track {
@@ -522,11 +909,16 @@ pub fn Controller(comptime Platform: type) type {
             const view = self.snapshot();
             const Resolver = struct {
                 view: *const views.Snapshot,
+
                 pub fn contains(resolver: @This(), id: u64) bool {
                     return resolver.view.trackById(id) != null;
                 }
             };
-            if (self.track_store.order.select(current.id)) {
+            if (self.playing_occurrence != 0 and self.track_store.order.occurrenceAt(self.track_store.order.cursor) == self.playing_occurrence) {
+                const id = self.track_store.order.adjacent(direction, Resolver{ .view = view }) orelse return null;
+                return view.trackById(id);
+            }
+            if (self.playing_occurrence == 0 and self.track_store.order.select(current.id)) {
                 const id = self.track_store.order.adjacent(direction, Resolver{ .view = view }) orelse return null;
                 return view.trackById(id);
             }
@@ -544,8 +936,11 @@ pub fn Controller(comptime Platform: type) type {
 
         pub fn rows(self: *const State) usize {
             return switch (self.screen) {
-                .home => 2 + @as(usize, if (self.playing_track != null) 1 else 0),
-                .music => music_items.len,
+                .home => home_items.len - @as(usize, if (self.playing_track == null) 1 else 0),
+                .playlists => self.snapshot().playlists.len + self.savedCount(),
+                .favourites => 2,
+                .album_list => if (self.album_list_scope == .recent) self.snapshot().recent_album_count else self.snapshot().favourite_album_count,
+                .saved => 8,
                 .albums => self.snapshot().album_count,
                 .artists => self.snapshot().artist_count,
                 .artist => if (self.artistRank()) |i| 1 + @as(usize, self.snapshot().artists[i].album_count) else 0,
@@ -554,12 +949,14 @@ pub fn Controller(comptime Platform: type) type {
                     .artist => if (self.artistRank()) |i| self.snapshot().artists[i].track_count else 0,
                     .all => self.snapshot().track_count,
                     .queue => self.track_store.order.count,
-                    .folder => self.collectionCount(.{ .scope = .folder, .directory = self.folderPath() }),
+                    .playlist => if (self.playlist(self.playlist_id)) |value| value.items.len else 0,
+                    .favourites => self.snapshot().favourite_song_count,
+                    .folder => self.collectionCount(.{ .scope = .folder, .directory = self.folderPath(), .playlist = self.playlist_id }),
                 },
                 .library => 2,
-                .settings => 4,
+                .settings => 6,
                 .display => 4,
-                .themes => builtin_theme_count + 2,
+                .themes => builtin_theme_count + 1 + @as(usize, @intFromBool(self.theme_store.has_custom)),
                 .folders => self.folder_view.count,
                 .player => 0,
             };
@@ -591,11 +988,12 @@ pub fn Controller(comptime Platform: type) type {
         }
 
         pub fn preferences(self: *const State) @import("preferences.zig").Options {
-            return .{ .theme = self.theme_family, .appearance = self.appearance, .attenuation = self.attenuation, .replay_gain = self.replay_gain.mode, .timeout = self.display_timeout };
+            return .{ .theme = self.theme_family, .appearance = self.appearance, .attenuation = self.attenuation, .replay_gain = self.replay_gain.mode, .timeout = self.display_timeout, .paused_idle = self.paused_idle };
         }
 
         pub fn applyPreferences(self: *State, options: @import("preferences.zig").Options) void {
-            self.theme_family = options.theme;
+            self.paused_idle = options.paused_idle;
+            self.theme_family = options.theme.canonical();
             self.appearance = options.appearance;
             self.theme_store.select(options.theme, options.appearance);
             self.attenuation = options.attenuation;
@@ -697,6 +1095,7 @@ pub fn Controller(comptime Platform: type) type {
                     if (self.screen != .tracks or self.track_scope != .queue) self.push(.tracks);
                     self.track_scope = .queue;
                     self.selection = self.track_store.order.cursor;
+                    self.selected_occurrence = self.track_store.order.occurrenceAt(self.selection) orelse 0;
                     self.ensureVisible();
                     self.dirty = true;
                     self.major = true;
@@ -738,8 +1137,8 @@ pub fn Controller(comptime Platform: type) type {
                     self.dirty = true;
                     return if (playing) .{ .seek_to = target } else .none;
                 },
-                .previous => return if (playing) .previous else .none,
-                .next => return if (playing) .next else .none,
+                .previous => return self.manualTrack(-1, playing),
+                .next => return self.manualTrack(1, playing),
                 else => return self.handle(switch (action) {
                     .select => .select,
                     .back => .back,
@@ -764,6 +1163,12 @@ pub fn Controller(comptime Platform: type) type {
                 const target: f32 = @floatFromInt(self.selection);
                 if (@abs(target - self.flow) > 3) self.flow = target - std.math.sign(target - self.flow);
             }
+            if (self.screen == .album_list) if (self.listedAlbum(self.selection)) |album| {
+                self.selected_id = album.id;
+            };
+            if (self.screen == .playlists) {
+                if (self.snapshot().playlistAt(self.selection)) |value| self.selected_id = core.hash(value.path) else if (self.savedSlot(self.selection - self.snapshot().playlists.len)) |slot| self.selected_id = saved_selection_base | slot;
+            }
             if (self.screen == .artists and self.rows() > 0) self.selected_id = self.snapshot().artistId(self.selection);
             if (self.screen == .artist and self.selection > 0) {
                 if (self.artistRank()) |i| self.selected_id = self.snapshot().albums[self.snapshot().artists[i].first_album + self.selection - 1].id;
@@ -773,6 +1178,7 @@ pub fn Controller(comptime Platform: type) type {
             };
             if (self.screen == .tracks) if (self.trackAt(self.selection)) |track| {
                 self.selected_id = track.id;
+                if (self.track_scope == .queue) self.selected_occurrence = self.track_store.order.occurrenceAt(self.selection) orelse 0;
             };
             self.dirty = true;
             self.major = true;
@@ -794,6 +1200,7 @@ pub fn Controller(comptime Platform: type) type {
         }
 
         pub fn handle(self: *State, event: Input, now: u64, playing: bool) media.PlaybackCommand {
+            self.library_notice = "";
             self.activity(now);
             self.reconcile();
             if (event != .volume_up and event != .volume_down) self.dirty = true;
@@ -822,27 +1229,58 @@ pub fn Controller(comptime Platform: type) type {
                 },
                 .back => self.goBack(),
                 .up, .down => {
-                    if (self.screen == .player and playing) return if (event == .up) .previous else .next;
+                    if (self.screen == .player) return self.manualTrack(if (event == .up) -1 else 1, playing);
                     self.moveBy(if (event == .up) -1 else 1, now);
                 },
                 .select => switch (self.screen) {
-                    .home => self.push(switch (self.selection) {
-                        0 => .music,
-                        1 => .settings,
-                        else => .player,
-                    }),
-                    .music => switch (music_items[self.selection]) {
+                    .home => switch (home_items[self.selection]) {
                         .albums => self.push(.albums),
                         .artists => self.push(.artists),
                         .songs => {
                             self.push(.tracks);
                             self.track_scope = .all;
                         },
+                        .playlists => self.push(.playlists),
+                        .favourites => self.push(.favourites),
+                        .recent => {
+                            self.push(.album_list);
+                            self.album_list_scope = .recent;
+                        },
+                        .settings => self.push(.settings),
+                        .now_playing => self.push(.player),
                         .shuffle_all => {
                             self.startCollection(.{ .scope = .all }, null, true, now);
                             if (self.requested_track != null) self.push(.player);
                             if (playing and self.requested_track != null) return .stop;
                         },
+                    },
+                    .playlists => {
+                        const view = self.snapshot();
+                        if (self.selection < view.playlists.len) {
+                            self.playlist_id = core.hash(view.playlistAt(self.selection).?.path);
+                            self.push(.tracks);
+                            self.track_scope = .playlist;
+                        } else if (self.savedSlot(self.selection - view.playlists.len)) |slot| {
+                            self.saved_request = .{ .action = .load, .slot = slot };
+                            if (playing) return .stop;
+                        }
+                    },
+                    .favourites => {
+                        if (self.selection == 0) {
+                            self.push(.album_list);
+                            self.album_list_scope = .favourites;
+                        } else {
+                            self.push(.tracks);
+                            self.track_scope = .favourites;
+                        }
+                    },
+                    .album_list => if (self.listedAlbum(self.selection)) |album| {
+                        self.album_id = album.id;
+                        self.push(.tracks);
+                        self.track_scope = .album;
+                    },
+                    .saved => if (self.saved_available) {
+                        self.saved_request = .{ .action = .save, .slot = @intCast(self.selection), .membership_revision = self.track_store.order.membershipRevision() };
                     },
                     .albums => if (self.snapshot().album_count > 0) {
                         self.album_id = self.snapshot().albums[self.selection].id;
@@ -874,15 +1312,15 @@ pub fn Controller(comptime Platform: type) type {
                         if (row.directory) {
                             self.enterFolder(row.path);
                         } else if (self.snapshot().trackByPath(row.path)) |track| {
-                            self.startCollection(.{ .scope = .folder, .directory = self.folderPath() }, track.id, false, now);
+                            self.startCollection(.{ .scope = .folder, .directory = self.folderPath(), .playlist = self.playlist_id }, track.id, false, now);
                             self.push(.player);
                             if (playing) return .stop;
                         }
                     },
                     .library => self.index.request(self.selection == 1),
                     .themes => {
-                        if (self.selection < builtin_theme_count) self.theme_family = @fromBackingInt(@intCast(self.selection)) else if (self.selection == builtin_theme_count) {
-                            if (self.theme_family != .custom) self.appearance = if (self.appearance == .light) .dark else .light;
+                        if (self.selection < builtin_theme_count) self.theme_family = .classic else if (self.selection == builtin_theme_count) {
+                            if (!self.theme_store.using_custom) self.appearance = if (self.appearance == .light) .dark else .light;
                         } else if (self.theme_store.has_custom) self.theme_family = .custom;
                         self.theme_store.select(self.theme_family, self.appearance);
                         self.themeChanged();
@@ -890,12 +1328,17 @@ pub fn Controller(comptime Platform: type) type {
                     .display => {
                         self.display_timeout = @fromBackingInt(@intCast(self.selection));
                     },
-                    .settings => if (self.selection == 3) {
+                    .settings => if (self.selection == 5) {
+                        self.paused_idle = @fromBackingInt(@as(u8, @intCast((@as(u16, @backingInt(self.paused_idle)) + 1) % 4)));
+                    } else if (self.selection == 4) {
+                        self.sleep_timer = @fromBackingInt(@as(u8, @intCast((@as(u16, @backingInt(self.sleep_timer)) + 1) % 4)));
+                        self.sleep_revision +%= 1;
+                    } else if (self.selection == 3) {
                         self.push(.display);
                         self.selection = @backingInt(self.display_timeout);
                     } else if (self.selection == 2) {
                         self.push(.themes);
-                        self.selection = if (self.theme_family == .custom) builtin_theme_count + 1 else @backingInt(self.theme_family);
+                        self.selection = if (self.theme_family == .custom) builtin_theme_count + 1 else 0;
                     } else if (self.selection == 1) {
                         self.push(.library);
                     } else {
@@ -915,6 +1358,15 @@ pub fn Controller(comptime Platform: type) type {
             if (self.screen == .folders) {
                 const source = self.folderSource();
                 if (self.folder_revision != view.revision or self.folder_entries_address != @intFromPtr(source.entries.ptr) or self.folder_entries_count != source.entries.len) self.refreshFolder();
+            }
+            if (self.screen == .tracks and self.track_scope == .queue and self.queue_revision != self.track_store.order.revision) {
+                self.queue_revision = self.track_store.order.revision;
+                if (self.selected_occurrence != 0) self.selection = self.track_store.order.positionOf(self.selected_occurrence) orelse @min(self.selection, self.rows() -| 1);
+                self.selected_occurrence = self.track_store.order.occurrenceAt(self.selection) orelse 0;
+                self.selected_id = self.track_store.order.at(self.selection) orelse 0;
+                self.ensureVisible();
+                self.dirty = true;
+                self.major = true;
             }
             if (view.revision == self.revision) return;
             if (self.menu) |*menu| if (menu.kind == .collection) {
@@ -951,15 +1403,33 @@ pub fn Controller(comptime Platform: type) type {
                         break;
                     }
                 };
-                for (0..self.rows()) |rank| {
+                if (self.track_scope != .queue and self.track_scope != .playlist) for (0..self.rows()) |rank| {
                     if (self.trackAt(rank)) |track| if (track.id == self.selected_id) {
                         self.selection = rank;
                         break;
                     };
-                }
+                };
                 self.selection = @min(self.selection, self.rows() -| 1);
                 self.first = self.selection -| offset;
                 if (self.trackAt(self.selection)) |track| self.selected_id = track.id;
+            }
+            if (self.screen == .album_list) {
+                for (0..self.rows()) |rank| if (self.listedAlbum(rank).?.id == self.selected_id) {
+                    self.selection = rank;
+                    break;
+                };
+                self.selection = @min(self.selection, self.rows() -| 1);
+                self.selected_id = if (self.listedAlbum(self.selection)) |album| album.id else 0;
+            }
+            if (self.screen == .playlists) {
+                if (view.playlistIndex(self.selected_id)) |rank| self.selection = rank else if (self.selected_id & ~@as(u64, 7) == saved_selection_base) {
+                    for (0..self.savedCount()) |rank| if (self.savedSlot(rank).? == self.selected_id & 7) {
+                        self.selection = view.playlists.len + rank;
+                        break;
+                    };
+                }
+                self.selection = @min(self.selection, self.rows() -| 1);
+                self.selected_id = if (view.playlistAt(self.selection)) |value| core.hash(value.path) else if (self.savedSlot(self.selection - view.playlists.len)) |slot| saved_selection_base | slot else 0;
             }
             if (self.screen == .artists) {
                 const offset = self.selection -| self.first;
@@ -1202,7 +1672,7 @@ pub fn Controller(comptime Platform: type) type {
                 .library => .library,
                 .artists => .artists,
                 .artist => .artist,
-                .music, .settings, .themes, .display => .menu,
+                .playlists, .favourites, .album_list, .saved, .settings, .themes, .display => .menu,
             };
         }
 
@@ -1230,14 +1700,18 @@ pub fn Controller(comptime Platform: type) type {
             const view = self.snapshot();
             const artist = if (self.artistRank()) |rank| view.artists[rank] else null;
             const menu = self.menu;
-            const title: []const u8 = if (menu) |actions| if (actions.kind == .player) "Playback" else switch (actions.collection.scope) {
+            const title: []const u8 = if (self.library_notice.len != 0) self.library_notice else if (menu) |actions| if (actions.notice.len != 0) actions.notice else if (actions.kind == .queue_item) "Queue" else if (actions.kind == .player) "Playback" else switch (actions.collection.scope) {
                 .album => if (view.albumIndex(actions.collection.album)) |rank| view.albums[rank].title else "Album",
                 .artist => if (view.artistIndex(actions.collection.artist)) |rank| view.artists[rank].name else "Artist",
+                .playlist => if (self.playlist(actions.collection.playlist)) |value| value.name else "Playlist",
                 .folder => if (actions.collection.directory.len == 0) "Folders" else std.fs.path.basename(actions.collection.directory),
                 else => "Music",
             } else if (self.jump_position != null) "Jump" else switch (self.screen) {
                 .home => "Home",
-                .music => "Music",
+                .playlists => "Playlists",
+                .favourites => "Favourites",
+                .album_list => if (self.album_list_scope == .recent) "Recently Added" else "Favourite Albums",
+                .saved => if (self.saved_notice.len != 0) self.saved_notice else "Save Queue",
                 .albums => "Albums",
                 .artists => "Artists",
                 .artist => if (artist) |value| value.name else "Artist",
@@ -1247,6 +1721,8 @@ pub fn Controller(comptime Platform: type) type {
                     .artist => if (artist) |value| value.name else "Songs",
                     .album => if (self.albumRank()) |rank| view.albums[rank].title else "Songs",
                     .folder => "Songs",
+                    .playlist => if (self.playlist(self.playlist_id)) |value| value.name else "Playlist",
+                    .favourites => "Favourite Songs",
                 },
                 .player => if (self.status.phase == .paused) "Paused" else "Now Playing",
                 .library => "Library",
@@ -1273,31 +1749,49 @@ pub fn Controller(comptime Platform: type) type {
                                 .all => "All",
                                 .one => "One",
                             } },
+                            3 => item = .{ .name = if (self.playing_track) |track| if (view.albumForTrack(track.id)) |album| if (!std.mem.eql(u8, track.meta.artist, album.artist)) "Go to Album Artist" else "Go to Artist" else "Go to Artist" else "Go to Artist", .chevron = true },
+                            4 => item = .{ .name = "Go to Album", .chevron = true },
+                            5, 6 => item = .{ .name = if (actions.favourite and position == 5) if (self.targetFavourite(actions)) "Remove Favourite" else "Add Favourite" else "Save Queue", .chevron = !(actions.favourite and position == 5) },
                             else => unreachable,
-                        } else item.name = switch (position) {
-                            0 => "Play All",
-                            1 => "Shuffle",
-                            else => "Jump",
+                        } else if (actions.kind == .queue_item) item.name = if (position == 0) "Move Next" else "Remove" else item.name = switch (actions.collectionAction(position)) {
+                            .play_all => "Play All",
+                            .shuffle_songs => "Shuffle Songs",
+                            .shuffle_albums => "Shuffle Albums",
+                            .play_next => "Play Next",
+                            .add => "Add to Queue",
+                            .favourite => if (self.targetFavourite(actions)) "Remove Favourite" else "Add Favourite",
+                            .jump => "Jump",
                         };
                     } else switch (self.screen) {
-                        .home => item = .{ .name = switch (position) {
-                            0 => "Music",
-                            1 => "Settings",
-                            else => "Now Playing",
-                        }, .chevron = true },
-                        .music => item = .{ .name = switch (music_items[position]) {
+                        .home => item = .{ .name = switch (home_items[position]) {
                             .albums => "Albums",
                             .artists => "Artists",
                             .songs => "Songs",
-                            .shuffle_all => "Shuffle All",
-                        }, .chevron = music_items[position] != .shuffle_all },
+                            .playlists => "Playlists",
+                            .favourites => "Favourites",
+                            .recent => "Recently Added",
+                            .shuffle_all => "Shuffle Songs",
+                            .settings => "Settings",
+                            .now_playing => "Now Playing",
+                        }, .chevron = home_items[position] != .shuffle_all },
+                        .playlists => if (view.playlistAt(position)) |value| {
+                            item = .{ .name = value.name, .chevron = true };
+                        } else if (self.savedSlot(position - view.playlists.len)) |slot| {
+                            item = .{ .name = saved_names[slot], .detail = "Saved" };
+                        },
+                        .favourites => item = .{ .name = if (position == 0) "Albums" else "Songs", .chevron = true },
+                        .album_list => if (self.listedAlbum(position)) |album| {
+                            item = .{ .name = album.title, .secondary = album.artist, .chevron = true };
+                        },
+                        .saved => item = .{ .name = saved_names[position], .detail = if (self.saved_summary[position].present and self.saved_summary[position].count != 0) "Replace" else "Empty" },
                         .artists => item.name = view.artists[position].name,
                         .artist => item.name = if (position == 0) "All Songs" else view.albums[artist.?.first_album + position - 1].title,
                         .tracks => if (self.trackAt(position)) |track| {
                             item.name = track.meta.title;
                             if (self.track_scope == .queue) item.secondary = track.meta.artist;
                         } else {
-                            item.name = "Unavailable track";
+                            item.name = if (self.track_scope == .playlist) if (self.playlist(self.playlist_id)) |value| std.fs.path.basename(value.items[position].path) else "Unavailable track" else "Unavailable track";
+                            item.secondary = "Unavailable";
                         },
                         .folders => if (self.folderRow(position)) |row| {
                             item.name = std.fs.path.basename(row.path);
@@ -1313,10 +1807,12 @@ pub fn Controller(comptime Platform: type) type {
                             } },
                             1 => .{ .name = "Library", .chevron = true },
                             2 => .{ .name = "Themes", .chevron = true },
-                            else => .{ .name = "Display", .chevron = true },
+                            3 => .{ .name = "Display", .chevron = true },
+                            4 => .{ .name = "Sleep timer", .detail = ([_][]const u8{ "Off", "15 min", "30 min", "60 min" })[@backingInt(self.sleep_timer)] },
+                            else => .{ .name = "Auto-off", .detail = ([_][]const u8{ "5 min", "15 min", "30 min", "Off" })[@backingInt(self.paused_idle)] },
                         },
                         .themes => {
-                            if (position < builtin_theme_count) item = .{ .name = @import("builtin_themes.zig").names[position], .detail = if (position == @backingInt(self.theme_family)) "Active" else "" } else if (position == builtin_theme_count) item = .{ .name = "Appearance", .detail = if (self.theme_family == .custom) "Theme" else if (self.appearance == .light) "Light" else "Dark" } else item = .{ .name = "Custom", .detail = if (!self.theme_store.has_custom) "Unavailable" else if (self.theme_family == .custom) "Active" else "" };
+                            if (position < builtin_theme_count) item = .{ .name = @import("builtin_themes.zig").names[position], .detail = if (!self.theme_store.using_custom) "Active" else "" } else if (position == builtin_theme_count) item = .{ .name = "Appearance", .detail = if (self.theme_store.using_custom) "Theme" else if (self.appearance == .light) "Light" else "Dark" } else item = .{ .name = "Custom", .detail = if (!self.theme_store.has_custom) "Unavailable" else if (self.theme_store.using_custom) "Active" else "" };
                         },
                         .display => item = .{ .name = ([_][]const u8{ "15 seconds", "30 seconds", "60 seconds", "Always on" })[position], .detail = if (position == @backingInt(self.display_timeout)) "Active" else "" },
                         .albums, .player => unreachable,
@@ -1345,7 +1841,7 @@ pub fn Controller(comptime Platform: type) type {
                 .page = self.page(),
                 .jump_title = jump_title,
                 .title = title,
-                .empty_message = if (self.screen == .albums) "No albums yet" else if (self.screen == .artists) "No artists yet" else if (self.menu != null) "No songs here" else if (self.screen == .folders) (if (self.folder_error) "Folder too large" else "Empty folder") else "No songs yet",
+                .empty_message = if (self.screen == .playlists) "No playlists yet" else if (self.screen == .album_list) (if (self.album_list_scope == .recent) "No recent albums" else "No favourite albums") else if (self.screen == .tracks and self.track_scope == .favourites) "No favourite songs" else if (self.screen == .albums) "No albums yet" else if (self.screen == .artists) "No artists yet" else if (self.menu != null) "No songs here" else if (self.screen == .folders) (if (self.folder_error) "Folder too large" else "Empty folder") else "No songs yet",
                 .detail = detail,
                 .phase = self.index.phase,
                 .snapshot = view,
@@ -1485,6 +1981,7 @@ const TestPlatform = struct {
     pub fn now() u32 {
         return @truncate(milliseconds * 6000);
     }
+
     pub fn trace(kind: @import("display_trace.zig").Kind, _: u32, value: u32) void {
         if (kind == .library_work) library_work += value;
     }
@@ -1494,6 +1991,7 @@ const TestPlatform = struct {
             projection: *views.Pair,
             phase: []const u8 = "Ready",
             requested: bool = false,
+
             pub fn request(self: *@This(), _: bool) void {
                 self.requested = true;
             }
@@ -1540,6 +2038,7 @@ const TestPlatform = struct {
         pub fn renderIntervalMs() u64 {
             return 11;
         }
+
         pub fn poll() enum { idle, busy, failed } {
             if (TestPlatform.milliseconds < busy_until) return .busy;
             if (busy_until != 0) {
@@ -1548,11 +2047,13 @@ const TestPlatform = struct {
             }
             return .idle;
         }
+
         pub fn freeze(region: Region) !Frozen {
             const free = active ^ 1;
             try @import("presentation.zig").pack(framebuffer, 320, 240, region, &banks[free]);
             return .{ .region = region, .bank = free };
         }
+
         pub fn presentFrozen(frozen: Frozen, _: bool) !void {
             if (busy_until != 0) return error.Owned;
             active = frozen.bank;
@@ -1560,6 +2061,7 @@ const TestPlatform = struct {
             busy_until = TestPlatform.milliseconds + latency;
             submissions += 1;
         }
+
         fn reset() void {
             busy_until = 0;
             latency = 19;
@@ -2651,7 +3153,7 @@ test "light and dark selection invalidates retained screens and region rendering
     defer fixture.deinit();
     var state = fixture.state();
     state.navigate(.themes);
-    state.selection = 5;
+    state.selection = builtin_theme_count;
     _ = state.handle(.select, 0, false);
     try std.testing.expectEqual(chrome.Appearance.dark, state.appearance);
     var pixels: [320 * 240]u16 = undefined;
@@ -2784,7 +3286,7 @@ test "every bundled theme preserves transport damage and retained Cover Flow acr
     state.status = .{ .phase = .playing, .sample_rate = 48000, .output_format = .signed_24_in_u32, .total_frames = 48000 * 100, .played_frames = 48000 * 20 };
     var retained: [320 * 240]u16 = undefined;
     var fresh: [320 * 240]u16 = undefined;
-    for (0..5) |family| for ([_]chrome.Appearance{ .light, .dark }) |appearance| {
+    for (0..builtin_theme_count) |family| for ([_]chrome.Appearance{ .light, .dark }) |appearance| {
         state.theme_family = @fromBackingInt(@intCast(family));
         state.appearance = appearance;
         state.theme_store.select(state.theme_family, appearance);
@@ -2818,7 +3320,7 @@ test "every bundled theme preserves transport damage and retained Cover Flow acr
 }
 
 test "custom overlapping layers survive transport and Cover Flow partial redraws" {
-    const parsed = try std.json.parseFromSlice(theme.Document, std.testing.allocator, @embedFile("themes/classic-light.json"), .{});
+    const parsed = try std.json.parseFromSlice(theme.Document, std.testing.allocator, @embedFile("themes/gain-light.json"), .{});
     defer parsed.deinit();
     var document = parsed.value;
     const overlay = theme.Node{ .kind = .text, .rect = .{ .x = 10, .y = 195, .w = 100, .h = 20 }, .value = "Overlay", .color = .accent };
@@ -2866,4 +3368,359 @@ test "custom overlapping layers survive transport and Cover Flow partial redraws
             try std.testing.expectEqualSlices(u16, &fresh, &retained);
         }
     }
+}
+
+test "imported playlists preserve missing rows and selecting a repeated song chooses that occurrence" {
+    var fixture: Fixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const tracks = [_]core.Track{
+        .{ .id = 11, .path = "A/one.flac", .stamp = .{}, .meta = .{ .title = "One", .album = "A" } },
+        .{ .id = 22, .path = "A/two.flac", .stamp = .{}, .meta = .{ .title = "Two", .album = "A" } },
+    };
+    const items = [_]core.PlaylistItem{
+        .{ .track_id = 11, .path = tracks[0].path },
+        .{ .path = "A/missing.flac", .missing = true },
+        .{ .track_id = 22, .path = tracks[1].path },
+        .{ .track_id = 11, .path = tracks[0].path },
+    };
+    const catalogue = core.Catalog{ .tracks = &tracks, .playlists = &.{.{ .path = "Playlists/Mix.m3u8", .name = "Mix", .items = &items }} };
+    try fixture.pair.publishCatalogue(&catalogue, 42);
+    var state = fixture.state();
+    state.navigate(.playlists);
+    _ = state.handle(.select, 0, false);
+    try std.testing.expectEqual(TrackScope.playlist, state.track_scope);
+    try std.testing.expectEqual(4, state.rows());
+    state.selection = 1;
+    _ = state.handle(.select, 1, false);
+    try std.testing.expect(state.requested_track == null);
+    state.selection = 3;
+    _ = state.handle(.select, 2, false);
+    try std.testing.expectEqual(11, state.requested_track.?.id);
+    try std.testing.expectEqual(3, state.track_store.order.count);
+    try std.testing.expectEqual(2, state.track_store.order.cursor);
+    try std.testing.expect(state.track_store.order.occurrenceAt(0).? != state.playing_occurrence);
+    for ([_]u64{ 11, 22, 11 }, 0..) |id, i| try std.testing.expectEqual(id, state.track_store.order.at(i).?);
+}
+
+test "playlist Play Next is a linear ordered batch without missing rows or a replacement session" {
+    var fixture: Fixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const tracks = [_]core.Track{
+        .{ .id = 11, .path = "A/one.flac", .stamp = .{}, .meta = .{ .title = "One", .album = "A" } },
+        .{ .id = 22, .path = "A/two.flac", .stamp = .{}, .meta = .{ .title = "Two", .album = "A" } },
+    };
+    const items = [_]core.PlaylistItem{ .{ .track_id = 11, .path = tracks[0].path }, .{ .path = "missing", .missing = true }, .{ .track_id = 22, .path = tracks[1].path }, .{ .track_id = 11, .path = tracks[0].path } };
+    const catalogue = core.Catalog{ .tracks = &tracks, .playlists = &.{.{ .path = "Mix.m3u8", .name = "Mix", .items = &items }} };
+    try fixture.pair.publishCatalogue(&catalogue, 42);
+    var state = fixture.state();
+    try state.track_store.order.append(22);
+    state.queue(&tracks[1]);
+    state.playing_track = state.track_store.begin().?;
+    state.requested_track = null;
+    const current = state.playing_occurrence;
+    state.navigate(.playlists);
+    _ = state.handle(.menu, 0, true);
+    state.menu.?.selection = 2;
+    _ = state.handle(.select, 1, true);
+    try std.testing.expect(state.menu == null and state.requested_track == null);
+    try std.testing.expectEqual(current, state.track_store.order.occurrenceAt(state.track_store.order.cursor).?);
+    for ([_]u64{ 22, 11, 22, 11 }, 0..) |id, i| try std.testing.expectEqual(id, state.track_store.order.at(i).?);
+}
+
+test "favourite actions publish immutable prepared discovery and retain selected song through a reorder" {
+    var fixture: Fixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const activity = @import("listening_activity.zig");
+    const bytes = try std.testing.allocator.alloc(u8, activity.state_bytes);
+    defer std.testing.allocator.free(bytes);
+    var retained = try activity.State.init(bytes, 42);
+    fixture.pair.activity = &retained;
+    const tracks = [_]core.Track{
+        .{ .id = 11, .path = "A/one.flac", .stamp = .{}, .meta = .{ .title = "Later", .album = "A" } },
+        .{ .id = 22, .path = "A/two.flac", .stamp = .{}, .meta = .{ .title = "Earlier", .album = "A" } },
+    };
+    try fixture.pair.publish(&.{}, &tracks, 42, true);
+    var state = fixture.state();
+    state.activity_available = true;
+    try state.track_store.order.append(11);
+    state.queue(&tracks[0]);
+    state.playing_track = state.track_store.begin().?;
+    state.requested_track = null;
+    state.navigate(.player);
+    _ = state.handle(.menu, 0, true);
+    state.menu.?.selection = 5;
+    _ = state.handle(.select, 1, true);
+    try std.testing.expectEqual(@as(u64, 11), state.favourite_request.?.id);
+    try retained.toggle(.song, 11);
+    const Observer = struct {
+        pub fn cancelled(_: @This()) bool {
+            return false;
+        }
+    };
+    const next = try fixture.pair.prepareActivity(Observer{});
+    try std.testing.expectEqual(0, state.snapshot().favourite_song_count);
+    fixture.pair.commit(next);
+    state.navigate(.tracks);
+    state.track_scope = .favourites;
+    state.reconcile();
+    try std.testing.expectEqual(11, state.trackAt(0).?.id);
+    try retained.toggle(.song, 22);
+    fixture.pair.commit(try fixture.pair.prepareActivity(Observer{}));
+    state.reconcile();
+    try std.testing.expectEqual(11, state.trackAt(state.selection).?.id);
+    try std.testing.expectEqual(1, state.selection);
+}
+
+test "saved playlist load waits for worker cancellation and buffered queue edits explain rejection" {
+    var fixture: Fixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const tracks = [_]core.Track{
+        .{ .id = 11, .path = "A/one.flac", .stamp = .{}, .meta = .{ .title = "One", .album = "A" } },
+        .{ .id = 22, .path = "A/two.flac", .stamp = .{}, .meta = .{ .title = "Two", .album = "A" } },
+    };
+    try fixture.pair.publish(&.{}, &tracks, 42, true);
+    var state = fixture.state();
+    state.saved_available = true;
+    state.saved_summary[3] = .{ .present = true, .count = 2 };
+    try state.track_store.order.insert(&.{ 11, 22 }, false);
+    state.queue(&tracks[0]);
+    state.playing_track = state.track_store.begin().?;
+    state.requested_track = null;
+    const playing = state.playing_occurrence;
+    const queued = state.track_store.order.occurrenceAt(1).?;
+    try state.track_store.order.commitNext(queued);
+    state.navigate(.tracks);
+    state.track_scope = .queue;
+    state.selection = 1;
+    _ = state.handle(.menu, 0, true);
+    state.menu.?.selection = 1;
+    _ = state.handle(.select, 1, true);
+    try std.testing.expectEqualStrings("Already buffered", state.menu.?.notice);
+    try std.testing.expectEqual(2, state.track_store.order.count);
+    state.navigate(.playlists);
+    try std.testing.expectEqual(media.PlaybackCommand.stop, state.handle(.select, 2, true));
+    try std.testing.expectEqual(3, state.saved_request.?.slot);
+    try std.testing.expectEqual(playing, state.track_store.order.occurrenceAt(state.track_store.order.cursor).?);
+    var replacement_bytes: [64]u8 = undefined;
+    var replacement = @import("play_queue.zig").Queue.init(&replacement_bytes);
+    try replacement.insert(&.{ 22, 22 }, false);
+    var scratch: [128]u8 = undefined;
+    const data = try @import("saved_playlists.zig").capture(replacement, 42, &scratch);
+    try state.loadedSavedPlaylist(data);
+    try std.testing.expectEqual(22, state.requested_track.?.id);
+    try std.testing.expectEqual(2, state.track_store.order.count);
+    try std.testing.expect(state.track_store.order.occurrenceAt(0).? != state.track_store.order.occurrenceAt(1).?);
+}
+
+test "resumed duplicate occurrence is paused and its file position is revalidated" {
+    var fixture: Fixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const listening = @import("listening_session.zig");
+    const track = core.Track{ .id = 11, .path = "A/one.flac", .stamp = .{ .size = 1000, .modified = 21 }, .meta = .{ .title = "One", .album = "A", .sample_rate = 48000, .duration_ms = 60000 } };
+    try fixture.pair.publish(&.{}, &.{track}, 42, true);
+    var state = fixture.state();
+    var bytes: [64]u8 = undefined;
+    var saved = @import("play_queue.zig").Queue.init(&bytes);
+    try saved.insert(&.{ 11, 11, 11 }, false);
+    _ = saved.selectOccurrence(saved.occurrenceAt(2).?);
+    const scratch = try std.testing.allocator.alloc(u8, listening.scratch_bytes);
+    defer std.testing.allocator.free(scratch);
+    const position = listening.Position{ .cursor = 2, .frame = 96000, .sample_rate = 48000, .stamp = track.stamp };
+    const data = try listening.capture(saved, 42, position, .{ .screen = @intCast(@backingInt(Screen.player)) }, scratch);
+    var record = listening.Record{ .data = data, .position = position, .navigation = data.navigation };
+    try state.restoreListening(record);
+    try std.testing.expect(state.resume_paused);
+    try std.testing.expectEqual(2, state.track_store.order.cursor);
+    try std.testing.expectEqual(96000, state.requested_start_frame);
+    try std.testing.expectEqual(state.track_store.order.occurrenceAt(2).?, state.playing_occurrence);
+    record.position.stamp.modified += 1;
+    try state.restoreListening(record);
+    try std.testing.expectEqual(0, state.requested_start_frame);
+    try std.testing.expectEqual(2, state.track_store.order.cursor);
+}
+
+test "initial recent selection has identity and remains selected when newer albums arrive" {
+    var fixture: Fixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const activity = @import("listening_activity.zig");
+    const bytes = try std.testing.allocator.alloc(u8, activity.state_bytes);
+    defer std.testing.allocator.free(bytes);
+    const scratch = try std.testing.allocator.alloc(u8, activity.state_bytes);
+    defer std.testing.allocator.free(scratch);
+    var retained = try activity.State.init(bytes, 42);
+    fixture.pair.activity = &retained;
+    const tracks = [_]core.Track{
+        .{ .id = 11, .path = "A/one.flac", .stamp = .{}, .meta = .{ .title = "One", .album = "A" } },
+        .{ .id = 22, .path = "B/two.flac", .stamp = .{}, .meta = .{ .title = "Two", .album = "B" } },
+    };
+    const Observer = struct {
+        pub fn cancelled(_: @This()) bool {
+            return false;
+        }
+    };
+    try fixture.pair.publish(&.{}, &.{}, 42, true);
+    try retained.reconcile(fixture.pair.current(), scratch, Observer{});
+    try fixture.pair.publish(&.{}, tracks[0..1], 42, true);
+    try retained.reconcile(fixture.pair.current(), scratch, Observer{});
+    fixture.pair.commit(try fixture.pair.prepareActivity(Observer{}));
+    var state = fixture.state();
+    state.navigate(.album_list);
+    state.album_list_scope = .recent;
+    state.reconcile();
+    const selected = state.selected_id;
+    try std.testing.expect(selected != 0);
+    try fixture.pair.publish(&.{}, &tracks, 42, true);
+    try retained.reconcile(fixture.pair.current(), scratch, Observer{});
+    fixture.pair.commit(try fixture.pair.prepareActivity(Observer{}));
+    state.reconcile();
+    try std.testing.expectEqual(selected, state.selected_id);
+    try std.testing.expectEqual(1, state.selection);
+}
+
+test "playback progress uses known metadata only while decoder duration is unknown" {
+    var fixture: Fixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    var state = fixture.state();
+    var track = core.Track{ .id = 11, .path = "A/one.ogg", .stamp = .{}, .meta = .{ .title = "One", .duration_ms = 1234 } };
+    state.playing_track = &track;
+    var incoming = media.PlaybackStatus{ .phase = .playing, .sample_rate = 48000, .output_format = .signed_24_in_u32, .total_frames = 0, .played_frames = 12000 };
+    state.setPlaybackStatus(incoming);
+    try std.testing.expectEqual(59232, state.status.total_frames);
+    try std.testing.expectEqual(12000, state.status.played_frames);
+    incoming.total_frames = 59101;
+    state.setPlaybackStatus(incoming);
+    try std.testing.expectEqual(59101, state.status.total_frames);
+    incoming.total_frames = 0;
+    track.meta.duration_ms = 0;
+    state.setPlaybackStatus(incoming);
+    try std.testing.expectEqual(0, state.status.total_frames);
+    track.meta.duration_ms = std.math.maxInt(u64);
+    state.setPlaybackStatus(incoming);
+    try std.testing.expectEqual(0, state.status.total_frames);
+    state.playing_track = null;
+    state.setPlaybackStatus(incoming);
+    try std.testing.expectEqual(0, state.status.total_frames);
+}
+
+test "manual track changes retain pause through replacement while natural completion keeps playing" {
+    var fixture: Fixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const tracks = [_]core.Track{
+        .{ .id = 11, .path = "A/one.flac", .stamp = .{}, .meta = .{ .title = "One", .album = "A" } },
+        .{ .id = 22, .path = "A/two.flac", .stamp = .{}, .meta = .{ .title = "Two", .album = "A" } },
+        .{ .id = 33, .path = "A/three.flac", .stamp = .{}, .meta = .{ .title = "Three", .album = "A" } },
+    };
+    try fixture.pair.publish(&.{}, &tracks, 42, true);
+    for ([_]@FieldType(media.Result, "exit"){ .next, .previous, .completed }) |exit| {
+        var state = fixture.state();
+        try state.track_store.order.insert(&.{ 11, 22, 33 }, false);
+        _ = state.track_store.order.select(22);
+        state.queue(&tracks[1]);
+        state.playing_track = state.track_store.begin().?;
+        state.requested_track = null;
+        state.status = .{ .phase = if (exit == .completed) .playing else .paused, .sample_rate = 48000, .output_format = .signed_24_in_u32, .total_frames = 48000, .played_frames = 24000 };
+        state.playbackFinished(.{ .sample_rate = 48000, .output_format = .signed_24_in_u32, .frames = 24000, .chunks = 1, .underruns = 0, .minimum_fifo_level = 0, .exit = exit }, false);
+        try std.testing.expectEqual(if (exit == .previous) @as(u64, 11) else @as(u64, 33), state.requested_track.?.id);
+        try std.testing.expectEqual(exit != .completed, state.resume_paused);
+        try std.testing.expectEqual(0, state.requested_start_frame);
+        try std.testing.expectEqual(3, state.track_store.order.count);
+    }
+}
+
+test "retired catalogue releases borrowed cover recipes before the old arena is poisoned" {
+    var fixture: Fixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const track = core.Track{ .id = 11, .path = "A/one.flac", .stamp = .{}, .meta = .{ .album = "A" } };
+    try fixture.pair.publish(&.{}, &.{track}, 42, true);
+    const album_id = fixture.pair.current().albums[0].id;
+    var old_path = "old-art-cache".*;
+    var album = core.Album{ .id = album_id, .key = "A", .title = "A", .artist = "Artist", .directory = "A", .tracks = &.{0}, .art = .{ .recipe = "rgb565", .key = "old", .cache_path = &old_path } };
+    try fixture.pair.publishCatalogue(&.{ .tracks = &.{track}, .albums = &.{album} }, 42);
+    var state = fixture.state();
+    state.navigate(.albums);
+    state.requestCovers(0);
+    try std.testing.expectEqualStrings(&old_path, fixture.cache.requested[0].art.cache_path);
+    try std.testing.expect(state.cover_plan != null);
+    album.art.key = "new";
+    album.art.cache_path = "new-art-cache";
+    try fixture.pair.publishCatalogue(&.{ .tracks = &.{track}, .albums = &.{album} }, 42);
+    state.catalogueRetired();
+    try std.testing.expect(state.cover_plan == null);
+    for (fixture.cache.requested) |request| try std.testing.expectEqual(0, request.id);
+    @memset(&old_path, 0xdd);
+    const pixels = try std.testing.allocator.create([320 * 240]u16);
+    defer std.testing.allocator.destroy(pixels);
+    state.renderInto(pixels, 100);
+    const next = fixture.cache.nextLoad(fixture.cache.requested).?;
+    try std.testing.expectEqualStrings("new-art-cache", next.request.art.cache_path);
+    try std.testing.expectEqualStrings("new", next.request.art.key);
+}
+
+test "favourite intent and saved queue confirmation capture stable identities rather than delayed toggles" {
+    var fixture: Fixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const track = core.Track{ .id = 11, .path = "A/one.flac", .stamp = .{}, .meta = .{ .album = "A" } };
+    try fixture.pair.publish(&.{}, &.{track}, 42, true);
+    var state = fixture.state();
+    const album_id = state.snapshot().albums[0].id;
+    const menu = ContextMenu{ .kind = .collection, .collection = .{ .scope = .album, .album = album_id } };
+    const request = state.favouriteTarget(menu).?;
+    try std.testing.expectEqual(album_id, request.id);
+    try std.testing.expectEqual(track.id, request.anchor);
+    try std.testing.expect(request.enabled);
+    @constCast(state.snapshot()).favourite_albums.set(0);
+    try std.testing.expect(!state.favouriteTarget(menu).?.enabled);
+    try state.track_store.order.insert(&.{ 11, 11 }, false);
+    state.saved_available = true;
+    state.navigate(.saved);
+    state.selection = 2;
+    _ = state.handle(.select, 0, false);
+    const confirmed_revision = state.saved_request.?.membership_revision;
+    _ = state.track_store.order.selectOccurrence(state.track_store.order.occurrenceAt(1).?);
+    try std.testing.expectEqual(confirmed_revision, state.track_store.order.membershipRevision());
+    try state.track_store.order.append(11);
+    try std.testing.expect(confirmed_revision != state.track_store.order.membershipRevision());
+}
+
+test "EOF and faults leave a resumable paused player and manual navigation works without a worker" {
+    var fixture: Fixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const tracks = [_]core.Track{
+        .{ .id = 11, .path = "A/one.flac", .stamp = .{}, .meta = .{ .album = "A" } },
+        .{ .id = 22, .path = "A/two.flac", .stamp = .{}, .meta = .{ .album = "A" } },
+    };
+    try fixture.pair.publish(&.{}, &tracks, 42, true);
+    var state = fixture.state();
+    try state.track_store.order.insert(&.{ 11, 22 }, false);
+    _ = state.track_store.order.select(22);
+    state.queue(&tracks[1]);
+    state.playing_track = state.track_store.begin().?;
+    state.requested_track = null;
+    state.navigate(.player);
+    state.status.phase = .playing;
+    const completed = media.Result{ .sample_rate = 48000, .output_format = .signed_24_in_u32, .frames = 24000, .chunks = 1, .underruns = 0, .minimum_fifo_level = 0 };
+    state.playbackFinished(completed, false);
+    try std.testing.expectEqual(media.PlaybackPhase.paused, state.status.phase);
+    try std.testing.expect(state.requested_track == null);
+    try std.testing.expectEqual(media.PlaybackCommand.none, state.handle(.up, 0, false));
+    try std.testing.expectEqual(11, state.requested_track.?.id);
+    try std.testing.expect(state.resume_paused);
+    state.playing_track = state.track_store.begin().?;
+    state.requested_track = null;
+    state.status.phase = .playing;
+    state.playbackFinished(completed, true);
+    try std.testing.expectEqual(media.PlaybackPhase.paused, state.status.phase);
+    try std.testing.expectEqualStrings("Playback error", state.library_notice);
+    try std.testing.expect(state.requested_track == null);
 }

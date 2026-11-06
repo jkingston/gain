@@ -532,7 +532,7 @@ pub fn build(b: *std.Build) void {
     });
     b.step("fuzz-input", "Fuzz captured wheel/button edges, overflow and recovery").dependOn(&b.addRunArtifact(input_fuzz).step);
     for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |mode| {
-        for ([_][]const u8{ "src/preferences.zig", "src/f20_themes.zig", "src/runtime_theme.zig", "src/input_capture.zig", "src/navigation.zig", "src/ui.zig", "src/music_ui.zig", "src/usb_view.zig", "src/battery.zig", "src/canvas.zig", "src/font_data.zig", "src/cover_cache.zig", "src/cover_flow.zig", "src/volume_transition.zig", "src/render_ahead.zig", "src/frame_pacer.zig", "src/display_banks.zig", "src/display_trace.zig", "src/presentation.zig", "src/display_phase.zig", "src/player_view.zig", "src/player_presenter.zig", "tools/ui_bench_report.zig" }) |source| {
+        for ([_][]const u8{ "src/listening_activity.zig", "src/saved_playlists.zig", "src/owned_io.zig", "src/owned_journal.zig", "src/listening_session.zig", "src/listening_power.zig", "src/preferences.zig", "src/f20_themes.zig", "src/runtime_theme.zig", "src/input_capture.zig", "src/navigation.zig", "src/ui.zig", "src/music_ui.zig", "src/usb_view.zig", "src/battery.zig", "src/canvas.zig", "src/font_data.zig", "src/cover_cache.zig", "src/cover_flow.zig", "src/volume_transition.zig", "src/render_ahead.zig", "src/frame_pacer.zig", "src/display_banks.zig", "src/display_trace.zig", "src/presentation.zig", "src/display_phase.zig", "src/player_view.zig", "src/player_presenter.zig", "tools/ui_bench_report.zig" }) |source| {
             const tests = b.addTest(.{
                 .root_module = b.createModule(.{ .root_source_file = b.path(source), .target = b.graph.host, .optimize = mode }),
             });
@@ -590,7 +590,7 @@ pub fn build(b: *std.Build) void {
     }
     const pipeline_tests_step = b.step("test-pipeline", "Run shared executive, session and PCM pipeline regressions");
     for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |mode| {
-        for ([_][]const u8{ "src/replay_gain.zig", "src/transport.zig", "src/sd_arming.zig", "src/deadline_timer.zig", "src/scan_admission.zig", "src/track_selection.zig", "tools/player_check_report.zig", "tools/player_pcm_checksum.zig", "src/file_browser.zig", "src/player_screen.zig", "src/f20_player.zig", "src/buffer_regions.zig", "src/executive.zig", "src/task_context.zig", "src/task_stack.zig", "src/task_dispatch.zig", "src/byte_ring.zig", "src/input_stream.zig", "src/codec_pool.zig", "src/codec_runtime.zig", "src/codec_math.zig", "src/media_source.zig", "src/f20_memory.zig", "src/pcm_reservoir.zig", "src/audio_output.zig" }) |source| {
+        for ([_][]const u8{ "src/f20_covers.zig", "src/audio_seek.zig", "src/file_seek_index.zig", "src/replay_gain.zig", "src/transport.zig", "src/stream_sequence.zig", "src/sd_arming.zig", "src/deadline_timer.zig", "src/scan_admission.zig", "src/track_selection.zig", "tools/player_check_report.zig", "tools/player_pcm_checksum.zig", "src/file_browser.zig", "src/player_screen.zig", "src/f20_player.zig", "src/buffer_regions.zig", "src/executive.zig", "src/task_context.zig", "src/task_stack.zig", "src/task_dispatch.zig", "src/byte_ring.zig", "src/input_stream.zig", "src/codec_pool.zig", "src/codec_runtime.zig", "src/codec_math.zig", "src/media_source.zig", "src/f20_memory.zig", "src/pcm_reservoir.zig", "src/audio_output.zig" }) |source| {
             const tests = b.addTest(.{
                 .root_module = b.createModule(.{ .root_source_file = b.path(source), .target = b.graph.host, .optimize = mode }),
             });

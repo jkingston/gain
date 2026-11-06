@@ -10,6 +10,11 @@ const player = @import("f20_player.zig");
 const views = @import("progressive_view.zig");
 
 pub const State = struct {
+    pub const Retirement = struct {
+        context: *anyopaque,
+        withdraw: *const fn (*anyopaque) void,
+    };
+
     volume: *native.Volume,
     projection: *views.Pair,
     covers: ?*@import("f20_covers.zig").Loader = null,
@@ -27,6 +32,7 @@ pub const State = struct {
     publication_cadence: views.PublicationCadence = .{},
     summary: diag.IndexSummary = .{},
     error_pending: ?anyerror = null,
+    retirement: ?Retirement = null,
 
     pub fn init(volume: *native.Volume) !State {
         comptime {
@@ -35,7 +41,8 @@ pub const State = struct {
         const pair: *views.Pair = @ptrFromInt(memory.scan_views.cached());
         pair.* = .{};
         const baseline = if (diag.catalog) |*catalog| &catalog.value else &core.Catalog{};
-        try pair.publishCatalogue(baseline, volume.serial);
+        const retained = views.previewBaseline(baseline, volume.serial);
+        try pair.publishCatalogue(&retained, volume.serial);
         return .{ .volume = volume, .projection = pair };
     }
 
@@ -46,7 +53,7 @@ pub const State = struct {
             self.queued = cold or (self.queued orelse false);
             return;
         }
-        self.cold = cold;
+        self.cold = cold or (self.requested and self.cold);
         self.complete = false;
         self.requested = true;
     }
@@ -55,12 +62,23 @@ pub const State = struct {
         const self: *State = @ptrCast(@alignCast(context));
         self.service = service;
         defer self.service = null;
+        // A persistent player can run for days. Catalogue ownership must
+        // advance at scan completion, without waiting for its workers to join.
+        self.finish();
         if (self.text) |loader| {
             loader.serviceWithYield(.{ .context = service.context, .poll = service.poll });
         }
         if (self.covers) |cache| cache.service(self.volume);
-        if (!self.requested) return;
+        const status = x.Interrupts.disableCpu();
+        if (!self.requested) {
+            x.Interrupts.restoreCpu(status);
+            return;
+        }
         self.requested = false;
+        // Claim the request before UI can replace its scan mode. Further
+        // refresh/verify gestures queue for the next catalogue generation.
+        diag.report.scan_active = 1;
+        x.Interrupts.restoreCpu(status);
         self.scan() catch |failure| {
             if (failure == error.Cancelled) {
                 diag.report.scan_cancelled += 1;
@@ -74,6 +92,7 @@ pub const State = struct {
             }
             self.phase = if (failure == error.Cancelled) "Scan paused" else "Scan failed";
         };
+        self.finish();
     }
 
     fn poll(context: *anyopaque) bool {
@@ -136,9 +155,8 @@ pub const State = struct {
         if (poll(self)) return error.Cancelled;
         if (!self.cold and !views.previewNeeded(previous.source, self.volume.serial, tracks.len, stats)) return;
         if (!self.publication_cadence.due(x.Timer.now(), x.Timer.milliseconds(300))) return;
-        const retained_art = core.Catalog{ .albums = if (diag.catalog) |catalog| catalog.value.albums else &.{} };
-        const baseline = if (!self.cold and diag.catalog != null) &diag.catalog.?.value else &retained_art;
-        try self.publishPreview(baseline, tracks);
+        const baseline = views.previewBaseline(previous, self.volume.serial);
+        try self.publishPreview(&baseline, tracks);
         self.publication_cadence.published(x.Timer.now());
         diag.report.scan_publications += 1;
         diag.report.scan_view_tracks = @intCast(self.projection.current().track_count);
@@ -152,7 +170,8 @@ pub const State = struct {
         // view still belongs to the baseline, so there is nothing to withdraw.
         if (self.projection.current().complete) return;
         const began = x.Timer.now();
-        const revision = self.projection.prepareCatalogueCooperative(previous, self.volume.serial, ViewObserver{ .state = self, .restoring = true }) catch empty: {
+        const baseline = views.previewBaseline(previous, self.volume.serial);
+        const revision = self.projection.prepareCatalogueCooperative(&baseline, self.volume.serial, ViewObserver{ .state = self, .restoring = true }) catch empty: {
             break :empty self.projection.prepare(&.{}, &.{}, self.volume.serial, true) catch unreachable;
         };
         prepared(began);
@@ -240,26 +259,35 @@ pub const State = struct {
     }
 
     pub fn finish(self: *State) void {
-        // No player/USB worker may retain old catalogue references here.
+        // Called by the sole storage owner, or after its workers have joined.
         if (self.error_pending) |failure| {
             diag.failed(2, failure);
             self.error_pending = null;
         }
         if (self.pending) |next| {
+            diag.persistBackground(&next.value, self.service);
+            // The authoritative projection already borrows only next. Revoke
+            // UI-cached artwork under the same barrier as retiring the old
+            // arena, so no preemption can republish a descriptor into it.
+            const status = x.Interrupts.disableCpu();
+            if (self.retirement) |hook| hook.withdraw(hook.context);
             if (self.covers) |cache| cache.cache.clearRequests();
-            diag.finishBackground(next);
-            diag.recordIndex(self.summary);
+            diag.adoptBackground(next);
             self.pending = null;
-            // Image preparation and cache writes use idle storage ownership.
-            // A quick refresh reuses unchanged metadata and prepares new art.
-            if (self.deferred_artwork and !self.playing) {
-                self.deferred_artwork = false;
-                self.request(false);
-            }
+            x.Interrupts.restoreCpu(status);
+            diag.recordIndex(self.summary);
         }
+        // Image preparation waits for idle storage ownership, independently
+        // of catalogue adoption, which already completed during playback.
+        if (self.deferred_artwork and !self.playing) {
+            self.deferred_artwork = false;
+            self.request(false);
+        }
+        const status = x.Interrupts.disableCpu();
         if (self.queued) |verify| {
             self.queued = null;
             self.request(verify);
         }
+        x.Interrupts.restoreCpu(status);
     }
 };
