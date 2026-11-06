@@ -553,6 +553,11 @@ pause on Now Playing. Previous/Next scroll menus with hold-repeat and accelerati
 On Now Playing, a tap skips on release; a 400 ms hold previews an accelerating
 seek, committed once on release. Paused seeks remain paused. Holding Back for
 500 ms opens the captured Queue directly; a short Back retains normal navigation.
+Holding Play/Select for 500 ms opens Now Playing from any unlocked music screen,
+without changing playback or the queue. Back restores the prior list selection
+and scroll position. Short Play/Select taps act on release without waiting for
+that threshold; a consumed hold never also selects or pauses. A hold with no
+current track does nothing.
 The selected queue row includes the artist. Volume buttons repeat after 200 ms,
 then every 50 ms, without catching up missed repeats in a burst. A tap adjusts
 0.5 dB; rapid same-direction taps within 250 ms ramp to 1 dB, then cap at 2 dB.

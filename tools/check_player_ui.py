@@ -922,6 +922,25 @@ def qualify_now_playing(app, root):
         player.frame(1000)
         assert player.playback()["played_frames"] == frame
         assert player.queue() == queue and player.playback()["cursor"] == cursor
+        player.choose_home("songs")
+        player.tap("next")
+        browsing = player.status()
+        player.edge("select")
+        player.frame(499)
+        assert player.status()["screen"] == browsing["screen"]
+        assert player.queue() == queue and player.playback()["paused"]
+        player.frame(1)
+        player.edge("select", False)
+        assert player.status()["screen"] == 3 and player.playback()["paused"]
+        assert player.queue() == queue and player.playback()["cursor"] == cursor
+        player.tap("back")
+        returned = player.status()
+        assert (returned["screen"], returned["selection"], returned["first"]) == (
+            browsing["screen"], browsing["selection"], browsing["first"])
+        player.edge("select")
+        player.frame(510)
+        player.edge("select", False)
+        assert player.status()["screen"] == 3 and player.playback()["paused"]
         player.tap("select")
         player.frame(60000)
         player.frame(60000)
@@ -929,7 +948,7 @@ def qualify_now_playing(app, root):
         player.tap("previous")
         assert player.status()["playing"] and player.playback()["paused"]
         assert player.queue() == queue
-        return {"passed": True, "pinned_home_focus": True, "queue_preserved": True,
+        return {"passed": True, "pinned_home_focus": True, "hold_play_now_playing": True, "queue_preserved": True,
                 "state_icon_changes_in_place": True, "paused_navigation_stays_paused": True,
                 "terminal_track_is_paused": True, "manual_previous_after_eof": True}
     finally:

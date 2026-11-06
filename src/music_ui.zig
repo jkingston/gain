@@ -454,6 +454,21 @@ pub fn Controller(comptime Platform: type) type {
             self.navigate(screen);
         }
 
+        fn openNowPlaying(self: *State) void {
+            if (self.playing_track == null) return;
+            if (self.screen != .player) {
+                self.push(.player);
+            } else if (self.menu != null or self.jump_position != null) {
+                self.menu = null;
+                self.jump_position = null;
+                self.cancelInput(self.input_policy.held);
+                self.rendered_screen = null;
+                self.pending_frame.ready = false;
+                self.dirty = true;
+                self.major = true;
+            }
+        }
+
         fn goBack(self: *State) void {
             if (self.screen == .folders and self.folder_path_len != 0) {
                 self.selected_id = core.hash(self.folderPath());
@@ -1089,7 +1104,7 @@ pub fn Controller(comptime Platform: type) type {
             if (self.locked) return .none;
             if (pressed) {
                 self.activity(now);
-                // Menu/Back distinguish taps from holds on release. Their
+                // Menu/Back/Play distinguish taps from holds on release. Their
                 // accepted press already claims navigation during that wait.
                 if (key != .volume_up and key != .volume_down) self.navigation_claimed = true;
             }
@@ -1114,10 +1129,14 @@ pub fn Controller(comptime Platform: type) type {
         fn act(self: *State, action: navigation.Action, now: u64, playing: bool) media.PlaybackCommand {
             if (action == .none) return .none;
             switch (action) {
-                .move, .select, .back, .home, .menu, .jump, .queue => self.navigation_claimed = true,
+                .move, .select, .back, .home, .menu, .jump, .queue, .now_playing => self.navigation_claimed = true,
                 else => {},
             }
             if (action == .home) return self.handle(.home, now, playing);
+            if (action == .now_playing) {
+                self.openNowPlaying();
+                return .none;
+            }
             if (self.jump_position) |position| switch (action) {
                 .move => |delta| {
                     self.jump_position = navigation.move(position, 21, delta);
@@ -1307,7 +1326,7 @@ pub fn Controller(comptime Platform: type) type {
                             self.album_list_scope = .recent;
                         },
                         .settings => self.push(.settings),
-                        .now_playing => self.push(.player),
+                        .now_playing => self.openNowPlaying(),
                         .shuffle_all => {
                             self.startCollection(.{ .scope = .all }, null, true, now);
                             if (self.requested_track != null) self.push(.player);
@@ -4169,4 +4188,134 @@ test "full battery stays full across USB removal and badge clears on every music
     }
     state.refreshBattery(4030, false, false, 300);
     try std.testing.expectEqual(@as(u3, 3), state.batteryPresentation().level);
+}
+
+test "hold Play visits Now Playing from music screens without changing playback or queue" {
+    var fixture: Fixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const tracks = [_]core.Track{
+        .{ .id = 11, .path = "Music/A/01.flac", .stamp = .{}, .meta = .{ .title = "First", .album = "A", .artist = "Artist" } },
+        .{ .id = 22, .path = "Music/B/01.flac", .stamp = .{}, .meta = .{ .title = "Other", .album = "B", .artist = "Other" } },
+    };
+    try fixture.pair.publish(&.{}, &tracks, 42, true);
+    var state = fixture.state();
+    try state.track_store.order.append(11);
+    try state.track_store.order.append(22);
+    state.playing_track = &tracks[0];
+    state.status = .{ .phase = .paused, .sample_rate = 44100, .output_format = .signed_24_in_u32, .played_frames = 441000, .total_frames = 4410000 };
+    const queue_revision = state.track_store.order.revision;
+    const status = state.status;
+    for ([_]Screen{ .home, .albums, .artists, .artist, .tracks, .settings, .themes, .display, .playlists, .favourites, .album_list, .saved }) |screen| {
+        state.navigate(screen);
+        state.reconcile();
+        state.ensureVisible();
+        const before = state.location();
+        const history = state.history_count;
+        try std.testing.expectEqual(media.PlaybackCommand.none, state.button(.play, true, 100, true));
+        try std.testing.expectEqual(before, state.location());
+        try std.testing.expectEqual(media.PlaybackCommand.none, state.repeat(600, navigation.Button.play.mask(), true));
+        try std.testing.expectEqual(Screen.player, state.screen);
+        try std.testing.expectEqual(history + 1, state.history_count);
+        try std.testing.expectEqual(media.PlaybackCommand.none, state.button(.play, false, 620, true));
+        try std.testing.expectEqual(status, state.status);
+        try std.testing.expectEqual(queue_revision, state.track_store.order.revision);
+        try std.testing.expectEqual(11, state.track_store.order.at(0).?);
+        try std.testing.expectEqual(22, state.track_store.order.at(1).?);
+        try std.testing.expectEqual(null, state.requested_track);
+        _ = state.handle(.back, 700, true);
+        try std.testing.expectEqual(before, state.location());
+    }
+}
+
+test "Now Playing shortcut closes overlays and repeated holds never toggle pause or add history" {
+    var fixture: Fixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const track = core.Track{ .id = 11, .path = "Music/A/01.flac", .stamp = .{}, .meta = .{ .title = "First", .album = "A" } };
+    try fixture.pair.publish(&.{}, &.{track}, 42, true);
+    var state = fixture.state();
+    state.playing_track = &track;
+    state.navigate(.albums);
+    state.reconcile();
+    _ = state.handle(.menu, 0, true);
+    try std.testing.expect(state.menu != null);
+    _ = state.button(.play, true, 100, true);
+    // The entire hold can be delivered in one captured input batch.
+    try std.testing.expectEqual(media.PlaybackCommand.none, state.button(.play, false, 700, true));
+    try std.testing.expectEqual(Screen.player, state.screen);
+    try std.testing.expectEqual(null, state.menu);
+    const history = state.history_count;
+    _ = state.button(.play, true, 800, true);
+    _ = state.repeat(1300, navigation.Button.play.mask(), true);
+    try std.testing.expectEqual(media.PlaybackCommand.none, state.button(.play, false, 1400, true));
+    try std.testing.expectEqual(history, state.history_count);
+    _ = state.handle(.menu, 1500, true);
+    _ = state.button(.play, true, 1600, true);
+    _ = state.repeat(2100, navigation.Button.play.mask(), true);
+    _ = state.button(.play, false, 2200, true);
+    try std.testing.expectEqual(null, state.menu);
+    try std.testing.expectEqual(history, state.history_count);
+    try std.testing.expectEqual(media.PlaybackCommand.none, state.button(.play, true, 2300, true));
+    try std.testing.expectEqual(media.PlaybackCommand.toggle_pause, state.button(.play, false, 2360, true));
+}
+
+test "hold Play with no current track cannot select a song and locked holds stay suppressed" {
+    var fixture: Fixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const track = core.Track{ .id = 11, .path = "Music/A/01.flac", .stamp = .{}, .meta = .{ .title = "First", .album = "A" } };
+    try fixture.pair.publish(&.{}, &.{track}, 42, true);
+    var state = fixture.state();
+    state.navigate(.tracks);
+    state.track_scope = .all;
+    _ = state.button(.play, true, 0, false);
+    _ = state.repeat(500, navigation.Button.play.mask(), false);
+    _ = state.button(.play, false, 600, false);
+    try std.testing.expectEqual(Screen.tracks, state.screen);
+    try std.testing.expectEqual(null, state.requested_track);
+    try std.testing.expectEqual(0, state.track_store.order.count);
+    state.playing_track = &track;
+    state.toggleLock();
+    _ = state.button(.play, true, 1000, false);
+    _ = state.repeat(1600, navigation.Button.play.mask(), false);
+    state.toggleLock();
+    _ = state.repeat(2000, navigation.Button.play.mask(), false);
+    _ = state.button(.play, false, 2100, false);
+    try std.testing.expectEqual(Screen.tracks, state.screen);
+    _ = state.button(.play, true, 2200, false);
+    _ = state.repeat(2700, navigation.Button.play.mask(), false);
+    _ = state.button(.play, false, 2800, false);
+    try std.testing.expectEqual(Screen.player, state.screen);
+}
+
+test "a buffered Play hold preserves a scrolled list and Back restores its exact location" {
+    var fixture: Fixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    var tracks: [20]core.Track = undefined;
+    var paths: [20][24]u8 = undefined;
+    for (&tracks, &paths, 0..) |*track, *path, i| track.* = .{
+        .id = i + 1,
+        .path = try std.fmt.bufPrint(path, "Music/{d}.flac", .{i}),
+        .stamp = .{},
+        .meta = .{ .title = "Song", .album = "Collection", .track = @intCast(i + 1) },
+    };
+    try fixture.pair.publish(&.{}, &tracks, 42, true);
+    var state = fixture.state();
+    state.playing_track = &tracks[0];
+    state.navigate(.tracks);
+    state.track_scope = .all;
+    state.moveBy(15, 0);
+    const before = state.location();
+    try std.testing.expect(before.first > 0);
+    var input = @import("music_input.zig").Stream.init(.{ .at = 0, .buttons = 0, .wheel = 0 }, 10);
+    input.observe(.{ .at = 100, .buttons = navigation.Button.play.mask(), .wheel = 0 });
+    input.observe(.{ .at = 700, .buttons = 0, .wheel = 0 });
+    try std.testing.expectEqual(media.PlaybackCommand.none, input.dispatch(&state, 800, 800, 1, true));
+    try std.testing.expectEqual(Screen.player, state.screen);
+    try std.testing.expectEqual(null, state.requested_track);
+    _ = state.button(.back, true, 900, true);
+    _ = state.button(.back, false, 960, true);
+    try std.testing.expectEqual(before, state.location());
 }

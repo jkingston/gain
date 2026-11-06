@@ -4,14 +4,14 @@ const std = @import("std");
 const capture = @import("input_capture.zig");
 pub const Button = capture.Button;
 pub const Context = enum { list, covers, transport };
-pub const Action = union(enum) { none, move: i32, select, back, home, menu, queue, jump, previous, next, scrub: i32, commit_seek, adjust_volume: i8, volume_up, volume_down };
+pub const Action = union(enum) { none, move: i32, select, back, home, menu, queue, now_playing, jump, previous, next, scrub: i32, commit_seek, adjust_volume: i8, volume_up, volume_down };
 
 const first_repeat_ms = 320;
 const travel_start_ms = 900;
 const travel_ramp_ms = 700;
 const traversal_ms = 2000;
 const wheel_reset_ms = 180;
-const menu_hold_ms = 500;
+const shortcut_hold_ms = 500;
 const seek_hold_ms = 400;
 const seek_repeat_ms = 120;
 const volume_first_repeat_ms = 200;
@@ -47,6 +47,8 @@ pub const Policy = struct {
     menu_consumed: bool = false,
     back_at: ?u64 = null,
     back_consumed: bool = false,
+    play_at: ?u64 = null,
+    play_consumed: bool = false,
     transport_button: ?Button = null,
     seeking: bool = false,
     volume_at: u64 = 0,
@@ -128,6 +130,19 @@ pub const Policy = struct {
             const step: i8 = if (self.volume_presses == 1) 1 else if (self.volume_presses == 2) 2 else 4;
             return .{ .adjust_volume = @as(i8, direction) * step };
         }
+        if (button == .play) {
+            if (pressed) {
+                self.play_at = now;
+                self.play_consumed = false;
+                return .none;
+            }
+            const at = self.play_at orelse return .none;
+            self.play_at = null;
+            if (self.play_consumed) return .none;
+            // A complete hold may arrive between UI polls. Its captured
+            // release still opens Now Playing, never the selected song.
+            return if (now -| at >= shortcut_hold_ms) .now_playing else .select;
+        }
         if (button == .back) {
             if (pressed) {
                 self.back_at = now;
@@ -148,11 +163,10 @@ pub const Policy = struct {
         }
         if (!pressed) return .none;
         return switch (button) {
-            .play => .select,
             .back => .back,
             .volume_up => .volume_up,
             .volume_down => .volume_down,
-            .power, .menu, .previous, .next => .none,
+            .play, .power, .menu, .previous, .next => .none,
         };
     }
 
@@ -184,17 +198,23 @@ pub const Policy = struct {
     /// Call after draining captured edges, so a queued release wins over a tick.
     pub fn tick(self: *Policy, now: u64, context: Context, _: usize, raw_held: u8) Action {
         if (self.back_at) |at| {
-            if (!self.back_consumed and raw_held & Button.back.mask() != 0 and now -| at >= menu_hold_ms) {
+            if (!self.back_consumed and raw_held & Button.back.mask() != 0 and now -| at >= shortcut_hold_ms) {
                 self.back_consumed = true;
                 return .queue;
             }
         }
         if (self.menu_at) |at| {
-            if (!self.menu_consumed and raw_held & Button.menu.mask() != 0 and now -| at >= menu_hold_ms) {
+            if (!self.menu_consumed and raw_held & Button.menu.mask() != 0 and now -| at >= shortcut_hold_ms) {
                 self.menu_consumed = true;
                 self.direction = 0;
                 self.suppressed |= self.held & navigation_mask;
                 return .home;
+            }
+        }
+        if (self.play_at) |at| {
+            if (!self.play_consumed and raw_held & Button.play.mask() != 0 and now -| at >= shortcut_hold_ms) {
+                self.play_consumed = true;
+                return .now_playing;
             }
         }
         if (context != self.gesture_context) {
@@ -388,4 +408,43 @@ test "list and grid windows stay row aligned while scrolling and changing layout
         first = firstVisible(0, first, capacity, columns);
         try std.testing.expectEqual(@as(usize, 0), first);
     }
+}
+
+test "Play taps select on release and holds open Now Playing once across contexts and cadences" {
+    for (std.enums.values(Context)) |context| {
+        var tap: Policy = .{};
+        try std.testing.expectEqual(Action.none, tap.edge(.play, true, 100, context, 50));
+        try std.testing.expectEqual(Action.none, tap.tick(150, context, 50, Button.play.mask()));
+        try std.testing.expectEqual(Action.select, tap.edge(.play, false, 160, context, 50));
+        try std.testing.expectEqual(Action.none, tap.tick(1000, context, 50, 0));
+        for ([_]u64{ 5, 16, 33, 100, 600 }) |cadence| {
+            var policy: Policy = .{};
+            _ = policy.edge(.play, true, 0, context, 50);
+            var count: usize = 0;
+            var now = cadence;
+            while (now < 2000) : (now += cadence) {
+                const action = policy.tick(now, context, 50, Button.play.mask());
+                if (action == .now_playing) count += 1 else try std.testing.expectEqual(Action.none, action);
+            }
+            try std.testing.expectEqual(1, count);
+            try std.testing.expectEqual(Action.none, policy.edge(.play, false, 2000, context, 50));
+        }
+    }
+}
+
+test "captured Play releases distinguish long holds even without a timer poll" {
+    for ([_]u64{ 1, 499, 500, 1000 }) |duration| {
+        var policy: Policy = .{};
+        _ = policy.edge(.play, true, 100, .list, 50);
+        try std.testing.expectEqual(if (duration < 500) std.meta.Tag(Action).select else .now_playing, std.meta.activeTag(policy.edge(.play, false, 100 + duration, .list, 50)));
+        try std.testing.expectEqual(Action.none, policy.edge(.play, false, 2000, .list, 50));
+    }
+    var policy: Policy = .{};
+    _ = policy.edge(.play, true, 0, .covers, 50);
+    try std.testing.expectEqual(Action.none, policy.tick(500, .covers, 50, 0));
+    policy.cancel(Button.play.mask());
+    try std.testing.expectEqual(Action.none, policy.tick(2000, .covers, 50, Button.play.mask()));
+    try std.testing.expectEqual(Action.none, policy.edge(.play, false, 2001, .covers, 50));
+    _ = policy.edge(.play, true, 2100, .covers, 50);
+    try std.testing.expectEqual(Action.select, policy.edge(.play, false, 2160, .covers, 50));
 }
