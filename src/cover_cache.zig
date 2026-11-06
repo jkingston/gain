@@ -22,6 +22,24 @@ pub const Cache = struct {
     request_revision: std.atomic.Value(u32) = .init(0),
     revision: std.atomic.Value(u32) = .init(0),
 
+    /// Reset only ownership metadata while render/storage owners are quiescent.
+    /// Unpublished image planes stay untouched until a complete load replaces
+    /// them. This avoids embedding an image-sized default initializer in ROM.
+    pub fn reset(self: *Cache) void {
+        self.ids = @splat(0);
+        self.identities = @splat(0);
+        self.last_use = @splat(0);
+        self.use_generation = 0;
+        self.evictions = 0;
+        self.failed_loads = 0;
+        self.load_estimate_ms = 30;
+        self.ready_mask = .init(0);
+        self.requested = @splat(.{});
+        self.published_requests = @splat(.{});
+        self.request_revision = .init(0);
+        self.revision = .init(0);
+    }
+
     pub fn request(self: *Cache, at: usize, id: u64, value: core.Artwork) void {
         self.requested[at] = .{ .id = id, .art = value };
     }
@@ -520,4 +538,37 @@ test "cache scheduling is independent of a storage adapter's artwork locator sch
     cache.begin(load);
     cache.publishMissing(load);
     try std.testing.expect(cache.nextLoad(cache.requested) == null);
+}
+
+test "metadata reset hides poisoned image planes without reading or clearing their contents" {
+    const cache = try std.testing.allocator.create(Cache);
+    defer std.testing.allocator.destroy(cache);
+    @memset(std.mem.asBytes(cache), 0xa5);
+    cache.reset();
+    try std.testing.expect(std.mem.allEqual(u8, std.mem.asBytes(&cache.tiles), 0xa5));
+    try std.testing.expectEqual(0, cache.ready_mask.load(.acquire));
+    try std.testing.expectEqual(30, cache.load_estimate_ms);
+    try std.testing.expectEqual(0, cache.revision.load(.acquire));
+    try std.testing.expectEqual(0, cache.request_revision.load(.acquire));
+    try std.testing.expectEqual(null, cache.get(0xa5a5a5a5a5a5a5a5, .{}));
+    const art = core.Artwork{ .key = "synthetic", .cache_path = "atlas:0" };
+    cache.request(0, 17, art);
+    cache.publishRequests();
+    const load = cache.nextLoad(cache.requested).?;
+    cache.begin(load);
+    try std.testing.expectEqual(null, cache.get(17, art));
+    cache.publishMissing(load);
+    try std.testing.expectEqual(0, cache.get(17, art).?.width);
+    const flow = @import("cover_flow.zig");
+    var actual: [64 * 64]u16 = @splat(flow.background);
+    var expected = actual;
+    const quad = flow.Quad{ .left = 8, .right = 56, .top_left = 8, .top_right = 8, .bottom_left = 56, .bottom_right = 56 };
+    flow.paint(.{ .pixels = &actual, .width = 64, .height = 64 }, cache.get(17, art), quad);
+    flow.paint(.{ .pixels = &expected, .width = 64, .height = 64 }, null, quad);
+    try std.testing.expectEqualSlices(u16, &expected, &actual);
+    cache.reset();
+    try std.testing.expectEqual(null, cache.get(17, art));
+    try std.testing.expectEqual(0, cache.failed_loads);
+    try std.testing.expectEqual(0, cache.evictions);
+    try std.testing.expectEqual(null, cache.nextLoad(cache.requested));
 }

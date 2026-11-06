@@ -28,8 +28,26 @@ pub const Loader = struct {
             if (@sizeOf(Loader) > memory.cover_cache.bytes) @compileError("cover cache too large");
         }
         const loader: *Loader = @ptrFromInt(memory.cover_cache.cached());
-        loader.* = .{};
+        loader.reset();
         return loader;
+    }
+
+    /// No tile or FAT checkpoint is readable until its metadata is published.
+    /// Initialize that metadata explicitly rather than copying unused planes.
+    pub fn reset(self: *Loader) void {
+        self.cache.reset();
+        self.file = null;
+        self.seeks.reset();
+        self.unavailable = false;
+        self.work = .{};
+        self.idle_yield = null;
+        self.active_load = null;
+        self.load_attempts = 0;
+        self.read_calls = 0;
+        self.read_bytes = 0;
+        self.cancelled_loads = 0;
+        self.load_ticks_max = 0;
+        self.prepare_ticks_max = 0;
     }
 
     pub fn cancelled(self: *Loader) bool {
@@ -117,3 +135,24 @@ pub const Loader = struct {
         return .ready;
     }
 };
+
+test "native loader resets poisoned bookkeeping and leaves unowned tile storage untouched" {
+    const loader = try std.testing.allocator.create(Loader);
+    defer std.testing.allocator.destroy(loader);
+    @memset(std.mem.asBytes(loader), 0xa5);
+    loader.reset();
+    try std.testing.expectEqual(null, loader.file);
+    try std.testing.expectEqual(null, loader.idle_yield);
+    try std.testing.expectEqual(null, loader.active_load);
+    try std.testing.expect(!loader.unavailable);
+    try std.testing.expect(loader.work.pending(0));
+    try std.testing.expectEqual(0, loader.seeks.count);
+    try std.testing.expectEqual(0, loader.seeks.source_identity);
+    try std.testing.expectEqual(0, loader.cache.ready_mask.load(.acquire));
+    try std.testing.expectEqual(0, loader.load_attempts);
+    try std.testing.expectEqual(0, loader.read_calls);
+    try std.testing.expectEqual(0, loader.read_bytes);
+    try std.testing.expectEqual(0, loader.cancelled_loads);
+    try std.testing.expectEqual(0, loader.load_ticks_max);
+    try std.testing.expectEqual(0, loader.prepare_ticks_max);
+}
