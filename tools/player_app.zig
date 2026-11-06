@@ -576,7 +576,11 @@ fn serviceLibrary(at: u64, force: bool) void {
             const count: u16 = @intCast(state.track_store.order.count);
             state.savedPlaylistResult(request.slot, playlist_store.save(request.slot, state.track_store.order, state.snapshot().source, scratch), count);
         } else if (!force) {
-            if (playlist_store.load(request.slot, state.snapshot().source, scratch)) |data| state.loadedSavedPlaylist(data) catch state.libraryNotice("Playlist unavailable") else state.libraryNotice("Playlist unavailable");
+            if (playlist_store.load(request.slot, state.snapshot().source, scratch)) |data| {
+                state.loadedSavedPlaylist(data) catch |failure| {
+                    if (failure != error.PlaylistSuperseded) state.libraryNotice("Playlist unavailable");
+                };
+            } else state.libraryNotice("Playlist unavailable");
             apply(.none, at);
             transportStatus(at);
         }

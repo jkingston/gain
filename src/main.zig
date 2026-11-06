@@ -702,7 +702,9 @@ const MusicSession = struct {
                 // Audio workers have joined. This idle owner may restore the
                 // queue synchronously; restoration performs no I/O or yields.
                 if (self.playlist_store.load(self.state.index.volume, request.slot, self.state.snapshot().source)) |data| {
-                    if (self.state.requested_track == null) self.state.loadedSavedPlaylist(data) catch self.publishLibrary(null, "Playlist unavailable");
+                    self.state.loadedSavedPlaylist(data) catch |failure| {
+                        if (failure != error.PlaylistSuperseded) self.publishLibrary(null, "Playlist unavailable");
+                    };
                 } else if (!self.playlist_store.cancelled) self.publishLibrary(null, "Playlist unavailable");
             }
             if (self.playlist_store.cancelled) {

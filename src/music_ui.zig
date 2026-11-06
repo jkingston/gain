@@ -303,6 +303,10 @@ pub fn Controller(comptime Platform: type) type {
         }
 
         pub fn loadedSavedPlaylist(self: *State, data: @import("saved_playlists.zig").Data) !void {
+            // The storage owner claims and clears a request before loading.
+            // Cooperative reads may accept a newer playlist or song choice;
+            // no I/O or yield follows this check before applying the result.
+            if (self.saved_request != null or self.requested_track != null) return error.PlaylistSuperseded;
             if (data.source != self.snapshot().source) return error.ForeignPlaylist;
             var available = false;
             for (0..data.count) |rank| if (self.snapshot().trackById(data.id(rank)) != null) {
@@ -3510,10 +3514,112 @@ test "saved playlist load waits for worker cancellation and buffered queue edits
     try replacement.insert(&.{ 22, 22 }, false);
     var scratch: [128]u8 = undefined;
     const data = try @import("saved_playlists.zig").capture(replacement, 42, &scratch);
+    state.saved_request = null; // The storage owner has claimed the load.
     try state.loadedSavedPlaylist(data);
     try std.testing.expectEqual(22, state.requested_track.?.id);
     try std.testing.expectEqual(2, state.track_store.order.count);
     try std.testing.expect(state.track_store.order.occurrenceAt(0).? != state.track_store.order.occurrenceAt(1).?);
+}
+
+test "a newer saved playlist or explicit song choice supersedes a cooperatively loaded queue" {
+    const playlists = @import("saved_playlists.zig");
+    const Memory = struct {
+        bytes: []u8,
+        at: usize = 0,
+
+        pub fn seekTo(self: *@This(), offset: u32) !void {
+            self.at = offset;
+        }
+        pub fn read(self: *@This(), output: []u8) !usize {
+            @memcpy(output, self.bytes[self.at..][0..output.len]);
+            self.at += output.len;
+            return output.len;
+        }
+        pub fn write(self: *@This(), input: []const u8) !void {
+            @memcpy(self.bytes[self.at..][0..input.len], input);
+            self.at += input.len;
+        }
+        pub fn sync(_: *@This()) !void {}
+    };
+    const Choice = struct {
+        state: *TestState,
+        track: *const core.Track,
+        song: bool,
+        polls: usize = 0,
+
+        fn poll(context: *anyopaque) bool {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.polls += 1;
+            if (self.polls == 2) {
+                if (self.song) self.state.queue(self.track) else {
+                    _ = self.state.handle(.down, 10, false);
+                    _ = self.state.handle(.select, 11, false);
+                }
+            }
+            return false;
+        }
+    };
+    var fixture: Fixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const tracks = [_]core.Track{
+        .{ .id = 11, .path = "A/one.flac", .stamp = .{}, .meta = .{ .title = "One", .album = "A" } },
+        .{ .id = 22, .path = "A/two.flac", .stamp = .{}, .meta = .{ .title = "Two", .album = "A" } },
+        .{ .id = 33, .path = "A/three.flac", .stamp = .{}, .meta = .{ .title = "Three", .album = "A" } },
+    };
+    try fixture.pair.publish(&.{}, &tracks, 42, true);
+    const card = try std.testing.allocator.alloc(u8, playlists.allocation_bytes);
+    defer std.testing.allocator.free(card);
+    @memset(card, 0);
+    var memory = Memory{ .bytes = card };
+    var store: playlists.Store = .{};
+    var bytes: [64]u8 = undefined;
+    var queue = @import("play_queue.zig").Queue.init(&bytes);
+    var scratch: [128]u8 = undefined;
+    var block: [512]u8 = undefined;
+    try queue.insert(&.{ 11, 11 }, false);
+    try store.save(&memory, 0, try playlists.capture(queue, 42, &scratch), &block);
+    queue.clear();
+    try queue.insert(&.{ 22, 22 }, false);
+    try store.save(&memory, 1, try playlists.capture(queue, 42, &scratch), &block);
+    for ([_]bool{ false, true }) |song| {
+        var state = fixture.state();
+        state.saved_available = true;
+        state.saved_summary = store.summary;
+        try state.track_store.order.append(33);
+        state.queue(&tracks[2]);
+        state.playing_track = state.track_store.begin();
+        state.requested_track = null;
+        state.navigate(.playlists);
+        _ = state.handle(.select, 0, false);
+        try std.testing.expectEqual(0, state.saved_request.?.slot);
+        state.saved_request = null; // The storage owner claims the old load.
+        var choice = Choice{ .state = &state, .track = &tracks[1], .song = song };
+        const Service = struct { context: *anyopaque, poll: *const fn (*anyopaque) bool };
+        const service: ?Service = .{ .context = &choice, .poll = Choice.poll };
+        var cancelled = false;
+        var reader = @import("owned_io.zig").wrap(&memory, service, &cancelled);
+        const old = (try store.load(&reader, 0, 42, &scratch, &block)).?;
+        try std.testing.expect(choice.polls >= 3 and !cancelled);
+        try std.testing.expectError(error.PlaylistSuperseded, state.loadedSavedPlaylist(old));
+        try std.testing.expectEqual(1, state.track_store.order.count);
+        try std.testing.expectEqual(33, state.track_store.order.at(0).?);
+        try std.testing.expectEqual(33, state.playing_track.?.id);
+        if (song) {
+            try std.testing.expectEqual(22, state.requested_track.?.id);
+        } else {
+            try std.testing.expectEqual(1, state.saved_request.?.slot);
+            try std.testing.expectEqual(null, state.requested_track);
+            const request = state.saved_request.?;
+            state.saved_request = null;
+            const latest = (try store.load(&memory, request.slot, 42, &scratch, &block)).?;
+            try state.loadedSavedPlaylist(latest);
+            try std.testing.expectEqual(2, state.track_store.order.count);
+            try std.testing.expectEqual(22, state.track_store.order.at(0).?);
+            try std.testing.expectEqual(22, state.track_store.order.at(1).?);
+            try std.testing.expectEqual(22, state.requested_track.?.id);
+        }
+    }
 }
 
 test "resumed duplicate occurrence is paused and its file position is revalidated" {
