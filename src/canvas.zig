@@ -130,7 +130,18 @@ pub const Canvas = struct {
     fn prepared(self: Canvas, x: i32, y: i32, width: u16, value: []const u8, role: fonts.Role, color: Color, ellipsize: bool, alignment: Alignment) bool {
         const cache = self.text_cache orelse return false;
         if (!@import("text/cache.zig").needsEngine(value)) return false;
-        const label = cache.lookup(value, role, width, ellipsize) orelse return false;
+        const lookup = cache.lookupState(value, role, width, ellipsize);
+        const label = switch (lookup) {
+            .ready => |label| label,
+            .pending, .deferred => {
+                self.textPlaceholder(x, y, width, role, color, alignment, false);
+                return true;
+            },
+            .unavailable => {
+                self.textPlaceholder(x, y, width, role, color, alignment, true);
+                return true;
+            },
+        };
         const left = x + switch (alignment) {
             .left => @as(i32, 0),
             .center => @divTrunc(@as(i32, width) - label.width, 2),
@@ -146,6 +157,33 @@ pub const Canvas = struct {
             }
         }
         return true;
+    }
+
+    fn textPlaceholder(self: Canvas, x: i32, y: i32, width: u16, role: fonts.Role, color: Color, alignment: Alignment, failed: bool) void {
+        // Keep the allocated text band stable. Three dots mean pending; a
+        // crossed outline means unavailable, never fabricated question marks.
+        const extent: i32 = @min(width, 11);
+        const left = x + switch (alignment) {
+            .left => @as(i32, 0),
+            .center => @divTrunc(@as(i32, width) - extent, 2),
+            .right => @as(i32, width) - extent,
+        };
+        const top = y + switch (role) {
+            .caption => @as(i32, 7),
+            .body => @as(i32, 9),
+            .reading => @as(i32, 10),
+            .title => @as(i32, 12),
+            .serif => @as(i32, 18),
+        };
+        var clipped = self;
+        clipped.surface.clip = ui.intersection(self.surface.clip, .{ .x = x, .y = y, .width = width, .height = 48 });
+        if (failed) {
+            clipped.fill(left, top - 5, @intCast(extent), 1, color);
+            clipped.fill(left, top + 2, @intCast(extent), 1, color);
+            clipped.fill(left, top - 5, 1, 8, color);
+            clipped.fill(left + extent - 1, top - 5, 1, 8, color);
+            for (0..6) |i| clipped.pixel(left + @as(i32, @intCast(i)) + 2, top - 4 + @as(i32, @intCast(i)), color);
+        } else for (0..3) |i| clipped.fill(left + @as(i32, @intCast(i * 4)), top, 2, 2, color);
     }
 
     pub fn chevron(self: Canvas, x: i32, y: i32, color: Color) void {
@@ -279,4 +317,44 @@ test "prepared labels obey clipping and alignment without font work in drawing" 
     try std.testing.expectEqual(revision, cache.revision.load(.acquire));
     try std.testing.expect(!cache.pending());
     try std.testing.expectEqual(@as(u32, 101), cache.hits);
+}
+
+test "pending Unicode draws a bounded loading mark then immutable text or explicit failure" {
+    const text = @import("text/cache.zig");
+    var cache: text.Cache = undefined;
+    cache.reset();
+    cache.beginFrame();
+    var pending: [ui.pixel_count]u16 = @splat(0xffff);
+    var c = Canvas.init(&pending);
+    c.text_cache = &cache;
+    c.centered(10, 15, 80, "日本語", .body, 0);
+    try std.testing.expect(cache.pending());
+    var embedded: [ui.pixel_count]u16 = @splat(0xffff);
+    Canvas.init(&embedded).centered(10, 15, 80, "日本語", .body, 0);
+    try std.testing.expect(!std.mem.eql(u16, &pending, &embedded));
+    for (pending, 0..) |pixel, i| if (pixel != 0xffff) {
+        try std.testing.expect(i % 320 >= 10 and i % 320 < 90 and i / 320 >= 15 and i / 320 < 63);
+    };
+    const job = cache.claim().?;
+    cache.publish(job, .cancelled);
+    var retried: [ui.pixel_count]u16 = @splat(0xffff);
+    c.surface.pixels = &retried;
+    c.centered(10, 15, 80, "日本語", .body, 0);
+    try std.testing.expectEqualSlices(u16, &pending, &retried);
+    const ready = cache.claim().?;
+    cache.destination(ready).* = .{ .width = 17, .height = 21 };
+    @memset(cache.destination(ready).pixels[0..17], 255);
+    cache.publish(ready, .ready);
+    var completed: [ui.pixel_count]u16 = @splat(0xffff);
+    c.surface.pixels = &completed;
+    c.centered(10, 15, 80, "日本語", .body, 0);
+    try std.testing.expect(!std.mem.eql(u16, &pending, &completed));
+    cache.reset();
+    cache.unavailable(.io_error);
+    var failed: [ui.pixel_count]u16 = @splat(0xffff);
+    c.surface.pixels = &failed;
+    c.centered(10, 15, 80, "日本語", .body, 0);
+    try std.testing.expect(!cache.pending());
+    try std.testing.expect(!std.mem.eql(u16, &pending, &failed));
+    try std.testing.expect(!std.mem.eql(u16, &embedded, &failed));
 }

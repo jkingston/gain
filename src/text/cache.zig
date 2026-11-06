@@ -5,6 +5,7 @@ const contract = @import("contract.zig");
 const fonts = @import("../font_data.zig");
 pub const slot_count = 12;
 const Phase = enum(u32) { empty, queued, working, ready, failed };
+pub const Lookup = union(enum) { ready: *const contract.Label, pending, unavailable: contract.Result, deferred };
 const Slot = struct {
     phase: std.atomic.Value(Phase) = .init(.empty),
     used: u32 = 0,
@@ -13,6 +14,7 @@ const Slot = struct {
     // uninitialised avoids a large ROM/boot-image initializer for empty slots.
     label: contract.Label = undefined,
     result: contract.Result = .ready,
+    prefetch: bool = false,
 };
 pub const Cache = struct {
     slots: [slot_count]Slot = @splat(.{}),
@@ -22,6 +24,7 @@ pub const Cache = struct {
     hits: u32 = 0,
     misses: u32 = 0,
     deferred: u32 = 0,
+    failure: ?contract.Result = null,
 
     pub fn reset(self: *Cache) void {
         self.epoch = 0;
@@ -30,9 +33,11 @@ pub const Cache = struct {
         self.hits = 0;
         self.misses = 0;
         self.deferred = 0;
+        self.failure = null;
         for (&self.slots) |*slot| {
             slot.used = 0;
             slot.result = .ready;
+            slot.prefetch = false;
             slot.phase = .init(.empty);
         }
     }
@@ -44,7 +49,14 @@ pub const Cache = struct {
     /// The returned mask is borrowed for the immediate draw call. Do not
     /// retain its pointer across frames or subsequent cache lookups.
     pub fn lookup(self: *Cache, value: []const u8, role: fonts.Role, width: u16, ellipsis: bool) ?*const contract.Label {
-        if (value.len > contract.max_text_bytes or width == 0) return null;
+        return switch (self.lookupState(value, role, width, ellipsis)) {
+            .ready => |label| label,
+            else => null,
+        };
+    }
+
+    pub fn lookupState(self: *Cache, value: []const u8, role: fonts.Role, width: u16, ellipsis: bool) Lookup {
+        if (value.len > contract.max_text_bytes or width == 0) return .{ .unavailable = .invalid_text };
         const bounded = @min(width, contract.max_width);
         var oldest: ?*Slot = null;
         var vacancy: ?*Slot = null;
@@ -55,11 +67,12 @@ pub const Cache = struct {
                 slot.request.ellipsis == @intFromBool(ellipsis) and std.mem.eql(u8, slot.request.value(), value))
             {
                 slot.used = self.epoch;
+                slot.prefetch = false;
                 if (phase == .ready) {
                     self.hits +%= 1;
-                    return &slot.label;
+                    return .{ .ready = &slot.label };
                 }
-                return null;
+                return if (phase == .failed) .{ .unavailable = slot.result } else .pending;
             }
             if (phase == .empty) {
                 if (vacancy == null) vacancy = slot;
@@ -71,16 +84,51 @@ pub const Cache = struct {
             if (self.epoch -% slot.used <= 1) continue;
             if (oldest == null or self.epoch -% slot.used > self.epoch -% oldest.?.used) oldest = slot;
         }
+        if (self.failure) |result| return .{ .unavailable = result };
         self.misses +%= 1;
         const slot = vacancy orelse oldest orelse {
             self.deferred +%= 1;
-            return null;
+            return .deferred;
         };
         slot.phase.store(.empty, .release);
-        slot.request = contract.Request.init(value, role, bounded, self.locale, ellipsis) catch return null;
+        slot.request = contract.Request.init(value, role, bounded, self.locale, ellipsis) catch return .{ .unavailable = .invalid_text };
         slot.used = self.epoch;
+        slot.prefetch = false;
         slot.phase.store(.queued, .release);
-        return null;
+        return .pending;
+    }
+
+    /// One speculative label may occupy a vacant slot, never evict visible
+    /// demand or pin a prior viewport. Caller excludes concurrent UI requests.
+    pub fn prefetch(self: *Cache, value: []const u8, role: fonts.Role, width: u16, ellipsis: bool) bool {
+        if (self.failure != null or value.len > contract.max_text_bytes or width == 0) return false;
+        const bounded = @min(width, contract.max_width);
+        var vacancy: ?*Slot = null;
+        for (&self.slots) |*slot| {
+            const phase = slot.phase.load(.acquire);
+            if (phase == .empty) {
+                if (vacancy == null) vacancy = slot;
+            } else if (slot.request.length == value.len and slot.request.role == role and slot.request.width == bounded and
+                slot.request.locale == self.locale and slot.request.ellipsis == @intFromBool(ellipsis) and std.mem.eql(u8, slot.request.value(), value)) return true;
+        }
+        const slot = vacancy orelse return false;
+        slot.request = contract.Request.init(value, role, bounded, self.locale, ellipsis) catch return false;
+        slot.used = self.epoch -% 2;
+        slot.prefetch = true;
+        slot.phase.store(.queued, .release);
+        return true;
+    }
+
+    /// A missing/corrupt engine cannot service queued work. Publish a terminal
+    /// outcome rather than leaving the UI in a permanent loading state.
+    pub fn unavailable(self: *Cache, result: contract.Result) void {
+        std.debug.assert(result != .ready and result != .cancelled);
+        self.failure = result;
+        for (&self.slots) |*slot| if (slot.phase.load(.acquire) == .queued) {
+            slot.result = result;
+            slot.phase.store(.failed, .release);
+        };
+        _ = self.revision.fetchAdd(1, .release);
     }
 
     pub fn pending(self: *const Cache) bool {
@@ -98,12 +146,14 @@ pub const Cache = struct {
     pub fn claim(self: *Cache) ?usize {
         var newest: ?usize = null;
         var newest_age: u32 = std.math.maxInt(u32);
+        var speculative = true;
         for (&self.slots, 0..) |*slot, i| {
             if (slot.phase.load(.acquire) != .queued) continue;
             const age = self.epoch -% slot.used;
-            if (newest == null or age < newest_age) {
+            if (newest == null or (speculative and !slot.prefetch) or (speculative == slot.prefetch and age < newest_age)) {
                 newest = i;
                 newest_age = age;
+                speculative = slot.prefetch;
             }
         }
         const index = newest orelse return null;
@@ -142,6 +192,26 @@ pub fn needsEngine(value: []const u8) bool {
         if (fonts.glyph(.body, cp).code != cp) return true;
     }
     return false;
+}
+
+pub const WarmupPriority = enum { embedded, shaping, fallback };
+
+/// Prefer metadata that needs a fallback face over typography already present
+/// in the embedded atlas. This is scheduling only; shaping policy is unchanged.
+pub fn warmupPriority(value: []const u8) WarmupPriority {
+    if (!needsEngine(value)) return .embedded;
+    var iterator = (std.unicode.Utf8View.init(value) catch return .fallback).iterator();
+    while (iterator.nextCodepoint()) |cp| if (fonts.glyph(.body, cp).code != cp) return .fallback;
+    return .shaping;
+}
+
+test "warmup prioritises actual missing atlas glyphs over supported typographic punctuation" {
+    try std.testing.expectEqual(WarmupPriority.embedded, warmupPriority("Café"));
+    try std.testing.expectEqual(WarmupPriority.shaping, warmupPriority("Artist’s album"));
+    for ([_][]const u8{ "日本語", "العربية", "\xff" }) |value| try std.testing.expectEqual(WarmupPriority.fallback, warmupPriority(value));
+    // Empty/ASCII labels never start the optional font engine.
+    try std.testing.expectEqual(WarmupPriority.embedded, warmupPriority(""));
+    try std.testing.expectEqual(WarmupPriority.embedded, warmupPriority("Synthetic album"));
 }
 
 test "working labels survive eviction, copied metadata and publication" {
@@ -230,4 +300,68 @@ test "retained pending captions survive cover-only frames and epoch wrap" {
     cache.destination(resumed).* = .{ .width = 17, .height = 21 };
     cache.publish(resumed, .ready);
     try std.testing.expect(cache.lookup("日本語のアルバム 2", .reading, 288, true) != null);
+}
+
+test "cold pending cancellation failure and warm labels remain distinct without fabricated readiness" {
+    var cache: Cache = undefined;
+    cache.reset();
+    cache.beginFrame();
+    try std.testing.expectEqual(Lookup.pending, cache.lookupState("日本語", .body, 180, true));
+    const slot = cache.claim().?;
+    try std.testing.expectEqual(Lookup.pending, cache.lookupState("日本語", .body, 180, true));
+    cache.publish(slot, .cancelled);
+    try std.testing.expectEqual(Lookup.pending, cache.lookupState("日本語", .body, 180, true));
+    const retry = cache.claim().?;
+    cache.destination(retry).* = .{ .width = 25, .height = 21 };
+    cache.publish(retry, .ready);
+    try std.testing.expect(cache.lookupState("日本語", .body, 180, true) == .ready);
+    const revision = cache.revision.load(.acquire);
+    for (0..100) |_| try std.testing.expect(cache.lookupState("日本語", .body, 180, true) == .ready);
+    try std.testing.expectEqual(revision, cache.revision.load(.acquire));
+    _ = cache.lookupState("עברית", .body, 180, true);
+    cache.unavailable(.io_error);
+    try std.testing.expect(!cache.pending());
+    try std.testing.expectEqual(Lookup{ .unavailable = .io_error }, cache.lookupState("עברית", .body, 180, true));
+    try std.testing.expectEqual(Lookup{ .unavailable = .io_error }, cache.lookupState("العربية", .body, 180, true));
+    try std.testing.expect(cache.lookupState("日本語", .body, 180, true) == .ready);
+    cache.reset();
+    try std.testing.expectEqual(Lookup.pending, cache.lookupState("日本語", .body, 180, true));
+}
+
+test "one speculative label copies source and yields to visible demand without eviction" {
+    var cache: Cache = undefined;
+    cache.reset();
+    cache.beginFrame();
+    var source = [_]u8{ 0xe6, 0x97, 0xa5 };
+    try std.testing.expect(cache.prefetch(&source, .reading, 288, true));
+    source = @splat('x');
+    _ = cache.lookupState("かな", .reading, 288, true);
+    const visible = cache.claim().?;
+    try std.testing.expectEqualStrings("かな", cache.request(visible).value());
+    cache.destination(visible).* = .{ .width = 25, .height = 24 };
+    cache.publish(visible, .ready);
+    const speculative = cache.claim().?;
+    try std.testing.expectEqualStrings("日", cache.request(speculative).value());
+    cache.publish(speculative, .cancelled);
+    // A real lookup promotes this same copied request, without a duplicate.
+    _ = cache.lookupState("日", .reading, 288, true);
+    const promoted = cache.claim().?;
+    try std.testing.expectEqual(speculative, promoted);
+    cache.destination(promoted).* = .{ .width = 16, .height = 24 };
+    cache.publish(promoted, .ready);
+    cache.reset();
+    cache.beginFrame();
+    for (0..slot_count) |i| {
+        var buffer: [32]u8 = undefined;
+        _ = cache.lookupState(try std.fmt.bufPrint(&buffer, "日本語 {d}", .{i}), .body, 288, true);
+    }
+    try std.testing.expect(!cache.prefetch("かな", .reading, 288, true));
+    var claimed: usize = 0;
+    while (cache.claim()) |slot| {
+        try std.testing.expect(!cache.slots[slot].prefetch);
+        cache.destination(slot).* = .{ .width = 16, .height = 21 };
+        cache.publish(slot, .ready);
+        claimed += 1;
+    }
+    try std.testing.expectEqual(slot_count, claimed);
 }

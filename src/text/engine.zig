@@ -319,6 +319,10 @@ fn openFace(family: u16, role: abi.Role) !void {
 
 fn familyFor(cp: u32, regional: bool) !u16 {
     const h = header.?;
+    // Kana is a strong Japanese script. The pack's first-coverage fallback
+    // may be another region's pan-CJK font; mixing that with Japanese Han
+    // changes typography and needlessly opens two large CJK faces.
+    if (regional and isKana(cp) and h.cjk[0] != 0xffff) return h.cjk[0];
     if (regional and ((cp >= 0x3400 and cp <= 0x9fff) or (cp >= 0x20000 and cp <= 0x323af))) {
         const index: usize = switch (selected_locale) {
             .automatic, .japanese => 0,
@@ -340,6 +344,12 @@ fn familyFor(cp: u32, regional: bool) !u16 {
         if (cp < first) high = middle else if (cp > last) low = middle + 1 else return family;
     }
     return 0;
+}
+
+fn isKana(cp: u32) bool {
+    return (cp >= 0x3040 and cp <= 0x30ff) or (cp >= 0x31f0 and cp <= 0x31ff) or
+        (cp >= 0xff66 and cp <= 0xff9f) or (cp >= 0x1aff0 and cp <= 0x1afff) or
+        (cp >= 0x1b000 and cp <= 0x1b16f);
 }
 
 fn ignorable(cp: u32) bool {
@@ -682,6 +692,15 @@ fn snapshot(output: *abi.Statistics) callconv(.c) void {
 /// Test builds compare the complete layout path with a direct, independently
 /// itemised HarfBuzz buffer using the same pinned font and FT load settings.
 pub const testing = if (@import("builtin").is_test) struct {
+    pub fn expectJapaneseFamily() !void {
+        try std.testing.expect(glyph_count != 0);
+        for (glyphs[0..glyph_count]) |g| try std.testing.expectEqual(header.?.cjk[0], g.family);
+    }
+
+    pub fn expectRegionalFamily(cp: u32, region: usize) !void {
+        try std.testing.expectEqual(header.?.cjk[region], try familyFor(cp, true));
+    }
+
     pub fn expectDirectShaping(value: []const u8, role: abi.Role) !void {
         try std.testing.expect(glyph_count > 0);
         const family = glyphs[0].family;

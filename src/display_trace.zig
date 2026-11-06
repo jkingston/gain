@@ -2,7 +2,24 @@
 //! Writes are four integers; the host reads the ring after each animation.
 const std = @import("std");
 pub const capacity = 2048;
-pub const Kind = enum(u32) { render = 1, commit = 2, release = 3, retarget = 4, model = 5, motion = 6, flow = 7, covers = 8, model_v2 = 9, library_work = 10 };
+pub const Kind = enum(u32) {
+    render = 1,
+    commit = 2,
+    release = 3,
+    retarget = 4,
+    model = 5,
+    motion = 6,
+    flow = 7,
+    covers = 8,
+    model_v2 = 9,
+    library_work = 10,
+    text_load = 11,
+    text_loaded = 12,
+    text_prepare = 13,
+    text_prepared = 14,
+    cover_load = 15,
+    cover_loaded = 16,
+};
 /// Versioned separately from legacy kind 5, which reserved only three screen
 /// bits. Existing timing captures remain readable after adding device menus.
 pub const Model = packed struct(u32) {

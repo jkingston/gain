@@ -7,6 +7,19 @@ pub const code_address: u32 = 0x81010000;
 pub const code_capacity: u32 = 1024 * 1024;
 pub const work_address: u32 = 0x80d78000;
 pub const work_capacity: u32 = 0x88000;
+/// Reuse code only on the same mounted source and unchanged component file.
+/// Font faces/pages always reinitialize against the newly opened font source.
+pub const Identity = struct {
+    source: u64,
+    cluster: u32,
+    modified: u32,
+    bytes: u32,
+    payload: Header,
+
+    pub fn same(self: Identity, other: Identity) bool {
+        return std.meta.eql(self, other);
+    }
+};
 pub const Header = struct {
     bytes: u32,
     crc: u32,
@@ -35,4 +48,21 @@ test "component address, sizes, version and checksum are validated before execut
     try std.testing.expect(!result.validate("fail"));
     header[12] ^= 1;
     try std.testing.expectError(error.InvalidComponent, Header.decode(&header, 68));
+}
+
+test "resident component reuse requires source file stamp and verified payload identity" {
+    const identity = Identity{ .source = 7, .cluster = 31, .modified = 55, .bytes = 1064, .payload = .{ .bytes = 1000, .crc = 991 } };
+    try std.testing.expect(identity.same(identity));
+    var changed = identity;
+    inline for (.{ "source", "cluster", "modified", "bytes" }) |field| {
+        changed = identity;
+        @field(changed, field) += 1;
+        try std.testing.expect(!identity.same(changed));
+    }
+    changed = identity;
+    changed.payload.bytes += 1;
+    try std.testing.expect(!identity.same(changed));
+    changed = identity;
+    changed.payload.crc ^= 1;
+    try std.testing.expect(!identity.same(changed));
 }

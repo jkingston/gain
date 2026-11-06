@@ -16,14 +16,15 @@ var memory: [960 * 1024]u8 align(16) = undefined;
 var auxiliary: [232 * 1024]u8 align(16) = undefined;
 const workspace = abi.Workspace{ .primary = &memory, .primary_bytes = memory.len, .auxiliary = &auxiliary, .auxiliary_bytes = auxiliary.len };
 const Fixture = struct {
+    bytes: []const u8 = fixture,
     reads: usize = 0,
     polls: usize = 0,
     cancel: bool = false,
     fn read(context: *anyopaque, at: u32, output: [*]u8, count: u32) callconv(.c) u32 {
         const self: *Fixture = @ptrCast(@alignCast(context));
         self.reads += 1;
-        if (@as(u64, at) + count > fixture.len) return 0;
-        @memcpy(output[0..count], fixture[at..][0..count]);
+        if (@as(u64, at) + count > self.bytes.len) return 0;
+        @memcpy(output[0..count], self.bytes[at..][0..count]);
         return count;
     }
     fn poll(context: *anyopaque) callconv(.c) bool {
@@ -212,4 +213,70 @@ test "large contextual tables remain exact across role changes without exhaustin
         try std.testing.expect(statistics.heap_peak <= memory.len + auxiliary.len);
         try std.testing.expect(statistics.heap_live < auxiliary.len / 2);
     };
+}
+
+test "resident engine rebinds new sources across repeated mounts cancellations and changed packs" {
+    var sources: [12]Fixture = @splat(.{});
+    const request = try abi.Request.init("日本語", .reading, 288, .automatic, true);
+    var label: abi.Label = .{};
+    var expected: abi.Label = undefined;
+    for (&sources, 0..) |*source, i| {
+        const input = abi.Source{ .context = source, .bytes = fixture.len, .read = Fixture.read, .poll = Fixture.poll };
+        source.cancel = i % 3 == 1;
+        if (source.cancel) {
+            try std.testing.expectEqual(abi.Result.cancelled, engine.api.initialize(&input, &workspace));
+            source.cancel = false;
+        }
+        try std.testing.expectEqual(abi.Result.ready, engine.api.initialize(&input, &workspace));
+        try std.testing.expectEqual(abi.Result.ready, engine.api.prepare(&request, &label));
+        if (i == 0) expected = label else try std.testing.expectEqualSlices(u8, std.mem.asBytes(&expected), std.mem.asBytes(&label));
+        try std.testing.expect(source.reads > 0);
+        const reads = source.reads;
+        try std.testing.expectEqual(abi.Result.ready, engine.api.prepare(&request, &label));
+        try std.testing.expectEqual(reads, source.reads);
+        engine.api.shutdown();
+        const invalid = abi.Source{ .context = source, .bytes = 1, .read = Fixture.read, .poll = Fixture.poll };
+        try std.testing.expectEqual(abi.Result.invalid_pack, engine.api.initialize(&invalid, &workspace));
+        engine.api.shutdown();
+    }
+    // A valid replacement manifest points regional Han at the Latin family.
+    // Reusing old manifest/page state would silently keep Japanese coverage.
+    const replacement = try std.testing.allocator.dupe(u8, fixture);
+    defer std.testing.allocator.free(replacement);
+    std.mem.writeInt(u16, replacement[36..38], 0, .little);
+    var changed = Fixture{ .bytes = replacement };
+    const input = abi.Source{ .context = &changed, .bytes = fixture.len, .read = Fixture.read, .poll = Fixture.poll };
+    try std.testing.expectEqual(abi.Result.ready, engine.api.initialize(&input, &workspace));
+    try std.testing.expectEqual(abi.Result.ready, engine.api.prepare(&request, &label));
+    try std.testing.expect(label.missing > 0);
+    engine.api.shutdown();
+    changed.bytes = fixture;
+    try std.testing.expectEqual(abi.Result.ready, engine.api.initialize(&input, &workspace));
+    try std.testing.expectEqual(abi.Result.ready, engine.api.prepare(&request, &label));
+    try std.testing.expectEqualSlices(u8, std.mem.asBytes(&expected), std.mem.asBytes(&label));
+    engine.api.shutdown();
+    var stats: abi.Statistics = .{};
+    engine.api.statistics(&stats);
+    try std.testing.expectEqual(0, stats.heap_failures);
+}
+
+test "Kana remains Japanese across Han locale choices including halfwidth and combining ranges" {
+    var source: Fixture = .{};
+    const input = abi.Source{ .context = &source, .bytes = fixture.len, .read = Fixture.read, .poll = Fixture.poll };
+    try std.testing.expectEqual(abi.Result.ready, engine.api.initialize(&input, &workspace));
+    defer engine.api.shutdown();
+    var label: abi.Label = .{};
+    for (std.enums.values(abi.Locale)) |locale| {
+        const request = try abi.Request.init("かなカナ", .reading, 288, locale, true);
+        try std.testing.expectEqual(abi.Result.ready, engine.api.prepare(&request, &label));
+        try std.testing.expectEqual(0, label.missing);
+        try engine.testing.expectJapaneseFamily();
+        for ([_]u32{ 0x304b, 0x3099, 0x30ab, 0x31f0, 0xff76, 0xff9e, 0x1aff0, 0x1b000, 0x1b130 }) |cp| try engine.testing.expectRegionalFamily(cp, 0);
+        try engine.testing.expectRegionalFamily(0x65e5, switch (locale) {
+            .automatic, .japanese => 0,
+            .simplified_chinese => 1,
+            .traditional_chinese => 2,
+            .korean => 3,
+        });
+    }
 }

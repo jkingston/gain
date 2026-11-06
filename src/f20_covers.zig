@@ -74,6 +74,8 @@ pub const Loader = struct {
         x.Interrupts.restoreCpu(status);
         const job = self.work.next(cache, requests, revision) orelse return;
         const began = x.Timer.now();
+        @import("display_trace.zig").record(.cover_load, began, @truncate(job.request.id));
+        defer @import("display_trace.zig").record(.cover_loaded, x.Timer.now(), x.Timer.elapsed(began));
         self.load_attempts +|= 1;
         self.active_load = .{ .id = job.request.id, .artwork = Cache.identity(job.request.art) };
         defer {
