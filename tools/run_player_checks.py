@@ -21,7 +21,7 @@ def fixtures():
     text = (ROOT / "tests/codec_fixtures.zig").read_text()
     pattern = r'\.name\s*=\s*"([^"]+)".*?\.bytes\s*=\s*@embedFile\("([^"]+)"\).*?\.rate\s*=\s*(\d+).*?\.frames\s*=\s*(\d+)'
     result = []
-    for name, relative, rate, frames in re.findall(pattern, text):
+    for name, relative, rate, frames in re.findall(pattern, text, re.DOTALL):
         result.append(dict(name=name, path=ROOT / "tests" / relative, rate=int(rate), frames=int(frames)))
     if not result:
         raise RuntimeError("No qualification fixtures found")

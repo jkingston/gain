@@ -53,6 +53,13 @@ class TransportTests(unittest.TestCase):
         with patch.object(runner, "ROOT", self.root), patch("sys.argv", arguments), patch.object(runner.subprocess, "run", self.command), patch.object(runner.time, "sleep", side_effect=self.sleeps.append), contextlib.redirect_stdout(io.StringIO()):
             runner.main()
 
+    def test_reads_the_multiline_production_fixture_manifest(self):
+        cases = runner.fixtures()
+        self.assertGreater(len(cases), 1)
+        self.assertEqual(len({case["name"] for case in cases}), len(cases))
+        self.assertTrue(all(case["path"].is_file() for case in cases))
+        self.assertTrue(all(case["rate"] > 0 and case["frames"] > 0 for case in cases))
+
     def test_warm_rom_never_retrains_dram_or_writes_persistent_storage(self):
         self.run_campaign()
         self.assertFalse(any("--stage1" in call for call in self.calls))
