@@ -40,6 +40,9 @@ pub const Snapshot = extern struct {
     stream_deferred: u32 = 0,
     output_route: u32 = 0,
     jack_flags: u32 = 0,
+    output_soft_muted: u32 = 0,
+    output_hard_muted: u32 = 0,
+    output_attenuation: u32 = 0,
 };
 pub var snapshot: Snapshot = .{};
 pub fn charger(configuration: @import("axp192.zig").ChargerConfiguration) void {

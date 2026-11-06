@@ -39,9 +39,9 @@ class MetricsTests(unittest.TestCase):
         monitor = object.__new__(gain.Gain)
         count = gain.HEALTH_FIELDS.index("queue_cursor") + 1
         raw = struct.pack(f'<{count}I', 1, *([0] * (count - 1)))
-        with patch.object(gain.Gain, 'read', side_effect=[RuntimeError('stalled'), RuntimeError('stalled'), RuntimeError('stalled'), raw]) as read:
+        with patch.object(gain.Gain, 'read', side_effect=[RuntimeError('stalled'), RuntimeError('stalled'), RuntimeError('stalled'), RuntimeError('stalled'), raw]) as read:
             self.assertEqual(monitor.health()['version'], 1)
-            self.assertEqual(read.call_args_list[3].args, (0x73, count * 4))
+            self.assertEqual(read.call_args_list[4].args, (0x73, count * 4))
 
     def test_health_accepts_ui_snapshot_without_fabricating_theme_result(self):
         monitor = object.__new__(gain.Gain)
@@ -51,6 +51,16 @@ class MetricsTests(unittest.TestCase):
             result = monitor.health()
         self.assertEqual(result['ui_backlight_active'], 0)
         self.assertIsNone(result['theme_state'])
+
+    def test_health_accepts_pre_mute_snapshot_without_fabricating_mute_state(self):
+        monitor = object.__new__(gain.Gain)
+        count = gain.HEALTH_FIELDS.index("output_soft_muted")
+        raw = struct.pack(f'<{count}I', 1, *([0] * (count - 1)))
+        with patch.object(gain.Gain, 'read', side_effect=[RuntimeError('stalled'), raw]):
+            result = monitor.health()
+        self.assertEqual(result['jack_flags'], 0)
+        self.assertIsNone(result['output_soft_muted'])
+        self.assertIsNone(result['output_hard_muted'])
 
     def test_connect_closes_stale_handles_before_retrying(self):
         with (patch.object(gain.Gain, '__init__', return_value=None),

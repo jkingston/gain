@@ -35,7 +35,7 @@ pub fn control(rhport: u8, stage: u8, request: ?*const c.tusb_control_request_t)
             response.usb_state = @backingInt(usb.session().state);
             return c.tud_control_xfer(rhport, request, &response, @sizeOf(diag.Report));
         }
-        if (bytes[1] == 0x73 and (length == @sizeOf(@import("health.zig").Snapshot) or length == @offsetOf(@import("health.zig").Snapshot, "stream_tracks") or length == @offsetOf(@import("health.zig").Snapshot, "theme_state") or length == @offsetOf(@import("health.zig").Snapshot, "ui_locked")) and std.mem.readInt(u16, bytes[2..4], .little) == 0) {
+        if (bytes[1] == 0x73 and (length == @sizeOf(@import("health.zig").Snapshot) or length == @offsetOf(@import("health.zig").Snapshot, "output_soft_muted") or length == @offsetOf(@import("health.zig").Snapshot, "stream_tracks") or length == @offsetOf(@import("health.zig").Snapshot, "theme_state") or length == @offsetOf(@import("health.zig").Snapshot, "ui_locked")) and std.mem.readInt(u16, bytes[2..4], .little) == 0) {
             health = @import("health.zig").snapshot;
             return c.tud_control_xfer(rhport, request, &health, length);
         }

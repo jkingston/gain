@@ -227,7 +227,7 @@ fn Player(comptime Reader: type) type {
             };
             self.input = try Input.init(self.reader, self.length, self.workspace.input, self);
             self.reservoir = try pcm.Ring.init(self.workspace.pcm);
-            self.attenuation = @min(128, @max(16, self.config.attenuation));
+            self.attenuation = @import("volume_control.zig").clamp(self.config.attenuation);
             active = self;
             defer active = null;
             const masks = x.Interrupts.masks();
@@ -770,6 +770,10 @@ fn Player(comptime Reader: type) type {
                         self.fail(failure);
                         continue;
                     };
+                    const health = &@import("health.zig").snapshot;
+                    health.output_soft_muted = @intFromBool(if (engine.dac) |dac| dac.muted else true);
+                    health.output_hard_muted = @intFromBool(@import("f20_v27.zig").audio.output_mute.get());
+                    health.output_attenuation = engine.volume.attenuation;
                     if (self.config.routing) |routing| {
                         const actual: audio.Output = if (engine.route.stage == .idle) engine.route.current else .muted;
                         if (routing.poll(routing.context, actual)) |desired| engine.setOutput(desired);
@@ -854,7 +858,7 @@ fn Player(comptime Reader: type) type {
                             self.requested_seek = if (total == 0) target else @min(total - 1, target);
                             _ = self.requested_exit.cmpxchgStrong(0, @backingInt(media.PlaybackExit.seek), .acq_rel, .acquire);
                         },
-                        .set_attenuation => |value| self.requested_volume.store(@as(u32, @min(128, @max(16, value))) + 1, .release),
+                        .set_attenuation => |value| self.requested_volume.store(@as(u32, @import("volume_control.zig").clamp(value)) + 1, .release),
                         .stop, .next, .previous => {
                             const exit: media.PlaybackExit = switch (command) {
                                 .stop => .stopped,

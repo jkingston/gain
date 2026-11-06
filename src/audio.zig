@@ -4,6 +4,7 @@ const dac_lock = @import("dac_lock.zig");
 const es9018 = @import("es9018k2m.zig");
 const frontier = @import("pdma_frontier.zig");
 const output_route = @import("output_route.zig");
+const volume_control = @import("volume_control.zig");
 
 pub const Output = output_route.Output;
 
@@ -99,6 +100,7 @@ pub fn Engine(comptime Board: type) type {
         rate: ?Board.SampleRate = null,
         route: output_route.State = .{},
         running: bool = false,
+        volume: volume_control.State = .{},
         cursor: frontier.Cursor = .{},
         lock: dac_lock.State = .{},
 
@@ -122,6 +124,7 @@ pub fn Engine(comptime Board: type) type {
             self.safePins();
             self.running = false;
             self.route = .{};
+            self.volume = .{ .attenuation = volume_control.clamp(attenuation) };
             self.rate = rate;
             errdefer self.powerDown();
             x1000.Gpio.selectFunction1(.b, Board.i2s_port_b_function_1);
@@ -152,7 +155,7 @@ pub fn Engine(comptime Board: type) type {
             x1000.Timer.delayMicroseconds(10_000);
             Board.dac_power.set(true);
             x1000.Timer.delayMicroseconds(10_000);
-            try self.configureDac(attenuation);
+            try self.configureDac(self.volume.attenuation);
             // Prime lock with silence before any caller-owned PCM is consumed.
             // Waiting after DMA starts would silently discard the track opening.
             try self.acquireLock();
@@ -193,8 +196,8 @@ pub fn Engine(comptime Board: type) type {
             x1000.Aic.clearTransmitUnderrun();
             x1000.Aic.common_control.set(x1000.Aic.transmit_underrun_interrupt);
             self.running = true;
-            self.dac.?.setMute(false) catch |failure| return dacError(failure);
-            Board.output_mute.set(self.route.current == .muted);
+            self.dac.?.setMute(self.volume.muted()) catch |failure| return dacError(failure);
+            Board.output_mute.set(self.route.current == .muted or self.volume.muted());
         }
 
         pub fn poll(self: *Self) Error!Event {
@@ -348,7 +351,9 @@ pub fn Engine(comptime Board: type) type {
         pub fn setHardwareVolume(self: *Self, attenuation: u8) Error!void {
             errdefer Board.output_mute.set(true);
             const dac = if (self.dac) |*value| value else return error.DacCommunication;
-            dac.setVolume(attenuation, attenuation) catch |failure| return dacError(failure);
+            const may_unmute = self.running and !self.lock.pending and self.route.stage == .idle and self.route.current != .muted;
+            self.volume.change(dac, attenuation, may_unmute) catch |failure| return dacError(failure);
+            Board.output_mute.set(self.volume.muted() or !may_unmute);
         }
 
         pub fn dacStatus(self: *Self) Error!es9018.Status {
@@ -387,13 +392,13 @@ pub fn Engine(comptime Board: type) type {
                 return x1000.Timer.now();
             }
 
-            pub fn hardMute(_: *@This(), value: bool) void {
-                Board.output_mute.set(value);
+            pub fn hardMute(backend: *@This(), value: bool) void {
+                Board.output_mute.set(value or backend.engine.volume.muted());
             }
 
             pub fn softMute(backend: *@This(), value: bool) Error!void {
                 const dac = if (backend.engine.dac) |*device| device else return error.DacCommunication;
-                dac.setMute(value) catch |failure| return dacError(failure);
+                dac.setMute(value or backend.engine.volume.muted()) catch |failure| return dacError(failure);
             }
 
             pub fn amplifierShutdown(_: *@This(), value: bool) void {

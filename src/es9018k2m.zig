@@ -313,3 +313,18 @@ test "reconfiguration cannot retain a stale ready state after identity-read fail
     try std.testing.expect(!device.configured and device.muted);
     try std.testing.expect(bus.registers[7] & 3 == 3);
 }
+
+test "UI silence sets both verified DAC mute bits and volume can resume at one step" {
+    var bus = Fake.init();
+    var device = Device(*Fake).init(&bus, 0x48);
+    _ = try device.configure(.{});
+    var volume: @import("volume_control.zig").State = .{};
+    try volume.change(&device, @import("volume_control.zig").silent, true);
+    try std.testing.expectEqual(@as(u8, 3), bus.registers[7] & 3);
+    try std.testing.expect(device.muted);
+    try volume.change(&device, @import("volume_control.zig").silent - 1, true);
+    try std.testing.expectEqual(@as(u8, 0), bus.registers[7] & 3);
+    try std.testing.expect(!device.muted);
+    try std.testing.expectEqual(@as(u8, 127), bus.registers[15]);
+    try std.testing.expectEqual(@as(u8, 127), bus.registers[16]);
+}
