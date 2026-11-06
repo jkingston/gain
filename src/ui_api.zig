@@ -26,3 +26,11 @@ pub const preferences = @import("preferences.zig");
 pub const managed_file = @import("managed_file.zig");
 pub const runtime_theme = @import("runtime_theme.zig");
 pub const artwork = @import("artwork.zig");
+
+pub const listening_session = @import("listening_session.zig");
+pub const listening_power = @import("listening_power.zig");
+
+pub const listening_activity = @import("listening_activity.zig");
+pub const saved_playlists = @import("saved_playlists.zig");
+
+pub const Jacks = @import("axp192.zig").Jacks;

@@ -1,5 +1,6 @@
 //! Bounded borrowed projections. Track strings stay in one of the two catalogue
-//! arenas; neither arena is reclaimed until the playback executive has joined.
+//! arenas. A final ref-only snapshot and withdrawal of cached artwork requests
+//! release the prior arena without stopping a persistent playback executive.
 const std = @import("std");
 const core = @import("library.zig");
 
@@ -56,6 +57,13 @@ pub const Artist = struct {
     track_count: u16 = 0,
 };
 
+/// A verification pass re-reads metadata; it does not make unvisited music
+/// disappear. Borrow old membership until authoritative completion, but never
+/// project another card's tracks, playlists or artwork onto this source.
+pub fn previewBaseline(previous: *const core.Catalog, source: u64) core.Catalog {
+    return if (previous.source == source) previous.* else .{ .source = source };
+}
+
 /// Unchanged records add no information to a borrowed preview. Removals still
 /// require the final authoritative publication, which is never suppressed.
 pub fn previewNeeded(previous_source: u64, source: u64, visited: usize, stats: core.Stats) bool {
@@ -81,6 +89,8 @@ const Uninterrupted = struct {
     }
 };
 
+pub const max_playlists = 256;
+
 pub const Snapshot = struct {
     tracks: [max_tracks]*const core.Track = undefined,
     albums: [max_albums]Album = undefined,
@@ -92,6 +102,17 @@ pub const Snapshot = struct {
     id_order: [max_tracks]u16 = undefined,
     artist_track_order: [max_tracks]u16 = undefined,
     table: [2048]u16 = @splat(0),
+    playlists: []const core.Playlist = &.{},
+    playlist_order: [max_playlists]u16 = undefined,
+    favourite_song_order: [max_tracks]u16 = undefined,
+    favourite_album_order: [max_albums]u16 = undefined,
+    recent_album_order: [max_albums]u16 = undefined,
+    favourite_songs: std.StaticBitSet(max_tracks) = .empty,
+    favourite_albums: std.StaticBitSet(max_albums) = .empty,
+    favourite_song_count: usize = 0,
+    favourite_album_count: usize = 0,
+    recent_album_count: usize = 0,
+    activity_revision: u32 = 0,
     track_count: usize = 0,
     album_count: usize = 0,
     artist_count: usize = 0,
@@ -109,6 +130,23 @@ pub const Snapshot = struct {
         const Work = BuildWork(@TypeOf(observer));
         var work = Work{ .observer = observer };
         try work.check();
+        self.playlists = baseline.playlists;
+        if (self.playlists.len > max_playlists) return error.LibraryLimit;
+        self.favourite_song_count = 0;
+        self.favourite_album_count = 0;
+        self.recent_album_count = 0;
+        self.favourite_songs = .empty;
+        self.favourite_albums = .empty;
+        self.activity_revision = 0;
+        for (self.playlists, 0..) |_, i| self.playlist_order[i] = @intCast(i);
+        const PlaylistSort = struct {
+            values: []const core.Playlist,
+            fn less(ctx: @This(), a: u16, b: u16) bool {
+                if (!std.mem.eql(u8, ctx.values[a].name, ctx.values[b].name)) return core.lessText(ctx.values[a].name, ctx.values[b].name);
+                return core.lessText(ctx.values[a].path, ctx.values[b].path);
+            }
+        };
+        std.mem.sort(u16, self.playlist_order[0..self.playlists.len], PlaylistSort{ .values = self.playlists }, PlaylistSort.less);
         self.track_count = 0;
         self.album_count = 0;
         self.artist_count = 0;
@@ -245,6 +283,58 @@ pub const Snapshot = struct {
             self.group_ranks[artist] += 1;
         }
         try work.check();
+    }
+
+    pub fn playlistAt(self: *const Snapshot, i: usize) ?*const core.Playlist {
+        return if (i < self.playlists.len) &self.playlists[self.playlist_order[i]] else null;
+    }
+
+    pub fn playlistIndex(self: *const Snapshot, id: u64) ?usize {
+        for (0..self.playlists.len) |i| if (core.hash(self.playlistAt(i).?.path) == id) return i;
+        return null;
+    }
+
+    pub fn prepareActivity(self: *Snapshot, activity: ?*const @import("listening_activity.zig").State, observer: anytype) !void {
+        self.favourite_song_count = 0;
+        self.favourite_album_count = 0;
+        self.recent_album_count = 0;
+        self.favourite_songs = .empty;
+        self.favourite_albums = .empty;
+        self.activity_revision = 0;
+        const state = activity orelse return;
+        if (state.source != self.source) return;
+        self.activity_revision = state.revision;
+        for (self.title_order[0..self.track_count], 0..) |rank, i| {
+            if (i % 32 == 0 and observer.cancelled()) return error.Cancelled;
+            if (state.isFavourite(.song, self.tracks[rank].id)) {
+                self.favourite_songs.set(rank);
+                self.favourite_song_order[self.favourite_song_count] = rank;
+                self.favourite_song_count += 1;
+            }
+        }
+        for (self.albums[0..self.album_count], 0..) |album, rank| {
+            if (rank % 32 == 0 and observer.cancelled()) return error.Cancelled;
+            if (state.isFavourite(.album, album.id)) {
+                self.favourite_albums.set(rank);
+                self.favourite_album_order[self.favourite_album_count] = @intCast(rank);
+                self.favourite_album_count += 1;
+            }
+            if (state.firstSeen(album.id)) |sequence| if (sequence != 0) {
+                self.recent_album_order[self.recent_album_count] = @intCast(rank);
+                self.recent_album_count += 1;
+            };
+        }
+        const RecentSort = struct {
+            view: *const Snapshot,
+            activity: *const @import("listening_activity.zig").State,
+            fn less(ctx: @This(), a: u16, b: u16) bool {
+                const left = ctx.activity.firstSeen(ctx.view.albums[a].id).?;
+                const right = ctx.activity.firstSeen(ctx.view.albums[b].id).?;
+                return if (left != right) left > right else a < b;
+            }
+        };
+        std.mem.sort(u16, self.recent_album_order[0..self.recent_album_count], RecentSort{ .view = self, .activity = state }, RecentSort.less);
+        if (observer.cancelled()) return error.Cancelled;
     }
 
     fn albumLess(_: void, a: Album, b: Album) bool {
@@ -396,6 +486,7 @@ fn BuildWork(comptime Observer: type) type {
 pub const Pair = struct {
     slots: [2]Snapshot = undefined,
     published: std.atomic.Value(u32) = .init(0),
+    activity: ?*const @import("listening_activity.zig").State = null,
 
     pub fn publish(self: *Pair, baseline: *const core.Catalog, visited: []const core.Track, source: u64, complete: bool) !void {
         self.commit(try self.prepare(baseline, visited, source, complete));
@@ -420,6 +511,18 @@ pub const Pair = struct {
         const revision = self.published.load(.acquire) +% 1;
         const next: u1 = @truncate(revision);
         try self.slots[next].buildCooperative(baseline, visited, source, complete, revision, observer);
+        try self.slots[next].prepareActivity(self.activity, observer);
+        return revision;
+    }
+
+    /// Refresh only prepared discovery columns after a favourite change. The
+    /// active view remains immutable while the storage owner builds its peer.
+    pub fn prepareActivity(self: *Pair, observer: anytype) !u32 {
+        const revision = self.published.load(.acquire) +% 1;
+        const next: u1 = @truncate(revision);
+        self.slots[next] = self.current().*;
+        self.slots[next].revision = revision;
+        try self.slots[next].prepareActivity(self.activity, observer);
         return revision;
     }
 
@@ -618,7 +721,7 @@ test "authoritative publication survives retiring the old arena with changed art
     const revision = try pair.prepareCatalogueCooperative(&next.value, 42, Observer{ .pair = pair, .previous = previous });
     try std.testing.expect(pair.current() == previous);
     pair.commit(revision);
-    // Model the fixed native arena being immediately reused after the join.
+    // Model the fixed native arena being reused after authoritative publication.
     // Any accidentally borrowed old text now reads poison rather than valid art.
     old.deinit();
     old_live = false;
@@ -744,4 +847,198 @@ test "ID lookup survives independent display orders and authoritative removal" {
     try pair.publish(&.{}, tracks[1..], 42, true);
     try std.testing.expectEqual(null, pair.current().trackById(91));
     try std.testing.expectEqualStrings("B/1", pair.current().trackById(3).?.path);
+}
+
+test "verification previews retain unvisited queue occurrences until final removals and reject foreign membership" {
+    const old = [_]core.Track{
+        .{ .id = 1, .path = "A/1.flac", .stamp = .{}, .meta = .{ .title = "Old A", .album = "A" } },
+        .{ .id = 2, .path = "B/1.flac", .stamp = .{}, .meta = .{ .title = "B", .album = "B" } },
+        .{ .id = 3, .path = "C/1.flac", .stamp = .{}, .meta = .{ .title = "C", .album = "C" } },
+    };
+    const visited = [_]core.Track{
+        .{ .id = 1, .path = "A/1.flac", .stamp = .{}, .meta = .{ .title = "Verified A", .album = "A" } },
+        .{ .id = 4, .path = "D/1.flac", .stamp = .{}, .meta = .{ .title = "New D", .album = "D" } },
+    };
+    const catalog = core.Catalog{ .source = 42, .tracks = &old, .playlists = &.{.{ .name = "Old mix", .path = "Old.m3u8", .items = &.{} }} };
+    const pair = try std.testing.allocator.create(Pair);
+    defer std.testing.allocator.destroy(pair);
+    pair.* = .{};
+    const baseline = previewBaseline(&catalog, 42);
+    try pair.publish(&baseline, &visited, 42, false);
+    try std.testing.expectEqualStrings("Verified A", pair.current().trackById(1).?.meta.title);
+    try std.testing.expectEqual(4, pair.current().track_count);
+    try std.testing.expectEqual(1, pair.current().playlists.len);
+    var bytes: [8 * 16]u8 = undefined;
+    var queue = @import("play_queue.zig").Queue.init(&bytes);
+    try queue.insert(&.{ 1, 2, 3 }, false);
+    const Resolver = struct {
+        view: *const Snapshot,
+        pub fn contains(resolver: @This(), id: u64) bool {
+            return resolver.view.trackById(id) != null;
+        }
+    };
+    try std.testing.expectEqual(2, queue.adjacent(1, Resolver{ .view = pair.current() }).?);
+    try std.testing.expectEqual(3, queue.adjacent(1, Resolver{ .view = pair.current() }).?);
+    try std.testing.expectEqual(3, queue.count); // A scan never extends the queue.
+    try pair.publish(&baseline, &visited, 42, true);
+    try std.testing.expect(queue.select(1));
+    try std.testing.expectEqual(null, queue.adjacent(1, Resolver{ .view = pair.current() }));
+    const foreign = previewBaseline(&catalog, 43);
+    try std.testing.expectEqual(0, foreign.tracks.len);
+    try std.testing.expectEqual(0, foreign.playlists.len);
+    try std.testing.expectEqual(0, foreign.albums.len);
+    try pair.publish(&foreign, &visited, 43, false);
+    try std.testing.expectEqual(2, pair.current().track_count);
+    try std.testing.expectEqual(null, pair.current().trackById(2));
+}
+
+test "two complete verification scans retire alternating arenas during one uninterrupted PCM stream" {
+    const pcm = @import("pcm_reservoir.zig");
+    const store = @import("catalog_store.zig");
+    const Harness = struct {
+        pair: *Pair,
+        ring: pcm.Ring,
+        produced: i32 = 64,
+        played: i32 = 0,
+        checkpoints: usize = 0,
+        card: []u8,
+        position: usize = 0,
+        writes: usize = 0,
+
+        pub fn cancelled(self: *@This()) bool {
+            var frames: [16]pcm.StereoFrame = undefined;
+            for (&frames) |*frame| {
+                const audible = self.ring.pop() orelse @panic("indexing starved PCM");
+                std.debug.assert(audible.left == self.played and audible.right == -self.played);
+                self.played += 1;
+                frame.* = .{ .left = self.produced, .right = -self.produced };
+                self.produced += 1;
+            }
+            std.debug.assert(self.ring.write(&frames) == frames.len);
+            return false;
+        }
+
+        pub fn progress(self: *@This(), _: []const u8, _: core.Stats, _: u32) void {
+            _ = self.cancelled();
+        }
+
+        pub fn checkpoint(self: *@This(), previous: *const core.Catalog, tracks: []const core.Track, _: core.Stats) !void {
+            const baseline = previewBaseline(previous, 42);
+            const revision = try self.pair.prepareCooperative(&baseline, tracks, 42, false, self);
+            self.pair.commit(revision);
+            self.checkpoints += 1;
+        }
+
+        pub fn seekTo(self: *@This(), offset: u32) !void {
+            if (offset > self.card.len) return error.OutOfBounds;
+            self.position = offset;
+        }
+
+        pub fn write(self: *@This(), bytes: []const u8) !void {
+            if (bytes.len > self.card.len - self.position) return error.OutOfBounds;
+            @memcpy(self.card[self.position..][0..bytes.len], bytes);
+            self.position += bytes.len;
+            self.writes += 1;
+        }
+
+        pub fn sync(_: *@This()) !void {}
+
+        fn poll(context: *anyopaque) bool {
+            return @as(*@This(), @ptrCast(@alignCast(context))).cancelled();
+        }
+    };
+    const Backend = struct {
+        entries: []const core.Entry,
+        title: []const u8 = "Original",
+        art: []const u8 = "original artwork",
+
+        pub fn enumerate(self: *@This(), a: std.mem.Allocator) !core.Enumeration {
+            return .{ .source = 42, .entries = try core.clone(a, self.entries) };
+        }
+
+        pub fn metadata(self: *@This(), a: std.mem.Allocator, _: core.Entry) !core.Metadata {
+            return .{ .title = try core.text(a, self.title), .album = "Album", .album_artist = "Artist" };
+        }
+
+        pub fn artwork(self: *@This(), a: std.mem.Allocator, _: core.Album, _: []const core.Track, _: []const core.Entry, _: ?core.Artwork, _: core.Mode) !core.Artwork {
+            return .{ .key = try core.text(a, self.art), .cache_path = try core.text(a, "atlas:1") };
+        }
+
+        pub fn playlist(_: *@This(), _: std.mem.Allocator, _: []const u8, _: []const core.Track) !core.Playlist {
+            return error.NoPlaylist;
+        }
+    };
+    const a = std.testing.allocator;
+    const pair = try a.create(Pair);
+    defer a.destroy(pair);
+    pair.* = .{};
+    const storage = try a.alloc(u8, 2 * 256 * 1024);
+    defer a.free(storage);
+    const card = try a.alloc(u8, 4096 + 2 * 64 * 1024);
+    defer a.free(card);
+    @memset(card, 0);
+    var allocators = [_]std.heap.FixedBufferAllocator{
+        .init(storage[0 .. 256 * 1024]),
+        .init(storage[256 * 1024 ..]),
+    };
+    var frames: [128]pcm.StereoFrame = undefined;
+    for (frames[0..64], 0..) |*frame, i| frame.* = .{ .left = @intCast(i), .right = -@as(i32, @intCast(i)) };
+    var harness = Harness{ .pair = pair, .ring = try pcm.Ring.initFilled(&frames, 64), .card = card };
+    var names: [65][32]u8 = undefined;
+    var entries: [65]core.Entry = undefined;
+    for (&names, &entries, 0..) |*name, *entry, i| entry.* = .{
+        .path = try std.fmt.bufPrint(name, "Music/Album/{d:0>2}.flac", .{i}),
+        .kind = .audio,
+        .stamp = .{ .size = 100, .modified = 1 },
+    };
+    var backend = Backend{ .entries = entries[0..64] };
+    var current = try core.scanWithScratch(allocators[0].allocator(), a, &backend, &.{}, .verify, &harness);
+    defer current.deinit();
+    try pair.publishCatalogue(&current.value, 42);
+    var selected_bytes: [8192]u8 = undefined;
+    var selected = @import("track_selection.zig").Store.init(&selected_bytes);
+    _ = try selected.queue(&current.value.tracks[0]);
+    const now_playing = selected.begin().?;
+    const playing_id = now_playing.id;
+    var current_slot: usize = 0;
+    var committed: ?store.Header = null;
+    var buffer: [4096]u8 = undefined;
+    var writes_before: usize = 0;
+    var played_before = harness.played;
+    const Service = struct { context: *anyopaque, poll: *const fn (*anyopaque) bool };
+    const service: ?Service = .{ .context = &harness, .poll = Harness.poll };
+    for (0..2) |pass| {
+        backend.title = if (pass == 0) "Retag one" else "Retag two";
+        backend.art = if (pass == 0) "new artwork one" else "new artwork two";
+        backend.entries = entries[0 .. 65 - pass];
+        const target = current_slot ^ 1;
+        allocators[target].reset();
+        var next = try core.scanWithScratch(allocators[target].allocator(), a, &backend, &current.value, .verify, &harness);
+        errdefer next.deinit();
+        const revision = try pair.prepareCatalogueCooperative(&next.value, 42, &harness);
+        pair.commit(revision);
+        var cancelled = false;
+        var writer = @import("owned_io.zig").wrap(&harness, service, &cancelled);
+        committed = try store.save(&writer, &next.value, committed, 64 * 1024, &buffer);
+        current.deinit();
+        @memset(storage[current_slot * 256 * 1024 ..][0 .. 256 * 1024], 0xa5);
+        current = next;
+        current_slot = target;
+        try std.testing.expectEqual(pass + 2, current.value.generation);
+        try std.testing.expectEqual(65 - pass, pair.current().track_count);
+        try std.testing.expectEqualStrings(backend.title, pair.current().trackById(playing_id).?.meta.title);
+        try std.testing.expectEqualStrings(backend.art, pair.current().albums[0].art.key);
+        try std.testing.expectEqualStrings("Original", now_playing.meta.title);
+        const base = 4096 + @as(usize, committed.?.bank) * 64 * 1024;
+        const header = store.parseHeader(card[base..][0..512], committed.?.bank, 64 * 1024).?;
+        try std.testing.expectEqual(current.value.generation, header.generation);
+        try std.testing.expectEqual(header.checksum, std.hash.Crc32.hash(card[base + 512 ..][0..header.length]));
+        try std.testing.expect(harness.writes > writes_before and harness.played > played_before);
+        try std.testing.expectEqual(64, harness.ring.available());
+        writes_before = harness.writes;
+        played_before = harness.played;
+    }
+    try std.testing.expect(harness.checkpoints >= 3);
+    try std.testing.expect(harness.ring.read_sequence.load(.acquire) > 0);
+    try std.testing.expectEqual(harness.produced - 64, harness.played);
 }

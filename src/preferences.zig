@@ -4,7 +4,19 @@ const std = @import("std");
 const chrome = @import("music_chrome.zig");
 const managed = @import("managed_file.zig");
 
-pub const Theme = enum(u8) { classic, archive, studio, sleeve, sleeve_classic, custom };
+// Preserve old journal tags, but migrate retired visual experiments to Gain.
+pub const Theme = enum(u8) {
+    classic,
+    archive,
+    studio,
+    sleeve,
+    sleeve_classic,
+    custom,
+
+    pub fn canonical(self: Theme) Theme {
+        return if (self == .custom) .custom else .classic;
+    }
+};
 pub const Timeout = enum(u8) {
     seconds15,
     seconds30,
@@ -27,6 +39,7 @@ pub const Options = struct {
     attenuation: u8 = 64,
     replay_gain: @import("replay_gain.zig").Mode = .off,
     timeout: Timeout = .seconds30,
+    paused_idle: @import("listening_power.zig").Idle = .minutes5,
 };
 
 pub const Record = struct { generation: u32, options: Options };
@@ -43,6 +56,7 @@ pub fn encode(record: Record, bytes: *[sector_bytes]u8) void {
     bytes[18] = record.options.attenuation;
     bytes[19] = @intCast(@backingInt(record.options.replay_gain));
     bytes[20] = @backingInt(record.options.timeout);
+    bytes[21] = @backingInt(record.options.paused_idle);
     std.mem.writeInt(u32, bytes[508..512], std.hash.Crc32.hash(bytes[0..508]), .little);
 }
 
@@ -52,11 +66,12 @@ pub fn decode(bytes: *const [sector_bytes]u8) ?Record {
     return .{
         .generation = std.mem.readInt(u32, bytes[8..12], .little),
         .options = .{
-            .theme = std.enums.fromInt(Theme, bytes[16]) orelse return null,
+            .theme = (std.enums.fromInt(Theme, bytes[16]) orelse return null).canonical(),
             .appearance = std.enums.fromInt(chrome.Appearance, bytes[17]) orelse return null,
             .attenuation = bytes[18],
             .replay_gain = std.enums.fromInt(@import("replay_gain.zig").Mode, bytes[19]) orelse return null,
             .timeout = std.enums.fromInt(Timeout, bytes[20]) orelse return null,
+            .paused_idle = std.enums.fromInt(@import("listening_power.zig").Idle, bytes[21]) orelse return null,
         },
     };
 }
@@ -127,7 +142,7 @@ test "every interrupted sector write retains the previous valid settings" {
     var block: [512]u8 = undefined;
     var journal = Journal{};
     try journal.save(&baseline, .{}, &block);
-    const replacement = Options{ .appearance = .dark, .attenuation = 79, .theme = .sleeve_classic, .timeout = .seconds15 };
+    const replacement = Options{ .appearance = .dark, .attenuation = 79, .theme = .classic, .timeout = .seconds15 };
     for (0..512) |cut| {
         var card = baseline;
         card.limit = cut;
@@ -154,7 +169,7 @@ test "settings survive generation wrap and reject unknown enums and unsafe volum
     try journal.save(&card, replacement, &block);
     var loaded = Journal{};
     try std.testing.expectEqual(replacement, try loaded.load(&card, &block));
-    for ([_]usize{ 16, 17, 18, 19, 20 }) |field| {
+    for ([_]usize{ 16, 17, 18, 19, 20, 21 }) |field| {
         encode(.{ .generation = 1, .options = .{} }, &block);
         block[field] = 255;
         std.mem.writeInt(u32, block[508..512], std.hash.Crc32.hash(block[0..508]), .little);
@@ -179,4 +194,14 @@ test "failed flush does not advance the in-memory commit and one corrupt bank fa
     card.bytes[managed.prefix_bytes + 16] ^= 1;
     try std.testing.expectEqual(Options{}, try reloaded.load(&card, &block));
     try std.testing.expect(reloaded.saved == null);
+}
+
+test "retired theme tags migrate without reinterpreting custom or corrupt settings" {
+    var bytes: [512]u8 = undefined;
+    for ([_]Theme{ .classic, .archive, .studio, .sleeve, .sleeve_classic }) |legacy| {
+        encode(.{ .generation = 1, .options = .{ .theme = legacy } }, &bytes);
+        try std.testing.expectEqual(Theme.classic, decode(&bytes).?.options.theme);
+    }
+    encode(.{ .generation = 1, .options = .{ .theme = .custom } }, &bytes);
+    try std.testing.expectEqual(Theme.custom, decode(&bytes).?.options.theme);
 }

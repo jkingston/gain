@@ -16,9 +16,17 @@ import zlib
 from run_usb_checks import Monitor, mounted_volume
 
 FIELDS = '''magic usb_state version stage failure boot_ticks index_ticks index_load_ticks index_save_ticks index_tracks index_albums index_parsed index_reused index_errors index_bytes index_heap index_metadata_ticks index_artwork_ticks index_directory_ticks art_prepared art_reused log_pages log_failures log_dropped codec_ticks idle_ticks played_frames playback_runs playback_frames underruns startup_ticks fill_ticks ui_ticks ui_gap_ticks irq_ticks battery_mv charge_ua discharge_ua usb_mv usb_ua power_valid coulomb_charge coulomb_discharge adc_rate coulomb_running charge_uah discharge_uah battery_energy_uwh sectors index_runs index_read_sectors index_written_sectors index_io_ticks index_io_failures index_stack_used scan_active scan_visited scan_total scan_publications scan_view_tracks scan_view_albums scan_cancelled scan_scratch_peak scan_worst_publication scan_played_start scan_played_end scan_complete live_played_frames live_underruns live_ui_gap live_fill live_storage_stack scan_deferred_artwork selected_album_low selected_album_high selected_album_rank scan_failure control_ticks ui_task_ticks storage_task_ticks scan_maps_peak build_id_low build_id_high ui_drawn ui_draw_max ui_animation_gap_max ui_animation_slow ui_animation_frames live_pcm_frames live_input_bytes live_decode_frames ui_trace_next raw_timer ui_clock_wraps power_samples_dropped ui_stack_used cover_header_max cover_scene_max cover_caption_max scan_last_command scan_last_status scan_last_flags view_builds view_build_max playback_handoff_max cover_loads cover_read_calls cover_read_bytes cover_cancelled cover_load_max cover_prepare_max cover_evictions'''.split()
-HEALTH_FIELDS = """version charger_valid charge_control charge_timing usb_path adc_enable adc_rate target_mv charge_ma usb_limit_ma temperature_adc text_initialized text_loaded text_result text_prepared text_worst_ticks text_bytes_low text_bytes_high text_heap_peak text_heap_failures text_page_reads text_page_hits text_labels text_glyphs playback_phase queue_count queue_cursor ui_locked ui_appearance ui_attenuation ui_backlight_active theme_state theme_source_bytes theme_error_crc""".split()
+HEALTH_FIELDS = """version charger_valid charge_control charge_timing usb_path adc_enable adc_rate target_mv charge_ma usb_limit_ma temperature_adc text_initialized text_loaded text_result text_prepared text_worst_ticks text_bytes_low text_bytes_high text_heap_peak text_heap_failures text_page_reads text_page_hits text_labels text_glyphs playback_phase queue_count queue_cursor ui_locked ui_appearance ui_attenuation ui_backlight_active theme_state theme_source_bytes theme_error_crc stream_tracks stream_handoffs stream_deferred output_route jack_flags""".split()
 COMMANDS = dict(quick=0x61, verify=0x62, play=0x63, stop=0x64, reconnect=0x65, rom=0x66, flush=0x67, rebuild=0x68, input=0x69, input_sample=0x6a, toggle_lock=0x6b)
-ALLOCATIONS = {'catalog.bin': (1, 4096 + 2 * 6 * 1024 * 1024), 'artwork.bin': (2, 4096 + 16 * 1024 * 1024), 'diagnostics.bin': (3, 4096 + 8 * 1024 * 1024), 'settings.bin': (4, 8192)}
+ALLOCATIONS = {
+    'catalog.bin': (1, 4096 + 2 * 6 * 1024 * 1024),
+    'artwork.bin': (2, 4096 + 16 * 1024 * 1024),
+    'diagnostics.bin': (3, 4096 + 8 * 1024 * 1024),
+    'settings.bin': (4, 8192),
+    'session.bin': (5, 512 * 1024),
+    'activity.bin': (6, 4096 + 2 * 128 * 1024),
+    'playlists.bin': (7, 4096 + 8 * 2 * 80 * 1024),
+}
 KINDS = {1: 'boot', 2: 'playback', 3: 'library', 4: 'power', 5: 'usb', 6: 'fault', 7: 'health', 8: 'task_times', 9: 'library_phases', 10: 'library_io', 11: 'library_changes'}
 
 LABELS = {
@@ -139,18 +147,18 @@ class Gain(Monitor):
         return result
 
     def health(self):
-        try:
-            raw = self.read(0x73, len(HEALTH_FIELDS) * 4)
-        except RuntimeError:
-            # Older firmware requires one of its complete exact-length prefixes.
+        # Each extension has an exact complete prefix. Older devices may stall
+        # a longer request; retry only known ABI boundaries, never arbitrary cuts.
+        sizes = (len(HEALTH_FIELDS), HEALTH_FIELDS.index("stream_tracks"),
+                 HEALTH_FIELDS.index("theme_state"), HEALTH_FIELDS.index("queue_cursor") + 1)
+        for fields in sizes:
             try:
-                raw = self.read(0x73, HEALTH_FIELDS.index("theme_state") * 4)
+                raw = self.read(0x73, fields * 4)
+                break
             except RuntimeError:
-                raw = self.read(0x73, (HEALTH_FIELDS.index("queue_cursor") + 1) * 4)
-        # Accept the original complete snapshot or its complete UI extension.
-        # Truncated extensions are malformed rather than partially trustworthy.
-        original_fields = HEALTH_FIELDS.index("queue_cursor") + 1
-        if len(raw) not in (original_fields * 4, HEALTH_FIELDS.index("theme_state") * 4, len(HEALTH_FIELDS) * 4):
+                if fields == sizes[-1]:
+                    raise
+        if len(raw) not in tuple(fields * 4 for fields in sizes):
             raise RuntimeError(f"Unexpected health snapshot size: {len(raw)}")
         count = len(raw) // 4
         result = dict.fromkeys(HEALTH_FIELDS)
@@ -289,6 +297,80 @@ def catalogue(path):
     return dict(generation=generation, source=source, tracks=tracks, albums=albums)
 
 
+
+def saved_playlists(path, source):
+    """Read source-bound saved queues, including duplicate occurrences."""
+    data = path.read_bytes()
+    allocation = ALLOCATIONS['playlists.bin']
+    if len(data) != allocation[1] or not valid_prefix(data[:512], *allocation):
+        raise ValueError('Unknown saved-playlist allocation')
+    result = []
+    bank_size = 80 * 1024
+    for slot in range(8):
+        selected = None
+        for bank in range(2):
+            at = 4096 + (slot * 2 + bank) * bank_size
+            header = data[at:at + 512]
+            if header[:4] != b'GPLS' or zlib.crc32(header[:508]) != struct.unpack_from('<I', header, 508)[0]:
+                continue
+            version, generation, length, checksum = struct.unpack_from('<IIII', header, 4)
+            if version != 1 or struct.unpack_from('<Q', header, 24)[0] != source or not 64 <= length <= 64 + 8192 * 8:
+                continue
+            payload = data[at + 512:at + 512 + length]
+            if zlib.crc32(payload) != checksum or payload[:4] != b'GPS1' or struct.unpack_from('<Q', payload, 8)[0] != source:
+                continue
+            count, = struct.unpack_from('<H', payload, 4)
+            if count > 8192 or length != 64 + count * 8:
+                continue
+            ids = list(struct.unpack_from(f'<{count}Q', payload, 64))
+            if any(identity == 0 for identity in ids):
+                continue
+            if selected is None or 0 < (generation - selected['generation']) & 0xffffffff < 0x80000000:
+                selected = dict(slot=slot, generation=generation, ids=ids)
+        if selected is not None and selected['ids']:
+            result.append(selected)
+    return result
+
+
+def export_playlists(root, output):
+    """Host-only ordinary M3U8 export; the firmware remains overwrite-only."""
+    root = root.resolve(strict=True)
+    output = output.resolve()
+    if output.exists() and (output.is_symlink() or not output.is_dir()):
+        raise ValueError('Export destination must be a directory')
+    catalog = catalogue(root / '.gain/catalog.bin')
+    saved = saved_playlists(root / '.gain/playlists.bin', catalog['source'])
+    tracks = {track['id']: track['path'] for track in catalog['tracks']}
+    jobs = []
+    for playlist in saved:
+        lines = ['#EXTM3U']
+        missing = 0
+        for identity in playlist['ids']:
+            path = tracks.get(identity)
+            if path is None:
+                missing += 1
+                continue
+            components = path.split('/')
+            if not path or path.startswith('/') or any(part in ('', '.', '..') for part in components) or any(value in path for value in ('\\', '\r', '\n', '\x00')):
+                raise ValueError('Invalid exported music path')
+            relative = os.path.relpath(root.joinpath(*components), output).replace(os.sep, '/')
+            if relative.startswith('#'):
+                relative = './' + relative
+            lines.append(relative)
+        target = output / f"Gain Saved {playlist['slot'] + 1}.m3u8"
+        if target.exists() or target.is_symlink():
+            raise FileExistsError(f'Refusing to replace existing playlist: {target}')
+        jobs.append((target, '\n'.join(lines) + '\n', missing, len(lines) - 1))
+    output.mkdir(parents=True, exist_ok=True)
+    result = []
+    for target, text, missing, count in jobs:
+        with target.open('x', encoding='utf-8', newline='\n') as stream:
+            stream.write(text)
+            stream.flush()
+            os.fsync(stream.fileno())
+        result.append(dict(path=str(target), tracks=count, missing=missing))
+    return result
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest='action', required=True)
@@ -296,6 +378,9 @@ def main():
     commands.add_parser('health')
     catalog = commands.add_parser('catalogue')
     catalog.add_argument('path', type=Path)
+    export = commands.add_parser('export-playlists')
+    export.add_argument('root', type=Path)
+    export.add_argument('output', type=Path)
     provision_parser = commands.add_parser('provision')
     provision_parser.add_argument('--sectors', type=int, required=True)
     logs = commands.add_parser('logs')
@@ -307,6 +392,8 @@ def main():
     if args.action == 'provision':
         disk, mount = mounted_volume(args.sectors)
         result = dict(disk=disk, mount=str(mount), allocations=provision(mount))
+    elif args.action == 'export-playlists':
+        result = export_playlists(args.root, args.output)
     elif args.action == 'catalogue':
         result = catalogue(args.path)
     elif args.action == 'logs':

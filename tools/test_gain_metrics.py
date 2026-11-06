@@ -39,9 +39,9 @@ class MetricsTests(unittest.TestCase):
         monitor = object.__new__(gain.Gain)
         count = gain.HEALTH_FIELDS.index("queue_cursor") + 1
         raw = struct.pack(f'<{count}I', 1, *([0] * (count - 1)))
-        with patch.object(gain.Gain, 'read', side_effect=[RuntimeError('stalled'), RuntimeError('stalled'), raw]) as read:
+        with patch.object(gain.Gain, 'read', side_effect=[RuntimeError('stalled'), RuntimeError('stalled'), RuntimeError('stalled'), raw]) as read:
             self.assertEqual(monitor.health()['version'], 1)
-            self.assertEqual(read.call_args_list[2].args, (0x73, count * 4))
+            self.assertEqual(read.call_args_list[3].args, (0x73, count * 4))
 
     def test_health_accepts_ui_snapshot_without_fabricating_theme_result(self):
         monitor = object.__new__(gain.Gain)
@@ -160,6 +160,54 @@ class MetricsTests(unittest.TestCase):
                 with patch.object(gain.Gain, 'read', return_value=data):
                     with self.assertRaises(RuntimeError):
                         monitor.status()
+
+
+
+
+class SavedPlaylistTests(unittest.TestCase):
+    def make_playlists(self, path, source=7):
+        kind, size = gain.ALLOCATIONS['playlists.bin']
+        data = bytearray(size)
+        data[:512] = gain.prefix(kind, size)
+        for slot, identities in ((0, [11, 11, 99]), (7, [22])):
+            payload = bytearray(64 + len(identities) * 8)
+            struct.pack_into('<4sH', payload, 0, b'GPS1', len(identities))
+            struct.pack_into('<Q', payload, 8, source)
+            struct.pack_into(f'<{len(identities)}Q', payload, 64, *identities)
+            header = bytearray(512)
+            struct.pack_into('<4sIIII', header, 0, b'GPLS', 1, 1, len(payload), zlib.crc32(payload))
+            struct.pack_into('<Q', header, 24, source)
+            struct.pack_into('<I', header, 508, zlib.crc32(header[:508]))
+            offset = 4096 + slot * 2 * 80 * 1024
+            data[offset:offset + 512] = header
+            data[offset + 512:offset + 512 + len(payload)] = payload
+        path.write_bytes(data)
+
+    def test_export_resolves_saved_ids_retains_duplicates_and_refuses_overwrite(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / '.gain').mkdir()
+            path = root / '.gain/playlists.bin'
+            self.make_playlists(path)
+            catalog = dict(source=7, tracks=[dict(id=11, path='Music/世界/song.flac'), dict(id=22, path='Music/second.flac')])
+            with patch.object(gain, 'catalogue', return_value=catalog):
+                result = gain.export_playlists(root, root / 'Playlists')
+                self.assertEqual(result[0]['missing'], 1)
+                self.assertEqual((root / 'Playlists/Gain Saved 1.m3u8').read_text(), '#EXTM3U\n../Music/世界/song.flac\n../Music/世界/song.flac\n')
+                with self.assertRaises(FileExistsError):
+                    gain.export_playlists(root, root / 'Playlists')
+            self.assertEqual(gain.saved_playlists(path, 8), [])
+
+    def test_export_rejects_injected_paths_before_creating_destination(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / '.gain').mkdir()
+            self.make_playlists(root / '.gain/playlists.bin')
+            catalog = dict(source=7, tracks=[dict(id=11, path='Music/bad\nname.flac')])
+            with patch.object(gain, 'catalogue', return_value=catalog):
+                with self.assertRaises(ValueError):
+                    gain.export_playlists(root, root / 'Playlists')
+            self.assertFalse((root / 'Playlists').exists())
 
 
 if __name__ == '__main__':
