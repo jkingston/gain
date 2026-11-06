@@ -38,7 +38,8 @@ pub const Context = struct {
     sample_rate: u32,
     volume_mix: f32,
     volume_value: f32,
-    playing: bool,
+    playback_phase: @import("f20_media.zig").PlaybackPhase = .preparing,
+    summary_selected: bool = false,
     jump: usize,
 };
 
@@ -80,7 +81,11 @@ fn text(plan: *const theme.Plan, op: *const theme.Op, context: Context, buffer: 
         .track_artist => if (track) |t| t.meta.artist else "",
         .track_album => if (track) |t| t.meta.album else "",
         .codec => if (track) |t| t.meta.codec else "",
-        .transport_state => if (track == null) "" else if (context.playing) "Playing" else "Stopped",
+        .transport_state => if (track == null) "" else switch (context.playback_phase) {
+            .preparing => "Preparing",
+            .playing => "Playing",
+            .paused => "Paused",
+        },
         .library_phase => context.phase,
         .empty_message => context.empty_message,
         .jump_title => context.jump_title,
@@ -90,6 +95,21 @@ fn text(plan: *const theme.Plan, op: *const theme.Op, context: Context, buffer: 
     };
     if (op.literal_length == 0) return value;
     return std.fmt.bufPrint(buffer, "{s}{s}", .{ plan.literal(op), value }) catch value;
+}
+
+fn nowPlaying(c: C, op: *const theme.Op, context: Context, muted: u16) void {
+    const track = context.track orelse return;
+    var clipped = c;
+    clipped.surface.clip = @import("ui.zig").intersection(c.surface.clip, .{ .x = op.rect.x, .y = op.rect.y, .width = op.rect.w, .height = op.rect.h });
+    const selected = context.page == .home and context.summary_selected;
+    if (selected) clipped.rounded(op.rect.x, op.rect.y, op.rect.w, op.rect.h, op.radius, op.focus);
+    const color = if (selected) op.focus_text else op.color;
+    const inset: u16 = 8;
+    const height: u16 = if (op.lines == 2) 20 else op.rect.h;
+    const top: i16 = if (op.lines == 2) 2 else @intCast(@divTrunc(@as(i32, op.rect.h) - draw.fonts.glyph(op.role, 'H').ink_height, 2));
+    label(clipped, .{ .x = op.rect.x + inset, .y = op.rect.y + top, .w = op.rect.w - inset * 2 - 14, .h = height }, track.meta.title, op.role, color, .left);
+    if (op.lines == 2) label(clipped, .{ .x = op.rect.x + inset, .y = op.rect.y + @as(i16, @intCast(op.rect.h)) - 13, .w = op.rect.w - inset * 2 - 14, .h = 12 }, track.meta.artist, .caption, if (selected) color else muted, .left);
+    clipped.chevron(@as(i32, op.rect.x) + op.rect.w - 18, @as(i32, op.rect.y) + @divTrunc(op.rect.h - 9, 2), color);
 }
 
 fn artwork(c: C, op: *const theme.Op, context: Context) void {
@@ -322,6 +342,8 @@ fn renderPass(plan: *const theme.Plan, pixels: *[320 * 240]u16, context: Context
                 if (context.shuffled) icons.paint(c, op.rect.x, op.rect.y, .shuffle, op.color);
                 if (context.repeat != .off) icons.paint(c, op.rect.x + 29, op.rect.y, if (context.repeat == .one) .repeat_one else .repeat_all, op.color);
             },
+            .playback_state => if (context.track != null) @import("music_chrome.zig").playbackAt(c, op.rect.x, op.rect.y, context.playback_phase, op.color),
+            .now_playing => nowPlaying(c, op, context, plan.muted),
             .artwork => artwork(c, op, context),
             .list => list(c, op, context, plan.muted),
             .covers => coverScene(c, op, context),
@@ -353,7 +375,7 @@ test "list overflow paint stays in its trailing gutter and respects damage clips
     const cache = try std.testing.allocator.create(covers.Cache);
     defer std.testing.allocator.destroy(cache);
     cache.* = .{};
-    var context = Context{ .page = .home, .title = "", .empty_message = "", .jump_title = "", .detail = "", .phase = "", .snapshot = view, .cache = cache, .items = &.{}, .first = 0, .selection = 0, .total = 9, .track = null, .artwork = .{}, .artwork_id = 0, .power = .{}, .flow_position = 0, .scanning = false, .scan_visited = 0, .scan_total = 0, .elapsed = 0, .duration = 0, .sample_rate = 0, .volume_mix = 0, .volume_value = 0, .playing = false, .jump = 0 };
+    var context = Context{ .page = .home, .title = "", .empty_message = "", .jump_title = "", .detail = "", .phase = "", .snapshot = view, .cache = cache, .items = &.{}, .first = 0, .selection = 0, .total = 9, .track = null, .artwork = .{}, .artwork_id = 0, .power = .{}, .flow_position = 0, .scanning = false, .scan_visited = 0, .scan_total = 0, .elapsed = 0, .duration = 0, .sample_rate = 0, .volume_mix = 0, .volume_value = 0, .jump = 0 };
     const op = theme.Op{ .kind = .list, .rect = .{ .x = 8, .y = 64, .w = 304, .h = 168 }, .columns = 1, .row_height = 28, .row_stride = 28, .cell_width = 304, .cell_stride = 304 };
     var c = C.init(&pixels);
     c.surface.clip = .{ .x = 0, .y = 80, .width = 320, .height = 20 };

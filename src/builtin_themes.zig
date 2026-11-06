@@ -43,7 +43,7 @@ const documents = [_]theme.Document{
                 .rect = .{
                     .x = 16,
                     .y = 16,
-                    .w = 252,
+                    .w = 232,
                     .h = 40,
                 },
                 .binding = .page_title,
@@ -54,7 +54,7 @@ const documents = [_]theme.Document{
                 .rect = .{
                     .x = 164,
                     .y = 21,
-                    .w = 84,
+                    .w = 80,
                     .h = 18,
                 },
                 .binding = .page_detail,
@@ -83,14 +83,45 @@ const documents = [_]theme.Document{
                 .color = .accent,
                 .when = .scanning,
             },
+            .{
+                .kind = .playback_state,
+                .rect = .{
+                    .x = 248,
+                    .y = 19,
+                    .w = 12,
+                    .h = 12,
+                },
+                .color = .muted,
+                .when = .track,
+            },
         },
         .screens = .{
             .home = &.{
                 .{
-                    .kind = .progress,
+                    .kind = .rect,
                     .rect = .{
                         .x = 16,
                         .y = 54,
+                        .w = 288,
+                        .h = 1,
+                    },
+                    .color = .paper,
+                },
+                .{
+                    .kind = .rect,
+                    .rect = .{
+                        .x = 16,
+                        .y = 60,
+                        .w = 288,
+                        .h = 1,
+                    },
+                    .color = .line,
+                },
+                .{
+                    .kind = .progress,
+                    .rect = .{
+                        .x = 16,
+                        .y = 60,
                         .w = 288,
                         .h = 1,
                     },
@@ -118,6 +149,22 @@ const documents = [_]theme.Document{
                     .background = .paper,
                     .focus_text = .selected_text,
                     .columns = 1,
+                },
+                .{
+                    .kind = .now_playing,
+                    .rect = .{
+                        .x = 8,
+                        .y = 39,
+                        .w = 304,
+                        .h = 19,
+                    },
+                    .role = .caption,
+                    .lines = 1,
+                    .color = .muted,
+                    .focus = .selected,
+                    .focus_text = .selected_text,
+                    .radius = 3,
+                    .when = .track,
                 },
             },
             .albums = &.{
@@ -620,7 +667,7 @@ const documents = [_]theme.Document{
                 .rect = .{
                     .x = 16,
                     .y = 16,
-                    .w = 252,
+                    .w = 232,
                     .h = 40,
                 },
                 .binding = .page_title,
@@ -631,7 +678,7 @@ const documents = [_]theme.Document{
                 .rect = .{
                     .x = 164,
                     .y = 21,
-                    .w = 84,
+                    .w = 80,
                     .h = 18,
                 },
                 .binding = .page_detail,
@@ -660,14 +707,45 @@ const documents = [_]theme.Document{
                 .color = .accent,
                 .when = .scanning,
             },
+            .{
+                .kind = .playback_state,
+                .rect = .{
+                    .x = 248,
+                    .y = 19,
+                    .w = 12,
+                    .h = 12,
+                },
+                .color = .muted,
+                .when = .track,
+            },
         },
         .screens = .{
             .home = &.{
                 .{
-                    .kind = .progress,
+                    .kind = .rect,
                     .rect = .{
                         .x = 16,
                         .y = 54,
+                        .w = 288,
+                        .h = 1,
+                    },
+                    .color = .paper,
+                },
+                .{
+                    .kind = .rect,
+                    .rect = .{
+                        .x = 16,
+                        .y = 60,
+                        .w = 288,
+                        .h = 1,
+                    },
+                    .color = .line,
+                },
+                .{
+                    .kind = .progress,
+                    .rect = .{
+                        .x = 16,
+                        .y = 60,
                         .w = 288,
                         .h = 1,
                     },
@@ -695,6 +773,22 @@ const documents = [_]theme.Document{
                     .background = .paper,
                     .focus_text = .selected_text,
                     .columns = 1,
+                },
+                .{
+                    .kind = .now_playing,
+                    .rect = .{
+                        .x = 8,
+                        .y = 39,
+                        .w = 304,
+                        .h = 19,
+                    },
+                    .role = .caption,
+                    .lines = 1,
+                    .color = .muted,
+                    .focus = .selected,
+                    .focus_text = .selected_text,
+                    .radius = 3,
+                    .when = .track,
                 },
             },
             .albums = &.{

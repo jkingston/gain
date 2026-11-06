@@ -194,3 +194,29 @@ test "power transitions preserve capacity, erase old badges and stay inside the 
         }
     }
 }
+
+/// Fixed-size state indicator, separate from the action of a play/pause button.
+/// Four-by-four coverage is prepared at compile time, with no animated meter.
+pub fn playbackAt(c: draw.Canvas, left: i32, top: i32, phase: @import("f20_media.zig").PlaybackPhase, color: draw.Color) void {
+    const masks = comptime block: {
+        @setEvalBranchQuota(100000);
+        var result: [3][12 * 12]u8 = undefined;
+        for (0..3) |state| for (0..12) |y| for (0..12) |x| {
+            var coverage: u16 = 0;
+            for (0..4) |sy| for (0..4) |sx| {
+                const px = @as(f32, @floatFromInt(x)) + (@as(f32, @floatFromInt(sx)) + 0.5) / 4;
+                const py = @as(f32, @floatFromInt(y)) + (@as(f32, @floatFromInt(sy)) + 0.5) / 4;
+                const inside = switch (state) {
+                    0 => py >= 5 and py < 7 and ((px >= 1 and px < 3) or (px >= 5 and px < 7) or (px >= 9 and px < 11)),
+                    1 => px >= 2 and px <= 10 and @abs(py - 6) <= (10 - px) * 0.625,
+                    2 => py >= 1 and py < 11 and ((px >= 2 and px < 5) or (px >= 7 and px < 10)),
+                    else => unreachable,
+                };
+                coverage += @intFromBool(inside);
+            };
+            result[state][y * 12 + x] = @intCast(coverage * 255 / 16);
+        };
+        break :block result;
+    };
+    for (masks[@backingInt(phase)], 0..) |alpha, i| if (alpha != 0) c.blendPixel(left + @as(i32, @intCast(i % 12)), top + @as(i32, @intCast(i / 12)), color, alpha);
+}

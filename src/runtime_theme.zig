@@ -7,7 +7,7 @@ pub const max_ops = 128;
 pub const scratch_bytes = 96 * 1024;
 pub const Format = enum { json };
 pub const Page = enum(u8) { home, albums, tracks, player, library, artists, artist, jump, menu };
-pub const Kind = enum(u8) { rect, text, battery, artwork, list, covers, transport, progress, playback_modes };
+pub const Kind = enum(u8) { rect, text, battery, artwork, list, covers, transport, progress, playback_modes, playback_state, now_playing };
 pub const Binding = enum(u8) { literal, page_title, page_detail, album_title, album_artist, track_title, track_artist, track_album, codec, track_summary, transport_state, library_phase, home, artists, artist, tracks, library, jump_percent, scan_progress, jump_progress, menu, empty_message, jump_title };
 pub const Alignment = enum(u8) { left, center, right };
 pub const Condition = enum(u8) { always, track, empty, scanning, empty_list };
@@ -100,6 +100,7 @@ pub const Span = extern struct {
     flags: u16 = 0,
     covers: u16 = no_widget,
     transport: u16 = no_widget,
+    now_playing: u16 = no_widget,
     scan_top: u16 = 240,
     scan_bottom: u16 = 0,
     scan_mask: u32 = 0,
@@ -370,6 +371,7 @@ fn prepareSpan(plan: *const Plan, input: Span) Span {
             span.progress_top = @min(span.progress_top, @as(u16, @intCast(op.rect.y)));
             span.progress_bottom = @max(span.progress_bottom, @as(u16, @intCast(op.rect.y)) + op.rect.h);
         }
+        if (op.kind == .now_playing) span.now_playing = @intCast(span.first + i);
         if (op.kind == .covers) span.covers = @intCast(span.first + i);
         if (op.kind == .list) {
             if (op.detail != 0) span.flags |= Flags.row_details;
@@ -378,8 +380,8 @@ fn prepareSpan(plan: *const Plan, input: Span) Span {
         }
         if (op.binding == .page_detail) span.flags |= Flags.page_detail;
         if (op.binding == .library_phase) span.flags |= Flags.scan_phase;
-        if (op.binding == .transport_state) span.flags |= Flags.playback_phase;
-        if (op.kind == .artwork or op.binding == .track_title or op.binding == .track_artist or op.binding == .track_album or op.binding == .codec or op.binding == .track_summary) span.flags |= Flags.track_metadata;
+        if (op.binding == .transport_state or op.kind == .playback_state) span.flags |= Flags.playback_phase;
+        if (op.kind == .now_playing or op.kind == .playback_state or op.kind == .artwork or op.binding == .track_title or op.binding == .track_artist or op.binding == .track_album or op.binding == .codec or op.binding == .track_summary) span.flags |= Flags.track_metadata;
         if (op.condition == .scanning or op.binding == .scan_progress) {
             span.scan_top = @min(span.scan_top, @as(u16, @intCast(op.rect.y)));
             span.scan_bottom = @max(span.scan_bottom, @as(u16, @intCast(op.rect.y)) + op.rect.h);
@@ -430,6 +432,8 @@ pub fn validate(plan: *const Plan) !void {
             if (op.kind == .transport) transports += 1;
             if (op.kind == .covers and (op.rect.x != 0 or op.rect.w != plan.width)) return error.InvalidPlan;
             if (op.kind == .playback_modes and (op.rect.w < 51 or op.rect.h < 16)) return error.InvalidPlan;
+            if (op.kind == .playback_state and (op.rect.w != 12 or op.rect.h != 12)) return error.InvalidPlan;
+            if (op.kind == .now_playing and (op.rect.w < 48 or op.rect.h < 12 or (op.lines == 2 and op.rect.h < 32))) return error.InvalidPlan;
             if (op.kind == .battery and (op.rect.w != 24 or op.rect.h != 14)) return error.InvalidPlan;
             if (op.kind == .transport and (@as(u16, op.label_offset) + 12 > op.rect.h)) return error.InvalidTransport;
             if (@as(u32, op.literal_offset) + op.literal_length > plan.literal_used) return error.InvalidLiteral;

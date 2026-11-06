@@ -96,6 +96,7 @@ fn textWorker() void {
     if (result != .ready) {
         lock();
         text_failures += 1;
+        if (result != .cancelled) text_cache.unavailable(result);
         unlock();
         std.debug.print("Player UI font pack: {s}\n", .{@tagName(result)});
         return;
@@ -118,6 +119,8 @@ fn textWorker() void {
 }
 
 fn startText() void {
+    var started = false;
+    defer if (!started) text_cache.unavailable(.io_error);
     const path = if (getenv("GAIN_FONT_PACK")) |p| std.mem.span(p) else if (sd_root) |root| std.fmt.allocPrint(std.heap.c_allocator, "{s}/.gain/fonts/fonts.bin", .{root}) catch return else return;
     defer if (getenv("GAIN_FONT_PACK") == null) std.heap.c_allocator.free(path);
     const terminated = std.heap.c_allocator.dupeSentinel(u8, path, 0) catch return;
@@ -128,6 +131,7 @@ fn startText() void {
     if (length < 64 or length > std.math.maxInt(u32)) return;
     text_bytes = @intCast(length);
     text_thread = std.Thread.spawn(.{}, textWorker, .{}) catch null;
+    started = text_thread != null;
 }
 
 fn lock() void {
@@ -436,7 +440,7 @@ fn apply(command: media.PlaybackCommand, at: u64) void {
         .stop => {
             base_frames = state.status.played_frames;
             playing = false;
-            paused = false;
+            paused = true;
         },
         .toggle_pause => {
             if (paused) started_at = at else base_frames = state.status.played_frames;
@@ -496,7 +500,7 @@ fn transportStatus(at: u64) void {
         const rate = @max(1, track.meta.sample_rate);
         const total = track.meta.duration_ms * rate / 1000;
         state.status = .{
-            .phase = if (!playing) .preparing else if (paused) .paused else .playing,
+            .phase = if (!playing or paused) .paused else .playing,
             .sample_rate = rate,
             .output_format = .signed_24_in_u32,
             .total_frames = total,
@@ -668,6 +672,7 @@ fn frame(pixels: *api.Pixels, at: u64) callconv(.c) bool {
         } else {
             base_frames = state.status.total_frames;
             playing = false;
+            paused = true;
         }
         transportStatus(at);
     }

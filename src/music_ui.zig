@@ -19,6 +19,7 @@ pub const Screen = enum { home, albums, tracks, player, library, artists, artist
 pub const TrackScope = enum { album, artist, all, queue, folder, playlist, favourites };
 const HomeItem = enum { albums, artists, songs, playlists, favourites, recent, shuffle_all, settings, now_playing };
 const home_items = [_]HomeItem{ .albums, .artists, .songs, .shuffle_all, .playlists, .favourites, .recent, .settings, .now_playing };
+const now_playing_position = home_items.len - 1;
 const Collection = struct { scope: TrackScope, album: u64 = 0, artist: u64 = 0, directory: []const u8 = "", playlist: u64 = 0 };
 const CollectionAction = enum { play_all, shuffle_songs, shuffle_albums, play_next, add, favourite, jump };
 const ContextMenu = struct {
@@ -108,6 +109,9 @@ pub fn Controller(comptime Platform: type) type {
         sleep_revision: u32 = 0,
         display_asleep: bool = false,
         last_activity: ?u64 = null,
+        // Background session restore may restore a queue, but accepted user
+        // navigation owns the current screen, focus and history from then on.
+        navigation_claimed: bool = false,
         power_wake_only: bool = false,
         locked: bool = false,
         power_at: ?u64 = null,
@@ -225,6 +229,10 @@ pub fn Controller(comptime Platform: type) type {
 
         pub fn queue(self: *State, track: *const core.Track) void {
             self.cancelInput(self.input_policy.held);
+            self.stageTrack(track);
+        }
+
+        fn stageTrack(self: *State, track: *const core.Track) void {
             self.playing_occurrence = if (self.track_store.order.at(self.track_store.order.cursor) == track.id) self.track_store.order.occurrenceAt(self.track_store.order.cursor).? else 0;
             self.requested_start_frame = 0;
             self.resume_paused = false;
@@ -732,21 +740,25 @@ pub fn Controller(comptime Platform: type) type {
                 const id = self.track_store.order.at(position).?;
                 if (view.trackById(id)) |track| {
                     self.track_store.order.cursor = position;
-                    self.queue(track);
+                    // Restore is background work. A browsing hold/repeat must
+                    // keep running while the paused track is staged.
+                    self.stageTrack(track);
                     const rate = track.meta.sample_rate;
                     self.requested_start_frame = if (position == record.position.cursor) record.position.validatedFrame(track.stamp, rate, track.meta.duration_ms * rate / 1000) else 0;
                     self.resume_paused = true;
-                    const previous = record.navigation;
-                    const screen = std.enums.fromInt(Screen, previous.screen) orelse .home;
-                    self.navigate(if (screen == .folders or screen == .themes or screen == .display) .home else screen);
-                    self.track_scope = std.enums.fromInt(TrackScope, previous.scope) orelse .all;
-                    self.album_id = previous.album;
-                    if (self.track_scope == .playlist) self.playlist_id = previous.album;
-                    self.artist_id = previous.artist;
-                    self.selected_id = previous.selected;
-                    self.selected_track_anchor = previous.anchor;
-                    self.reconcile();
-                    self.ensureVisible();
+                    if (!self.navigation_claimed) {
+                        const previous = record.navigation;
+                        const screen = std.enums.fromInt(Screen, previous.screen) orelse .home;
+                        self.navigate(if (screen == .folders or screen == .themes or screen == .display) .home else screen);
+                        self.track_scope = std.enums.fromInt(TrackScope, previous.scope) orelse .all;
+                        self.album_id = previous.album;
+                        if (self.track_scope == .playlist) self.playlist_id = previous.album;
+                        self.artist_id = previous.artist;
+                        self.selected_id = previous.selected;
+                        self.selected_track_anchor = previous.anchor;
+                        self.reconcile();
+                        self.ensureVisible();
+                    }
                     return;
                 }
                 position = (position + 1) % self.track_store.order.count;
@@ -975,12 +987,39 @@ pub fn Controller(comptime Platform: type) type {
             };
         }
 
+        fn pinnedNowPlaying(self: *const State) bool {
+            if (self.screen != .home or self.playing_track == null) return false;
+            const plan = self.theme_store.current();
+            const widget = plan.pages[@backingInt(theme.Page.home)].now_playing;
+            if (widget == theme.no_widget) return false;
+            return switch (plan.ops[widget].condition) {
+                .always, .track => true,
+                .scanning => diag.report.scan_active != 0,
+                .empty, .empty_list => false,
+            };
+        }
+
+        fn summaryBeforeList(self: *const State) bool {
+            const plan = self.theme_store.current();
+            const span = plan.pages[@backingInt(theme.Page.home)];
+            if (span.now_playing == theme.no_widget) return false;
+            const summary = plan.ops[span.now_playing].rect;
+            for (plan.slice(.home)) |op| if (op.kind == .list) return summary.y < op.rect.y;
+            return false;
+        }
+
         fn visibleRows(self: *const State) usize {
             return @max(1, self.theme_store.current().pages[@backingInt(self.page())].capacity);
         }
 
         fn ensureVisible(self: *State) void {
             if (self.menu != null) return;
+            if (self.screen == .home) self.selection = @min(self.selection, self.rows() -| 1);
+            if (self.pinnedNowPlaying() and self.selection == now_playing_position) {
+                // A pinned summary is a real focus target, outside list scroll.
+                self.first = @min(self.first, now_playing_position -| self.visibleRows());
+                return;
+            }
             const span = self.theme_store.current().pages[@backingInt(self.page())];
             self.first = navigation.firstVisible(self.selection, self.first, self.visibleRows(), span.columns);
         }
@@ -1049,7 +1088,12 @@ pub fn Controller(comptime Platform: type) type {
                 return .none;
             }
             if (self.locked) return .none;
-            if (pressed) self.activity(now);
+            if (pressed) {
+                self.activity(now);
+                // Menu/Back distinguish taps from holds on release. Their
+                // accepted press already claims navigation during that wait.
+                if (key != .volume_up and key != .volume_down) self.navigation_claimed = true;
+            }
             return self.act(self.input_policy.edge(key, pressed, now, self.inputContext(), if (self.menu != null) self.menu.?.count() else if (self.jump_position != null or (self.screen == .player and self.status.total_frames != 0)) 21 else self.rows()), now, playing);
         }
 
@@ -1070,6 +1114,10 @@ pub fn Controller(comptime Platform: type) type {
 
         fn act(self: *State, action: navigation.Action, now: u64, playing: bool) media.PlaybackCommand {
             if (action == .none) return .none;
+            switch (action) {
+                .move, .select, .back, .home, .menu, .jump, .queue => self.navigation_claimed = true,
+                else => {},
+            }
             if (action == .home) return self.handle(.home, now, playing);
             if (self.jump_position) |position| switch (action) {
                 .move => |delta| {
@@ -1156,8 +1204,16 @@ pub fn Controller(comptime Platform: type) type {
         }
 
         fn moveBy(self: *State, delta: i32, now: u64) void {
+            self.navigation_claimed = true;
             if (self.screen == .albums) self.advanceFlow(now);
-            self.selection = navigation.move(self.selection, self.rows(), delta);
+            if (self.pinnedNowPlaying() and self.summaryBeforeList()) {
+                const summary = now_playing_position;
+                if (self.selection == summary) {
+                    if (delta > 0) self.selection = navigation.move(0, summary, delta - 1);
+                } else if (delta < 0 and @as(u32, @intCast(-@as(i64, delta))) > self.selection) {
+                    self.selection = summary;
+                } else self.selection = navigation.move(self.selection, summary, delta);
+            } else self.selection = navigation.move(self.selection, self.rows(), delta);
             self.ensureVisible();
             if (self.screen == .albums and self.rows() > 0) {
                 self.selected_id = self.snapshot().albums[self.selection].id;
@@ -1204,6 +1260,7 @@ pub fn Controller(comptime Platform: type) type {
         }
 
         pub fn handle(self: *State, event: Input, now: u64, playing: bool) media.PlaybackCommand {
+            if (event != .volume_up and event != .volume_down) self.navigation_claimed = true;
             self.library_notice = "";
             self.activity(now);
             self.reconcile();
@@ -1738,7 +1795,8 @@ pub fn Controller(comptime Platform: type) type {
             const detail: []const u8 = if (menu == null and self.jump_position == null and self.screen == .albums) std.fmt.bufPrint(detail_buffer, "{d} / {d}", .{ if (view.album_count == 0) 0 else self.selection + 1, view.album_count }) catch "" else "";
             const selection = if (menu) |actions| actions.selection else self.selection;
             const first = if (menu != null) navigation.firstVisible(selection, 0, self.visibleRows(), self.theme_store.current().pages[@backingInt(self.page())].columns) else self.first;
-            const count = if (menu) |actions| actions.count() else self.rows();
+            const pinned_summary = self.pinnedNowPlaying() and menu == null and self.jump_position == null;
+            const count = if (menu) |actions| actions.count() else self.rows() - @as(usize, @intFromBool(pinned_summary));
             var length: usize = 0;
             if (self.page() != .player and self.page() != .albums and self.page() != .jump) {
                 const limit = @min(count, first + self.visibleRows());
@@ -1867,7 +1925,8 @@ pub fn Controller(comptime Platform: type) type {
                 .sample_rate = self.status.sample_rate,
                 .volume_mix = if (self.seek_frame != null) 0 else self.animation.mix(now),
                 .volume_value = self.animation.value(now),
-                .playing = self.status.phase == .playing,
+                .playback_phase = self.status.phase,
+                .summary_selected = pinned_summary and self.selection == now_playing_position,
                 .jump = self.jump_position orelse 0,
                 .shuffled = self.track_store.order.shuffled,
                 .repeat = self.track_store.order.repeat,
@@ -3829,4 +3888,262 @@ test "EOF and faults leave a resumable paused player and manual navigation works
     try std.testing.expectEqual(media.PlaybackPhase.paused, state.status.phase);
     try std.testing.expectEqualStrings("Playback error", state.library_notice);
     try std.testing.expect(state.requested_track == null);
+}
+
+test "pinned Home summary is a focus target and returning from it preserves the live queue and location" {
+    var fixture: Fixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const tracks = [_]core.Track{
+        .{ .id = 11, .path = "A/one.flac", .stamp = .{}, .meta = .{ .title = "A very long title which needs clipping at the edge of a small Home summary", .artist = "Artist", .album = "A" } },
+        .{ .id = 22, .path = "A/two.flac", .stamp = .{}, .meta = .{ .title = "Two", .album = "A" } },
+    };
+    try fixture.pair.publish(&.{}, &tracks, 42, true);
+    var state = fixture.state();
+    try state.track_store.order.insert(&.{ 11, 22, 11 }, false);
+    _ = state.track_store.order.selectOccurrence(state.track_store.order.occurrenceAt(2).?);
+    state.queue(&tracks[0]);
+    state.playing_track = state.track_store.begin().?;
+    state.requested_track = null;
+    state.status.phase = .paused;
+    state.navigate(.home);
+    const revision = state.track_store.order.revision;
+    const occurrence = state.playing_occurrence;
+    const capacity = state.visibleRows();
+    _ = state.handle(.up, 0, true);
+    var items: [12]@import("music_widgets.zig").Item = undefined;
+    var buffer: [96]u8 = undefined;
+    const context = state.context(0, &items, &buffer, false);
+    try std.testing.expect(context.summary_selected);
+    try std.testing.expectEqual(0, state.first);
+    try std.testing.expectEqual(capacity, context.items.len);
+    try std.testing.expectEqual(state.rows() - 1, context.total);
+    try std.testing.expectEqual(media.PlaybackCommand.none, state.handle(.select, 1, true));
+    try std.testing.expectEqual(Screen.player, state.screen);
+    try std.testing.expectEqual(media.PlaybackPhase.paused, state.status.phase);
+    try std.testing.expect(state.requested_track == null);
+    try std.testing.expectEqual(occurrence, state.playing_occurrence);
+    try std.testing.expectEqual(revision, state.track_store.order.revision);
+    _ = state.handle(.back, 2, true);
+    try std.testing.expectEqual(Screen.home, state.screen);
+    try std.testing.expect(state.context(2, &items, &buffer, false).summary_selected);
+    _ = state.handle(.down, 3, true);
+    try std.testing.expectEqual(0, state.selection);
+    try std.testing.expect(!state.context(3, &items, &buffer, false).summary_selected);
+    // Reaching the end of the primary list cannot select an invisible duplicate.
+    state.moveBy(1000, 4);
+    try std.testing.expectEqual(state.rows() - 2, state.selection);
+    state.playing_track = null;
+    state.selection = now_playing_position;
+    state.ensureVisible();
+    try std.testing.expect(state.selection < state.rows());
+}
+
+test "playback status invalidation is boundary driven on music menus without progress repaints" {
+    var fixture: Fixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    TestPlatform.Display.reset();
+    TestPlatform.Display.latency = 0;
+    var state = fixture.state();
+    const track = core.Track{ .id = 11, .path = "A/one.flac", .stamp = .{}, .meta = .{ .title = "One", .album = "A" } };
+    try fixture.pair.publish(&.{}, &.{track}, 42, true);
+    state.queue(&track);
+    state.playing_track = state.track_store.begin().?;
+    state.requested_track = null;
+    state.status.phase = .playing;
+    state.navigate(.artists);
+    TestPlatform.milliseconds = 0;
+    state.frame(0);
+    TestPlatform.milliseconds = 17;
+    state.frame(17);
+    const initial = test_diag.report.ui_drawn;
+    try std.testing.expect(initial != 0);
+    for (2..60) |step| {
+        TestPlatform.milliseconds = step * 17;
+        state.status.played_frames += 48000;
+        state.frame(TestPlatform.milliseconds);
+    }
+    try std.testing.expectEqual(initial, test_diag.report.ui_drawn);
+    state.status.phase = .paused;
+    TestPlatform.milliseconds = 1100;
+    state.frame(1100);
+    try std.testing.expectEqual(initial + 1, test_diag.report.ui_drawn);
+    TestPlatform.milliseconds = 1200;
+    state.frame(1200);
+    try std.testing.expectEqual(initial + 1, test_diag.report.ui_drawn);
+}
+
+test "state icons change independently of battery charge scan and album count in both appearances" {
+    var fixture: Fixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const before = try std.testing.allocator.create([320 * 240]u16);
+    defer std.testing.allocator.destroy(before);
+    const after = try std.testing.allocator.create([320 * 240]u16);
+    defer std.testing.allocator.destroy(after);
+    const track = core.Track{ .id = 11, .path = "A/one.flac", .stamp = .{}, .meta = .{ .title = "Long title", .album = "A" } };
+    try fixture.pair.publish(&.{}, &.{track}, 42, true);
+    var state = fixture.state();
+    state.queue(&track);
+    state.playing_track = state.track_store.begin().?;
+    state.requested_track = null;
+    state.battery_mv = 4100;
+    state.charging = true;
+    state.external_power = true;
+    test_diag.report.scan_active = 1;
+    test_diag.report.scan_total = 100;
+    test_diag.report.scan_visited = 25;
+    for ([_]chrome.Appearance{ .light, .dark }) |appearance| {
+        state.appearance = appearance;
+        state.theme_store.select(state.theme_family, appearance);
+        for ([_]Screen{ .home, .albums, .artists, .tracks, .settings }) |screen| {
+            state.navigate(screen);
+            state.status.phase = .playing;
+            state.renderInto(before, 0);
+            state.status.phase = .paused;
+            state.renderInto(after, 1);
+            const plan = state.theme_store.current();
+            var bounds: theme.Rect = undefined;
+            for (plan.slice(state.page())) |op| if (op.kind == .playback_state) {
+                bounds = op.rect;
+                break;
+            };
+            var differences: usize = 0;
+            for (before, after, 0..) |a, b, i| if (a != b) {
+                const x: i32 = @intCast(i % 320);
+                const y: i32 = @intCast(i / 320);
+                try std.testing.expect(x >= bounds.x and x < @as(i32, bounds.x) + bounds.w and y >= bounds.y and y < @as(i32, bounds.y) + bounds.h);
+                differences += 1;
+            };
+            try std.testing.expect(differences != 0);
+        }
+    }
+}
+
+test "long Home summaries and their focus paint remain inside the themed summary rectangle" {
+    var fixture: Fixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    var state = fixture.state();
+    var track = core.Track{ .id = 11, .path = "A/one.flac", .stamp = .{}, .meta = .{ .title = "A long title that must be truncated safely without displacing the menu or battery", .artist = "Artist" } };
+    state.playing_track = &track;
+    state.navigate(.home);
+    const before = try std.testing.allocator.create([320 * 240]u16);
+    defer std.testing.allocator.destroy(before);
+    const after = try std.testing.allocator.create([320 * 240]u16);
+    defer std.testing.allocator.destroy(after);
+    state.renderInto(before, 0);
+    track.meta.title = "夜明けの静かな海を越えて遠い山へ向かう長い旅の音楽";
+    state.moveBy(-1, 1);
+    state.renderInto(after, 1);
+    const plan = state.theme_store.current();
+    const bounds = plan.ops[plan.pages[@backingInt(theme.Page.home)].now_playing].rect;
+    // Moving focus removes the Albums highlight as well. Everything outside
+    // the summary and first menu row, including the title/status slots, stays.
+    var row: theme.Rect = undefined;
+    for (plan.slice(.home)) |op| if (op.kind == .list) {
+        row = op.rect;
+        row.h = op.row_height;
+        break;
+    };
+    for (before, after, 0..) |a, b, i| if (a != b) {
+        const x: i32 = @intCast(i % 320);
+        const y: i32 = @intCast(i / 320);
+        const in_summary = x >= bounds.x and x < @as(i32, bounds.x) + bounds.w and y >= bounds.y and y < @as(i32, bounds.y) + bounds.h;
+        const in_row = x >= row.x and x < @as(i32, row.x) + row.w and y >= row.y and y < @as(i32, row.y) + row.h;
+        try std.testing.expect(in_summary or in_row);
+    };
+}
+
+test "delayed paused restore preserves accepted browsing focus history and held repeat" {
+    var fixture: Fixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const listening = @import("listening_session.zig");
+    const tracks = [_]core.Track{
+        .{ .id = 11, .path = "B/one.flac", .stamp = .{ .size = 1000, .modified = 21 }, .meta = .{ .title = "One", .album = "B", .sample_rate = 48000, .duration_ms = 60000 } },
+        .{ .id = 22, .path = "C/two.flac", .stamp = .{}, .meta = .{ .title = "Two", .album = "C" } },
+        .{ .id = 33, .path = "D/three.flac", .stamp = .{}, .meta = .{ .title = "Three", .album = "D" } },
+    };
+    var bytes: [64]u8 = undefined;
+    var saved = @import("play_queue.zig").Queue.init(&bytes);
+    try saved.insert(&.{ 11, 22, 11 }, false);
+    _ = saved.selectOccurrence(saved.occurrenceAt(2).?);
+    const scratch = try std.testing.allocator.alloc(u8, listening.scratch_bytes);
+    defer std.testing.allocator.free(scratch);
+    const position = listening.Position{ .cursor = 2, .frame = 96000, .sample_rate = 48000, .stamp = tracks[0].stamp };
+    const data = try listening.capture(saved, 42, position, .{ .screen = @intCast(@backingInt(Screen.player)) }, scratch);
+    const record = listening.Record{ .data = data, .position = position, .navigation = data.navigation };
+    try fixture.pair.publish(&.{}, &tracks, 42, false);
+    var state = fixture.state();
+    try std.testing.expectError(error.LibraryNotReady, state.restoreListening(record));
+    _ = state.handle(.home, 1, false);
+    _ = state.handle(.select, 2, false);
+    try std.testing.expectEqual(Screen.albums, state.screen);
+    _ = state.button(.next, true, 3, false);
+    try std.testing.expectEqual(1, state.selection);
+    try std.testing.expect(state.navigation_claimed);
+    try fixture.pair.publish(&.{}, &tracks, 42, true);
+    state.reconcile();
+    const location = state.location();
+    const history_count = state.history_count;
+    const history = state.history;
+    const held = state.input_policy;
+    const raw = state.raw_held;
+    try state.restoreListening(record);
+    try std.testing.expectEqualDeep(location, state.location());
+    try std.testing.expectEqual(history_count, state.history_count);
+    try std.testing.expectEqualDeep(history[0..history_count], state.history[0..history_count]);
+    try std.testing.expectEqualDeep(held, state.input_policy);
+    try std.testing.expectEqual(raw, state.raw_held);
+    try std.testing.expectEqual(3, state.track_store.order.count);
+    try std.testing.expectEqual(2, state.track_store.order.cursor);
+    try std.testing.expectEqual(11, state.requested_track.?.id);
+    try std.testing.expectEqual(96000, state.requested_start_frame);
+    try std.testing.expect(state.resume_paused);
+    _ = state.repeat(400, raw, false);
+    try std.testing.expectEqual(2, state.selection);
+    try std.testing.expectEqual(Screen.albums, state.screen);
+}
+
+test "only navigation input claims a delayed restore, not first-frame activity or volume" {
+    var fixture: Fixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const listening = @import("listening_session.zig");
+    const track = core.Track{ .id = 11, .path = "A/one.flac", .stamp = .{ .size = 1000 }, .meta = .{ .title = "One", .album = "A", .sample_rate = 48000, .duration_ms = 60000 } };
+    var bytes: [64]u8 = undefined;
+    var saved = @import("play_queue.zig").Queue.init(&bytes);
+    try saved.append(track.id);
+    const scratch = try std.testing.allocator.alloc(u8, listening.scratch_bytes);
+    defer std.testing.allocator.free(scratch);
+    const position = listening.Position{ .frame = 48000, .sample_rate = 48000, .stamp = track.stamp };
+    const data = try listening.capture(saved, 42, position, .{ .screen = @intCast(@backingInt(Screen.player)) }, scratch);
+    const record = listening.Record{ .data = data, .position = position, .navigation = data.navigation };
+    for ([_]enum { untouched, volume, home, menu_down }{ .untouched, .volume, .home, .menu_down }) |input| {
+        try fixture.pair.publish(&.{}, &.{track}, 42, false);
+        var state = fixture.state();
+        TestPlatform.Display.reset();
+        TestPlatform.milliseconds = 0;
+        state.frame(0);
+        try std.testing.expect(state.last_activity != null);
+        try std.testing.expectError(error.LibraryNotReady, state.restoreListening(record));
+        const attenuation = state.attenuation;
+        switch (input) {
+            .untouched => {},
+            .volume => _ = state.handle(.volume_up, 1, false),
+            .home => _ = state.handle(.home, 1, false),
+            .menu_down => _ = state.button(.menu, true, 1, false),
+        }
+        const browsing = input == .home or input == .menu_down;
+        try std.testing.expectEqual(browsing, state.navigation_claimed);
+        try fixture.pair.publish(&.{}, &.{track}, 42, true);
+        try state.restoreListening(record);
+        try std.testing.expectEqual(if (browsing) Screen.home else Screen.player, state.screen);
+        try std.testing.expectEqual(if (input == .volume) attenuation - 1 else attenuation, state.attenuation);
+        if (input == .menu_down) try std.testing.expectEqual(@as(?u64, 1), state.input_policy.menu_at);
+        try std.testing.expectEqual(48000, state.requested_start_frame);
+        try std.testing.expect(state.resume_paused);
+    }
 }

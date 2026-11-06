@@ -14,6 +14,7 @@ import os
 from pathlib import Path
 import tempfile
 import time
+import wave
 
 from mock_sd import ROOT, create, tagged_flac
 
@@ -187,9 +188,11 @@ class Player:
         positions = {
             "albums": 0, "artists": 1, "songs": 2, "shuffle": 3,
             "playlists": 4, "favourites": 5, "recent": 6,
-            "settings": 7, "playing": 8,
+            "settings": 7,
         }
         self.home()
+        if destination == "playing":
+            return self.tap("previous", "select")
         return self.tap(*(["next"] * positions[destination] + ["select"]))
 
     def menu_action(self, position):
@@ -876,6 +879,63 @@ def qualify_discovery(app, root):
             "queue_unchanged_by_discovery": True, "host_only": True}
 
 
+def qualify_now_playing(app, root):
+    # A complete, valid synthetic recording gives the UI clock time to browse.
+    # This neither alters codec fixtures nor depends on a personal collection.
+    root.mkdir()
+    music = root / "Music" / "Status"
+    music.mkdir(parents=True)
+    for title in ("A Long Journey Through the Quiet Mountains", "夜明けの海を越えて遠い山へ"):
+        with wave.open(str(music / f"{title}.wav"), "wb") as recording:
+            recording.setnchannels(1)
+            recording.setsampwidth(2)
+            recording.setframerate(8000)
+            recording.writeframes(bytes(8000 * 2 * 60))
+    player = Player(app, root)
+    try:
+        player.settle_scan()
+        player.choose_home("songs")
+        player.tap("select")
+        assert player.status()["screen"] == 3 and not player.playback()["paused"]
+        queue = player.queue()
+        cursor = player.playback()["cursor"]
+        player.home()
+        player.frame(40)
+        playing_pixels = tuple(player.pixels)
+        player.tap("previous", "select")
+        assert player.status()["screen"] == 3
+        assert player.queue() == queue and player.playback()["cursor"] == cursor
+        player.tap("select")
+        assert player.playback()["paused"]
+        player.home()
+        player.frame(40)
+        paused_pixels = tuple(player.pixels)
+        document = json.loads((ROOT / "src/themes/gain-light.json").read_text())
+        bounds = next(node["rect"] for node in document["header"] if node["kind"] == "playback_state")
+        differences = [i for i, pair in enumerate(zip(playing_pixels, paused_pixels)) if pair[0] != pair[1]]
+        assert differences
+        assert all(bounds["x"] <= i % 320 < bounds["x"] + bounds["w"]
+                   and bounds["y"] <= i // 320 < bounds["y"] + bounds["h"] for i in differences)
+        player.tap("previous", "select")
+        assert player.status()["screen"] == 3 and player.playback()["paused"]
+        frame = player.playback()["played_frames"]
+        player.frame(1000)
+        assert player.playback()["played_frames"] == frame
+        assert player.queue() == queue and player.playback()["cursor"] == cursor
+        player.tap("select")
+        player.frame(60000)
+        player.frame(60000)
+        assert not player.status()["playing"] and player.playback()["paused"]
+        player.tap("previous")
+        assert player.status()["playing"] and player.playback()["paused"]
+        assert player.queue() == queue
+        return {"passed": True, "pinned_home_focus": True, "queue_preserved": True,
+                "state_icon_changes_in_place": True, "paused_navigation_stays_paused": True,
+                "terminal_track_is_paused": True, "manual_previous_after_eof": True}
+    finally:
+        player.close()
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--app", type=Path, required=True)
@@ -903,6 +963,7 @@ def main():
             discovery_root = Path(directory) / "discovery-sd"
             create(discovery_root, albums=3, tracks_per_album=8)
             result["discovery"] = qualify_discovery(app, discovery_root)
+            result["now_playing"] = qualify_now_playing(app, Path(directory) / "status-sd")
             # Reload/deinit must join a scan even before its first publication.
             interrupted = Player(app, root)
             interrupted.frame()
