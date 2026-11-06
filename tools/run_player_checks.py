@@ -14,7 +14,7 @@ from prepare_usb import prepare
 
 ROOT = Path(__file__).resolve().parents[1]
 FIELDS = "signature revision complete mode error_code sample_rate frames_low frames_high periods underruns heap_peak storage_steps ui_polls maximum_fill_ticks startup_ticks maximum_ui_ticks maximum_ui_gap_ticks maximum_irq_ticks output_stack ui_stack control_stack codec_stack storage_stack exit iterations elapsed_ticks cause epc error_length pcm_checksum volume_changes minimum_fifo".split()
-MODES = {"normal": 0, "stop": 1, "next": 2, "previous": 3, "truncated": 5, "sd": 6, "sd-fault": 7, "mixed": 8}
+MODES = {"normal": 0, "stop": 1, "next": 2, "previous": 3, "end-seek": 4, "truncated": 5, "sd": 6, "sd-fault": 7, "mixed": 8}
 
 
 def fixtures():
@@ -96,6 +96,10 @@ def main():
             # Do not disturb ROM USB while tasks own the device. The target's
             # independent bounded deadline returns on a stalled campaign.
             wait = (duration + 1) * args.repeat + 1 if mode in (0, 6, 7, 8) else 3
+            if mode == 4:
+                # A new seek-recovery path may need its full bounded watchdog
+                # deadline. Never probe ROM while the executive still owns USB.
+                wait = max(duration, 2) * args.repeat + 12
             time.sleep(wait)
             report_file = output / f"{name}.report"
             usb("--addr", "0xa0700000", "--length", "128", "--upload", report_file)
@@ -126,6 +130,8 @@ def main():
                         raise RuntimeError(f"Native/host PCM mismatch: {result['pcm_checksum']:08x} != {expected:08x}")
                 if mode == 0 and (result["sample_rate"] != case["rate"] or (result["frames_high"] << 32 | result["frames_low"]) != case["frames"]):
                     raise RuntimeError("Presentation length or rate mismatch")
+                if mode == 4 and (result["exit"] != 0 or result["frames_low"] != 1 or result["frames_high"] != 0):
+                    raise RuntimeError("Out-of-range MPEG seek did not clamp to its actual final sample")
                 if mode == 6 and result["exit"] != 1:
                     raise RuntimeError("SD track ended before the requested soak duration")
                 if mode in (1, 2, 3) and result["exit"] != mode:

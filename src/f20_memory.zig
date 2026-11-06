@@ -48,6 +48,11 @@ pub const canvas = Region{ .start = 0x300000, .bytes = 320 * 240 * 2 };
 // compiled plans are separate; painting never aliases this scratch space.
 pub const theme_scratch = Region{ .start = 0x328000, .bytes = 96 * 1024 };
 pub const display_snapshot = Region{ .start = 0x340000, .bytes = 320 * 240 * 2 };
+// Managed listening session capture includes an inverse permutation map.
+pub const activity_records = Region{ .start = 0x2e6000, .bytes = 96 * 1024 };
+pub const session_scratch = Region{ .start = 0x366000, .bytes = 100 * 1024 };
+// Sparse codec anchors are distinct from filesystem cluster checkpoints.
+pub const audio_seek = Region{ .start = 0x1fc0000, .bytes = 104 * 1024 };
 pub const display_next = Region{ .start = 0x3a0000, .bytes = 320 * 240 * 2 };
 pub const display_staging = Region{ .start = 0x380000, .bytes = 320 * 42 * 2 };
 pub const flac_left = Region{ .start = 0x400000, .bytes = 65535 * 4 };
@@ -97,7 +102,7 @@ pub const scan_scratch = Region{ .start = 0xe80000, .bytes = 0x180000 };
 pub const scan_io = Region{ .start = 0x740000, .bytes = 0x20000 };
 // Two immutable views include ID indexes for bounded queue lookup. Extend into
 // the unused gap above scan_io; active decoder and artwork buffers stay intact.
-pub const scan_views = Region{ .start = 0x770000, .bytes = 0x90000 };
+pub const scan_views = Region{ .start = 0x760000, .bytes = 0xa0000 };
 pub const scan_artwork = Region{ .start = 0x704000, .bytes = 0x3c000 };
 pub const cover_cache = Region{ .start = 0xe10000, .bytes = 0x70000 };
 pub const regions = [_]Region{
@@ -112,6 +117,9 @@ pub const regions = [_]Region{
     canvas,
     theme_scratch,
     display_snapshot,
+    session_scratch,
+    activity_records,
+    audio_seek,
     display_next,
     display_staging,
     flac_left,

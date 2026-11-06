@@ -26,6 +26,9 @@ class TransportTests(unittest.TestCase):
         self.calls = []
         self.phy = 31
         self.complete = 1
+        self.frames = 48000
+        self.sleeps = []
+        self.parameters = None
 
     def command(self, arguments, **_):
         args = list(map(str, arguments))
@@ -34,18 +37,20 @@ class TransportTests(unittest.TestCase):
             return subprocess.CompletedProcess(args, 0, b"X1000_v1", b"")
         if args[0].endswith("player-reference"):
             return subprocess.CompletedProcess(args, 0, "", "0\n")
+        if args[0] == "usbboot" and "--download" in args and "0xa0700000" in args:
+            self.parameters = struct.unpack("<8I", Path(args[args.index("--download") + 1]).read_bytes())
         if args[0] == "usbboot" and "--upload" in args:
             path = Path(args[args.index("--upload") + 1])
             if "0xb301100c" in args:
                 path.write_bytes(struct.pack("<I", self.phy))
             else:
                 values = dict.fromkeys(runner.FIELDS, 0)
-                values.update(signature=0x47415031, revision=1, complete=self.complete, sample_rate=48000, frames_low=48000, periods=100, ui_polls=2, iterations=1)
+                values.update(signature=0x47415031, revision=1, complete=self.complete, sample_rate=48000, frames_low=self.frames, periods=100, ui_polls=2, iterations=1)
                 path.write_bytes(struct.pack("<32I", *(values[name] for name in runner.FIELDS)))
 
     def run_campaign(self, *extra):
         arguments = ["runner", "--skip-build", "--usbboot", "usbboot", "--output", str(self.base / "evidence"), *extra]
-        with patch.object(runner, "ROOT", self.root), patch("sys.argv", arguments), patch.object(runner.subprocess, "run", self.command), patch.object(runner.time, "sleep"), contextlib.redirect_stdout(io.StringIO()):
+        with patch.object(runner, "ROOT", self.root), patch("sys.argv", arguments), patch.object(runner.subprocess, "run", self.command), patch.object(runner.time, "sleep", side_effect=self.sleeps.append), contextlib.redirect_stdout(io.StringIO()):
             runner.main()
 
     def test_warm_rom_never_retrains_dram_or_writes_persistent_storage(self):
@@ -81,6 +86,21 @@ class TransportTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "reserved RAM"):
             self.run_campaign()
         self.assertFalse(any("--download" in call for call in self.calls))
+
+    def test_end_seek_uses_the_native_oracle_and_waits_for_the_complete_campaign(self):
+        self.frames = 1
+        self.run_campaign("--mode", "end-seek")
+        self.assertEqual(self.parameters[1], runner.MODES["end-seek"])
+        self.assertIn(14, self.sleeps)
+        self.assertFalse(any(call[0].endswith("player-reference") for call in self.calls))
+        self.assertTrue(any(call[0].endswith("read-player-check") for call in self.calls))
+
+    def test_end_seek_cannot_accept_empty_or_unclamped_full_track_output(self):
+        for frames in (0, 2, 48000):
+            with self.subTest(frames=frames):
+                self.frames = frames
+                with self.assertRaisesRegex(RuntimeError, "actual final sample"):
+                    self.run_campaign("--mode", "end-seek")
 
     def test_reports_cannot_be_written_into_the_production_checkout(self):
         with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):

@@ -35,6 +35,11 @@ pub const Snapshot = extern struct {
     theme_state: u32 = 0,
     theme_source_bytes: u32 = 0,
     theme_error_crc: u32 = 0,
+    stream_tracks: u32 = 0,
+    stream_handoffs: u32 = 0,
+    stream_deferred: u32 = 0,
+    output_route: u32 = 0,
+    jack_flags: u32 = 0,
 };
 pub var snapshot: Snapshot = .{};
 pub fn charger(configuration: @import("axp192.zig").ChargerConfiguration) void {

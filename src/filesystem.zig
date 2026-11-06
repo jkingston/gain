@@ -9,6 +9,7 @@ pub const Directory = fat.Directory;
 pub const DirectoryEntry = fat.DirectoryEntry;
 pub const EntryKind = fat.EntryKind;
 pub const maximum_name_bytes = fat.maximum_name_bytes;
+pub const SeekControl = struct { context: *anyopaque, cancelled: *const fn (*anyopaque) bool };
 pub const Kind = enum { fat32, exfat };
 
 pub fn Volume(comptime Device: type) type {
@@ -121,6 +122,14 @@ pub fn Volume(comptime Device: type) type {
             cluster: u32,
             cluster_offset: u32 = 0,
             position: u32 = 0,
+            audio_seeks: ?*@import("file_seek_index.zig").Index = null,
+            seek_control: ?SeekControl = null,
+
+            pub fn enableAudioSeeks(self: *Reader, index: *@import("file_seek_index.zig").Index, identity: u64) void {
+                index.bindSource(identity);
+                self.audio_seeks = if (identity != 0) index else null;
+                if (identity != 0) index.observe(self, self.volume.sectors_per_cluster * sector_bytes);
+            }
 
             pub fn read(self: *Reader, output: []u8) !usize {
                 if (output.len == 0 or self.remaining == 0) return 0;
@@ -131,6 +140,7 @@ pub fn Volume(comptime Device: type) type {
                     if (self.cluster_offset == cluster_bytes) {
                         self.cluster = try self.advance(self.cluster);
                         self.cluster_offset = 0;
+                        if (self.audio_seeks) |index| index.observe(self, cluster_bytes);
                     }
 
                     const sector_in_cluster = self.cluster_offset / sector_bytes;
@@ -169,6 +179,21 @@ pub fn Volume(comptime Device: type) type {
             /// Seek without reading file contents. Forward seeks retain the
             /// current FAT traversal; backwards seeks restart at the first cluster.
             pub fn seekTo(self: *Reader, target: u32) !void {
+                if (self.audio_seeks) |index| {
+                    const Observer = struct {
+                        control: ?SeekControl,
+                        pub fn cancelled(observer: @This()) bool {
+                            return if (observer.control) |value| value.cancelled(value.context) else false;
+                        }
+                    };
+                    return index.seekAudio(self, target, self.volume.sectors_per_cluster * sector_bytes, Observer{ .control = self.seek_control });
+                }
+                return self.seekUnindexed(target);
+            }
+
+            /// Used by checkpoint traversal to avoid recursively re-entering
+            /// seekTo. Normal callers use the bounded cached entry point above.
+            pub fn seekUnindexed(self: *Reader, target: u32) !void {
                 if (target > self.size) return error.InvalidSeek;
                 const cluster_bytes = @as(u32, self.volume.sectors_per_cluster) * sector_bytes;
                 var cluster = if (target >= self.position) self.cluster else self.first_cluster;

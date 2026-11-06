@@ -111,48 +111,6 @@ fn Stream(comptime Source: type) type {
     };
 }
 
-fn duration(source: anytype, serial: u32) !?u64 {
-    const begin = source.length - @min(source.length, 65536);
-    var block: [1027]u8 = undefined;
-    var at = begin;
-    var candidates: u32 = 0;
-    while (at < source.length) : (at += 1024) {
-        const count: usize = @intCast(@min(block.len, source.length - at));
-        try source.read(at, block[0..count]);
-        var i: usize = 0;
-        while (i < 1024 and i + 4 <= count) : (i += 1) {
-            if (!std.mem.eql(u8, block[i..][0..4], "OggS")) continue;
-            candidates += 1;
-            if (candidates > 256) return null;
-            if (at + i + 27 > source.length) continue;
-            var header: [27]u8 = undefined;
-            try source.read(at + i, &header);
-            if (header[4] != 0 or header[5] & 4 == 0 or std.mem.readInt(u32, header[14..18], .little) != serial) continue;
-            if (at + i + 27 + header[26] > source.length) continue;
-            var laces: [255]u8 = undefined;
-            try source.read(at + i + 27, laces[0..header[26]]);
-            var size: u32 = 0;
-            for (laces[0..header[26]]) |n| size += n;
-            if (at + i + 27 + header[26] + size != source.length) continue;
-            var clean = header;
-            const expected = std.mem.readInt(u32, clean[22..26], .little);
-            @memset(clean[22..26], 0);
-            var sum = ogg.crc(ogg.crc(0, &clean), laces[0..header[26]]);
-            var bytes: [1024]u8 = undefined;
-            var done: u32 = 0;
-            while (done < size) {
-                const n = @min(bytes.len, size - done);
-                try source.read(at + i + 27 + header[26] + done, bytes[0..n]);
-                sum = ogg.crc(sum, bytes[0..n]);
-                done += n;
-            }
-            const granule = std.mem.readInt(i64, header[6..14], .little);
-            if (sum == expected and granule >= 0) return @intCast(granule);
-        }
-    }
-    return null;
-}
-
 pub fn extract(a: std.mem.Allocator, source: anytype) !core.Metadata {
     var stream = Stream(@TypeOf(source)){ .source = source };
     try stream.next();
@@ -234,7 +192,7 @@ pub fn extract(a: std.mem.Allocator, source: anytype) !core.Metadata {
         try stream.exact(&framing);
         if (framing[0] != 1) return error.BadComments;
     }
-    if (try duration(source, stream.serial.?)) |frames| {
+    if (try ogg.finalGranule(source, stream.serial.?)) |frames| {
         const total = frames - @min(frames, preskip);
         const whole = @mulWithOverflow(total / result.sample_rate, @as(u64, 1000));
         const fraction = (total % result.sample_rate) * 1000 / result.sample_rate;

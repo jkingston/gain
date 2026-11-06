@@ -17,6 +17,7 @@ const input_stream = @import("input_stream.zig");
 const codec_pool = @import("codec_pool.zig");
 const transport = @import("transport.zig");
 const stack = @import("task_stack.zig");
+const stream = @import("stream_sequence.zig");
 
 const stacks = [_]memory.Region{ memory.output_stack, memory.ui_stack, memory.control_stack, memory.codec_stack, memory.storage_stack };
 const event = 1;
@@ -34,7 +35,23 @@ pub const StorageService = struct {
     poll: *const fn (*anyopaque) bool,
 };
 
+/// Native sequence callbacks preserve one storage owner and keep catalogue
+/// strings out of the audio pipeline. Opening may look ahead; audible adoption
+/// follows completed DMA, so it must not mutate the queue cursor prematurely.
+pub const Sequence = struct {
+    context: *anyopaque,
+    first: stream.Track,
+    open_next: *const fn (*anyopaque, *anyopaque, stream.Track) anyerror!?stream.Track,
+    audible: *const fn (*anyopaque, stream.Track) void,
+};
+
+pub const SequenceTrack = stream.Track;
+
 pub const Config = struct {
+    sequence: ?Sequence = null,
+    seek_index: ?*@import("audio_seek.zig").Index = null,
+    seek_cache: ?*decoder.SeekCache = null,
+    source_identity: u64 = 0,
     start_frame: u64 = 0,
     initially_paused: bool = false,
     force_output_24: bool = false,
@@ -48,9 +65,12 @@ pub const Config = struct {
     background: ?struct { context: *anyopaque, poll: *const fn (*anyopaque) void } = null,
 
     storage_work: ?struct { context: *anyopaque, run: *const fn (*anyopaque, StorageService) void } = null,
+    // Control owns routing and DAC I2C. UI receives the settled/muted state
+    // through this callback and may request a coalesced pop-suppressed change.
+    routing: ?struct { context: *anyopaque, poll: *const fn (*anyopaque, audio.Output) ?audio.Output } = null,
 
     pub fn valid(self: Config) bool {
-        return self.gain_q24 <= output.maximum_gain_q24 and (playback.Config{
+        return self.gain_q24 <= output.maximum_gain_q24 and (self.sequence == null or self.sequence.?.first.valid()) and (playback.Config{
             .descriptor_count = self.descriptor_count,
             .buffer_count = self.buffer_count,
             .total_chunks = std.math.maxInt(u32),
@@ -99,6 +119,10 @@ pub const Report = struct {
     maximum_ui_gap_ticks: u32,
     stack_used: [stacks.len]u32,
     played_frames: u64 = 0,
+    deferred: ?stream.Track = null,
+    sequence_tracks: u32 = 0,
+    seek_clamped: bool = false,
+    final_status: ?media.PlaybackStatus = null,
 
     pub fn empty() Report {
         return .{
@@ -121,6 +145,10 @@ fn Player(comptime Reader: type) type {
     return struct {
         const Self = @This();
         const Input = input_stream.Stream(Reader, Self);
+        const ReaderControl = if (@hasField(Reader, "seek_control")) @TypeOf(@as(Reader, undefined).seek_control) else ?struct {
+            context: *anyopaque,
+            cancelled: *const fn (*anyopaque) bool,
+        };
         var active: ?*Self = null;
         runtime: port.Runtime = .{},
         reader: *Reader,
@@ -164,15 +192,38 @@ fn Player(comptime Reader: type) type {
         timeline: transport.Timeline = .{},
         paused: std.atomic.Value(bool) = .init(false),
         requested_seek: u64 = 0,
+        current_track: stream.Track = .{},
+        deferred_track: ?stream.Track = null,
+        track_configured: bool = false,
+        source_switch: stream.SourceSwitch = .{},
+        previous_reader_control: ReaderControl = null,
+        markers: stream.Markers = .{},
+        stream_renderer: stream.Renderer = .{},
+        audible: stream.Audible = .{},
+        sequence_tracks: u32 = 0,
+        end_seek: stream.EndSeek = .{},
 
         pub fn play(self: *Self) !Report {
             if (!self.config.valid()) return error.InvalidConfig;
+            if (self.config.sequence) |sequence| if (sequence.first.length != self.length) return error.InvalidSequenceTrack;
             if (active != null or self.workspace.burst.len < storage.fat32.sector_bytes + dma_word_bytes - 1) return error.InvalidWorkspace;
             self.started_tick = x.Timer.now();
+            const health = &@import("health.zig").snapshot;
+            health.stream_tracks = 0;
+            health.stream_handoffs = 0;
+            health.stream_deferred = 0;
+            self.current_track = if (self.config.sequence) |sequence| sequence.first else .{ .length = self.length, .gain_q24 = self.config.gain_q24, .source_identity = self.config.source_identity };
             self.paused.store(self.config.initially_paused, .release);
             for (stacks) |region| stack.prepare(region.cachedSlice(u8), self.config.measure_stacks);
             defer if (self.config.report_out) |out| {
                 out.* = self.snapshot();
+            };
+            // Input.init starts its logical window at zero. Establish the raw
+            // reader at the same position before storage/codec owners split.
+            try self.reader.seekTo(0);
+            self.installReaderControl();
+            defer if (@hasField(Reader, "seek_control")) {
+                self.reader.seek_control = self.previous_reader_control;
             };
             self.input = try Input.init(self.reader, self.length, self.workspace.input, self);
             self.reservoir = try pcm.Ring.init(self.workspace.pcm);
@@ -226,6 +277,10 @@ fn Player(comptime Reader: type) type {
                 if (!stack.intact(bytes)) return error.StackOverflow;
                 if (self.config.measure_stacks) stack_used[index] = @intCast(stack.used(bytes));
             }
+            // Runtime stop joins all task stacks. A long final UI render must
+            // not leave its last completed track boundary unadopted before
+            // main applies EOF/Next to the queue. No scheduler traps run here.
+            self.publishAudible(self.timeline.played.load(), false);
             if (self.workspace.decoder.packet.pool.statistics.live != 0) return error.DecoderLeak;
             const code = self.error_code.load(.acquire);
             if (code != 0) return @errorFromInt(@as(u16, @intCast(code)));
@@ -261,6 +316,10 @@ fn Player(comptime Reader: type) type {
                 .maximum_ui_gap_ticks = self.maximum_ui_gap_ticks,
                 .stack_used = stack_used,
                 .played_frames = self.timeline.played.load(),
+                .deferred = self.deferred_track,
+                .sequence_tracks = self.sequence_tracks,
+                .seek_clamped = self.end_seek.clamped,
+                .final_status = if (self.header_ready.load(.acquire)) self.statusAt(self.timeline.played.load()) else null,
             };
         }
 
@@ -270,6 +329,20 @@ fn Player(comptime Reader: type) type {
 
         pub fn cancelled(self: *Self) bool {
             return self.cancelled_flag.load(.acquire);
+        }
+
+        fn readerCancelled(context: *anyopaque) bool {
+            const self: *Self = @ptrCast(@alignCast(context));
+            if (self.cancelled()) return true;
+            return if (self.previous_reader_control) |control| control.cancelled(control.context) else false;
+        }
+
+        fn installReaderControl(self: *Self) void {
+            if (@hasField(Reader, "seek_control")) {
+                const incoming = self.reader.seek_control;
+                if (incoming == null or incoming.?.context != @as(*anyopaque, @ptrCast(self)) or incoming.?.cancelled != readerCancelled) self.previous_reader_control = incoming;
+                self.reader.seek_control = .{ .context = self, .cancelled = readerCancelled };
+            }
         }
 
         pub fn wakeStorage(self: *Self) void {
@@ -300,19 +373,57 @@ fn Player(comptime Reader: type) type {
 
         pub fn configure(self: *Self, incoming: info.Information) !void {
             var information = incoming;
-            if (self.config.force_output_24 or self.config.gain_q24 != output.unity_gain_q24) information.output_format = .signed_24_in_u32;
+            if (self.config.sequence != null or self.config.force_output_24 or self.config.gain_q24 != output.unity_gain_q24) information.output_format = .signed_24_in_u32;
             if (self.cancelled()) return error.Cancelled;
-            if (self.header_ready.load(.acquire)) {
-                if (information.sample_rate != self.information.sample_rate or information.channels != self.information.channels or information.output_format != self.information.output_format) return error.FormatChanged;
+            const ready = self.header_ready.load(.acquire);
+            if (ready and (information.sample_rate != self.information.sample_rate or information.output_format != self.information.output_format)) {
+                if (self.config.sequence != null and !self.track_configured) {
+                    // A native-rate boundary is deliberately drained and
+                    // reopened by the caller; never resample silently.
+                    self.deferred_track = self.current_track;
+                    @import("health.zig").snapshot.stream_deferred = self.current_track.occurrence;
+                    return error.StreamFormatBoundary;
+                }
+                return error.FormatChanged;
+            }
+            if (ready and self.config.sequence == null) {
+                if (information.channels != self.information.channels) return error.FormatChanged;
                 return;
             }
-            self.plan = try output.Plan.init(information.sample_rate, information.output_format);
-            if (audio.sampleRate(information.sample_rate) == null) return error.UnsupportedSampleRate;
-            if (self.plan.bytes > memory.audio_buffer_capacity) return error.InvalidWorkspace;
-            // Keep enough PCM beyond one decoder callback to publish EOF while
-            // at least four DMA periods still separate output from that boundary.
-            if (self.reservoir.capacity() < decoder_batch_frames + startup_margin_periods * self.plan.frames) return error.InvalidWorkspace;
-            self.information = information;
+            if (self.track_configured) return;
+            if (!ready) {
+                self.plan = try output.Plan.init(information.sample_rate, information.output_format);
+                if (audio.sampleRate(information.sample_rate) == null) return error.UnsupportedSampleRate;
+                if (self.plan.bytes > memory.audio_buffer_capacity) return error.InvalidWorkspace;
+                if (self.reservoir.capacity() < decoder_batch_frames + startup_margin_periods * self.plan.frames) return error.InvalidWorkspace;
+                self.information = information;
+            }
+            if (self.config.sequence != null) {
+                const marker = stream.Marker.init(self.current_track, self.produced_frames, information);
+                while (true) {
+                    self.markers.append(marker) catch |failure| {
+                        if (failure != error.MarkerBackpressure) return failure;
+                        // An arbitrarily long run of sub-period/empty files
+                        // cannot fit a bounded metadata queue before startup.
+                        // Drain what is already admitted and let main reopen
+                        // this file, rather than deadlocking startup or dropping
+                        // a boundary. Normal playback waits for UI reclamation.
+                        if (!self.started) {
+                            self.deferred_track = self.current_track;
+                            @import("health.zig").snapshot.stream_deferred = self.current_track.occurrence;
+                            return error.StreamCapacityBoundary;
+                        }
+                        _ = self.runtime.take(event);
+                        if (self.markers.free() == 0 and !self.cancelled()) self.runtime.wait(event, null);
+                        if (self.cancelled()) return error.Cancelled;
+                        continue;
+                    };
+                    break;
+                }
+            }
+            self.track_configured = true;
+            self.sequence_tracks +%= 1;
+            @import("health.zig").snapshot.stream_tracks = self.sequence_tracks;
             self.header_ready.store(true, .release);
             self.runtime.notify(.output, event);
         }
@@ -334,9 +445,52 @@ fn Player(comptime Reader: type) type {
 
         fn codecEntry() callconv(.c) noreturn {
             const self = current();
-            _ = decoder.run(&self.input, self.length, Self, self, self.workspace.decoder, self.config.start_frame) catch |failure| {
-                if (failure != error.Cancelled) self.fail(failure);
-            };
+            var start_frame = self.config.start_frame;
+            while (!self.cancelled()) {
+                self.track_configured = false;
+                self.workspace.decoder.seek_index = if (self.config.seek_cache) |cache| cache.forSource(self.current_track.source_identity, self.length) else self.config.seek_index;
+                self.workspace.decoder.seek_source = self.current_track.source_identity;
+                const decoded = decoder.run(&self.input, self.length, Self, self, self.workspace.decoder, start_frame) catch |failure| {
+                    if (failure != error.Cancelled and failure != error.StreamFormatBoundary and failure != error.StreamCapacityBoundary) self.fail(failure);
+                    break;
+                };
+                // Decoder destruction has completed before another library is
+                // initialized in the same bounded pool.
+                if (self.workspace.decoder.packet.pool.statistics.live != 0) {
+                    self.fail(error.DecoderLeak);
+                    break;
+                }
+                if (self.cancelled()) break;
+                const prepared = self.started or self.prepared or self.prepare_requested or self.reservoir.available() != 0;
+                if (self.end_seek.retry(start_frame, decoded.total_frames, self.produced_frames, prepared)) |target| {
+                    self.header_ready.store(false, .release);
+                    self.markers.resetBeforeStart() catch |failure| {
+                        self.fail(failure);
+                        break;
+                    };
+                    self.sequence_tracks = 0;
+                    @import("health.zig").snapshot.stream_tracks = 0;
+                    self.input.seekTo(0) catch |failure| {
+                        if (failure != error.Cancelled) self.fail(failure);
+                        break;
+                    };
+                    start_frame = target;
+                    continue;
+                }
+                if (self.config.sequence == null or self.cancelled()) break;
+                const generation = self.source_switch.request(self.current_track) catch |failure| {
+                    self.fail(failure);
+                    break;
+                };
+                self.runtime.notify(.storage, event);
+                while (!self.source_switch.ready(generation) and !self.cancelled()) {
+                    _ = self.runtime.take(event);
+                    if (!self.source_switch.ready(generation) and !self.cancelled()) self.runtime.wait(event, null);
+                }
+                if (self.cancelled()) break;
+                self.current_track = self.source_switch.result(generation) orelse break;
+                start_frame = 0;
+            }
             self.codec_done.store(true, .release);
             self.runtime.notify(.output, event);
             self.runtime.notify(.control, event);
@@ -344,7 +498,38 @@ fn Player(comptime Reader: type) type {
             self.runtime.retire();
         }
 
+        /// Only the storage task replaces the file reader and compressed ring.
+        /// The codec has fully unwound and waits on a separate acknowledgement.
+        fn openNext(self: *Self) bool {
+            if (self.cancelled()) return false;
+            const request = self.source_switch.pending() orelse return false;
+            const sequence = self.config.sequence orelse return false;
+            var next = sequence.open_next(sequence.context, self.reader, request.previous) catch |failure| failed: {
+                self.fail(failure);
+                break :failed null;
+            };
+            if (self.cancelled()) next = null;
+            if (next) |track| {
+                if (!track.valid()) {
+                    self.fail(error.InvalidSequenceTrack);
+                    next = null;
+                } else {
+                    self.length = track.length;
+                    self.installReaderControl();
+                    self.input = Input.init(self.reader, track.length, self.workspace.input, self) catch |failure| failed: {
+                        self.fail(failure);
+                        next = null;
+                        break :failed self.input;
+                    };
+                }
+            }
+            if (!self.source_switch.complete(request.generation, next)) self.fail(error.InvalidSourceSwitch);
+            self.runtime.notify(.codec, event);
+            return true;
+        }
+
         fn fillInput(self: *Self) bool {
+            if (self.openNext()) return true;
             const burst_bytes = self.workspace.burst.len - dma_word_bytes;
             if (self.cancelled() or self.codec_done.load(.acquire) or !self.input.producerReady(burst_bytes)) return false;
             const alignment_offset = self.input.producer_position & (dma_word_bytes - 1);
@@ -394,7 +579,7 @@ fn Player(comptime Reader: type) type {
         fn render(self: *Self, slot: u8) !void {
             const started = x.Timer.now();
             const bytes = @as([*]u8, @ptrFromInt(self.resources.buffers[slot].address))[0..self.plan.bytes];
-            const result = try transport.render(&self.reservoir, bytes, self.plan, self.config.gain_q24, &self.quantizer, self.information.source_bits > 24, self.paused.load(.acquire));
+            const result = if (self.config.sequence != null) try self.stream_renderer.render(&self.markers, &self.reservoir, bytes, self.plan, self.paused.load(.acquire)) else try transport.render(&self.reservoir, bytes, self.plan, self.config.gain_q24, &self.quantizer, self.information.source_bits > 24, self.paused.load(.acquire));
             self.timeline.queue(slot, result.frames);
             if (result.underrun and !self.codec_done.load(.acquire)) return error.AudioUnderrun;
             self.worst_fill_ticks = @max(self.worst_fill_ticks, x.Timer.elapsed(started));
@@ -430,7 +615,7 @@ fn Player(comptime Reader: type) type {
                         self.runtime.wait(event, null);
                         continue;
                     }
-                    self.timeline.played.store(self.information.start_frame);
+                    self.timeline.played.store(if (self.config.sequence != null) 0 else self.information.start_frame);
                     const eof = self.codec_done.load(.acquire);
                     if (eof and self.produced_frames == 0) {
                         self.fail(error.EmptyChunk);
@@ -556,7 +741,8 @@ fn Player(comptime Reader: type) type {
                     self.runtime.wait(event, null);
                     continue;
                 }
-                if (self.prepare_requested and !self.prepared) {
+                if (self.config.background) |background| background.poll(background.context);
+                if (self.prepare_requested and self.engine == null) {
                     self.engine = audio.Engine.init(self.resources, .{
                         .descriptor_count = self.config.descriptor_count,
                         .buffer_count = self.config.buffer_count,
@@ -570,22 +756,31 @@ fn Player(comptime Reader: type) type {
                         self.fail(failure);
                         continue;
                     };
-                    self.prepared = true;
-                    self.runtime.notify(.output, event);
                 }
                 const volume = self.requested_volume.swap(0, .acq_rel);
                 if (volume != 0) {
                     self.attenuation = @intCast(volume - 1);
-                    if (self.started) self.engine.?.setHardwareVolume(self.attenuation) catch |failure| {
+                    if (self.engine != null) self.engine.?.setHardwareVolume(self.attenuation) catch |failure| {
                         self.fail(failure);
                         continue;
                     };
                 }
-                if (self.started) self.engine.?.pollControl() catch |failure| {
-                    self.fail(failure);
-                    continue;
-                };
-                if (self.config.background) |background| background.poll(background.context);
+                if (self.engine) |*engine| {
+                    engine.pollControl() catch |failure| {
+                        self.fail(failure);
+                        continue;
+                    };
+                    if (self.config.routing) |routing| {
+                        const actual: audio.Output = if (engine.route.stage == .idle) engine.route.current else .muted;
+                        if (routing.poll(routing.context, actual)) |desired| engine.setOutput(desired);
+                    }
+                    // Initial route settling completes before DMA consumes a
+                    // track opening. Default headphone startup adds no wait.
+                    if (self.prepare_requested and !self.prepared and engine.route.stage == .idle) {
+                        self.prepared = true;
+                        self.runtime.notify(.output, event);
+                    }
+                }
                 const diagnostics = @import("f20_diagnostics.zig");
                 diagnostics.report.live_pcm_frames = @intCast(self.reservoir.available());
                 diagnostics.report.live_input_bytes = @intCast(self.input.ring.available());
@@ -603,23 +798,53 @@ fn Player(comptime Reader: type) type {
             }
         }
 
+        fn publishAudible(self: *Self, completed: u64, comptime wake_owners: bool) void {
+            if (!self.started) return;
+            const sequence = self.config.sequence orelse return;
+            while (true) {
+                const previous = self.audible.current;
+                const marker = self.audible.advance(&self.markers, completed) orelse break;
+                if (previous != null) @import("health.zig").snapshot.stream_handoffs +%= 1;
+                sequence.audible(sequence.context, marker.track);
+                if (wake_owners) {
+                    self.runtime.notify(.codec, event);
+                    self.runtime.notify(.storage, event);
+                }
+            }
+        }
+
+        fn statusAt(self: *Self, completed: u64) media.PlaybackStatus {
+            const ready = self.header_ready.load(.acquire);
+            const natural_end = self.codec_done.load(.acquire) and self.error_code.load(.acquire) == 0 and self.requested_exit.load(.acquire) == 0;
+            const audible = self.audible.current;
+            const total = if (audible != null)
+                self.audible.total(&self.markers, if (natural_end) self.produced_frames else null) orelse 0
+            else if (ready)
+                self.information.total_frames orelse if (natural_end) self.information.start_frame +| self.produced_frames else 0
+            else
+                0;
+            const played = if (audible) |marker| marker.position(completed) else completed +| (if (ready and self.config.sequence != null) self.information.start_frame else @as(u64, 0));
+            return .{
+                .phase = if (!self.started) .preparing else if (self.paused.load(.acquire)) .paused else .playing,
+                .sample_rate = if (ready) self.information.sample_rate else 0,
+                .output_format = if (ready) self.information.output_format else .signed_24_in_u32,
+                .total_frames = total,
+                .played_frames = if (total == 0) played else @min(total, played),
+            };
+        }
+
         fn uiEntry() callconv(.c) noreturn {
             const self = current();
             while (true) {
                 if (self.control) |control| {
-                    const ready = self.header_ready.load(.acquire);
-                    const total = if (ready) self.information.total_frames orelse if (self.codec_done.load(.acquire)) self.produced_frames else 0 else 0;
-                    const played = self.timeline.played.load();
+                    const completed = self.timeline.played.load();
+                    self.publishAudible(completed, true);
+                    const status = self.statusAt(completed);
+                    const total = status.total_frames;
                     const ui_started = x.Timer.now();
                     if (self.previous_ui_tick) |previous| self.maximum_ui_gap_ticks = @max(self.maximum_ui_gap_ticks, ui_started -% previous);
                     self.previous_ui_tick = ui_started;
-                    const command = control.poll(control.context, .{
-                        .phase = if (!self.started) .preparing else if (self.paused.load(.acquire)) .paused else .playing,
-                        .sample_rate = if (ready) self.information.sample_rate else 0,
-                        .output_format = if (ready) self.information.output_format else .signed_24_in_u32,
-                        .total_frames = total,
-                        .played_frames = if (total == 0) played else @min(total, played),
-                    });
+                    const command = control.poll(control.context, status);
                     self.maximum_ui_ticks = @max(self.maximum_ui_ticks, x.Timer.elapsed(ui_started));
                     self.ui_polls += 1;
                     switch (command) {
@@ -698,4 +923,86 @@ test "playback admission rejects impossible buffer rings before tasks start" {
     try std.testing.expect(!(Config{ .buffer_count = 5 }).valid());
     try std.testing.expect(!(Config{ .descriptor_count = 4 }).valid());
     try std.testing.expect(!(Config{ .descriptor_count = 129 }).valid());
+}
+
+test "final joined status adopts missed markers and apportions unknown durations only at natural EOF" {
+    const TestPlayer = Player(struct {});
+    const Callback = struct {
+        calls: u32 = 0,
+        occurrence: u32 = 0,
+
+        fn open(_: *anyopaque, _: *anyopaque, _: stream.Track) anyerror!?stream.Track {
+            return null;
+        }
+
+        fn adopt(context: *anyopaque, track: stream.Track) void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.calls += 1;
+            self.occurrence = track.occurrence;
+        }
+    };
+    var callback = Callback{};
+    var player: TestPlayer = undefined;
+    player.config = .{ .sequence = .{ .context = &callback, .first = .{ .occurrence = 17, .length = 4096 }, .open_next = Callback.open, .audible = Callback.adopt } };
+    player.header_ready = .init(true);
+    player.information = .{ .kind = .mp3, .sample_rate = 48000, .channels = 2, .output_format = .signed_24_in_u32, .start_frame = 1000 };
+    player.started = true;
+    player.paused = .init(false);
+    player.codec_done = .init(false);
+    player.error_code = .init(0);
+    player.requested_exit = .init(0);
+    player.produced_frames = 1600;
+    player.markers = .{};
+    const first = stream.Marker.init(.{ .occurrence = 17 }, 0, player.information);
+    var second = first;
+    second.track.occurrence = 18;
+    second.sequence = 1537;
+    second.start_frame = 0;
+    try player.markers.append(first);
+    try player.markers.append(second);
+    player.markers.copied.store(2, .release);
+    player.audible = .{};
+    _ = player.audible.advance(&player.markers, 0);
+    const before = player.statusAt(1500);
+    try std.testing.expectEqual(2537, before.total_frames);
+    try std.testing.expectEqual(2500, before.played_frames);
+    // The UI missed the final period. Joined adoption must precede the final
+    // checkpoint and EOF queue decision, using the completed-frame frontier.
+    player.codec_done.store(true, .release);
+    player.publishAudible(1600, false);
+    const final = player.statusAt(1600);
+    try std.testing.expectEqual(1, callback.calls);
+    try std.testing.expectEqual(18, callback.occurrence);
+    try std.testing.expectEqual(63, final.total_frames);
+    try std.testing.expectEqual(63, final.played_frames);
+    // An ordinary cancellation or decoder failure is not an inferred EOF.
+    player.requested_exit.store(@backingInt(media.PlaybackExit.stopped), .release);
+    try std.testing.expectEqual(0, player.statusAt(1600).total_frames);
+    player.requested_exit.store(0, .release);
+    player.error_code.store(@intFromError(error.Truncated), .release);
+    try std.testing.expectEqual(0, player.statusAt(1600).total_frames);
+    // Exact decoder/container totals always take precedence over inference.
+    player.audible.current.?.total_frames = 3207;
+    try std.testing.expectEqual(3207, player.statusAt(1600).total_frames);
+}
+
+test "single-file EOF reconstruction retains the seek origin and never invents a cancellation duration" {
+    const TestPlayer = Player(struct {});
+    var player: TestPlayer = undefined;
+    player.config = .{};
+    player.header_ready = .init(true);
+    player.information = .{ .kind = .mp3, .sample_rate = 48000, .channels = 2, .output_format = .signed_24_in_u32, .start_frame = 1000 };
+    player.started = true;
+    player.paused = .init(false);
+    player.codec_done = .init(true);
+    player.error_code = .init(0);
+    player.requested_exit = .init(0);
+    player.produced_frames = 537;
+    player.audible = .{};
+    try std.testing.expectEqual(1537, player.statusAt(1537).total_frames);
+    try std.testing.expectEqual(1537, player.statusAt(1537).played_frames);
+    player.requested_exit.store(@backingInt(media.PlaybackExit.seek), .release);
+    try std.testing.expectEqual(0, player.statusAt(1200).total_frames);
+    player.information.total_frames = 9999;
+    try std.testing.expectEqual(9999, player.statusAt(1200).total_frames);
 }

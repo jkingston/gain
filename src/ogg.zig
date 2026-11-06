@@ -122,6 +122,58 @@ pub fn Reader(comptime Source: type) type {
     };
 }
 
+/// Returns an exact terminal granule only when the final physical page belongs
+/// to this logical stream, ends at EOF and passes its full CRC. Matching serials
+/// are unique in a valid Ogg physical stream. A chained/multiplexed final stream
+/// with another serial is deliberately left unknown, never treated as a shorter
+/// single stream. Small local scratch leaves a demuxer's current page intact.
+pub fn finalGranule(source: anytype, serial: u32) !?u64 {
+    const begin = source.length - @min(source.length, 65536);
+    var block: [1027]u8 = undefined;
+    var end = source.length;
+    var candidates: u32 = 0;
+    while (end > begin) {
+        const at = end - @min(end - begin, 1024);
+        const span: usize = @intCast(end - at);
+        const count: usize = @intCast(@min(block.len, source.length - at));
+        try source.read(at, block[0..count]);
+        end = at;
+        var i = span;
+        while (i > 0) {
+            i -= 1;
+            if (i + 4 > count or !std.mem.eql(u8, block[i..][0..4], "OggS")) continue;
+            candidates += 1;
+            if (candidates > 256) return null;
+            if (at + i + 27 > source.length) continue;
+            var header: [27]u8 = undefined;
+            try source.read(at + i, &header);
+            if (header[4] != 0 or header[5] & 4 == 0 or header[5] & 0xf8 != 0 or header[26] == 0 or std.mem.readInt(u32, header[14..18], .little) != serial) continue;
+            if (at + i + 27 + header[26] > source.length) continue;
+            var laces: [255]u8 = undefined;
+            try source.read(at + i + 27, laces[0..header[26]]);
+            if (laces[header[26] - 1] == 255) continue;
+            var size: u32 = 0;
+            for (laces[0..header[26]]) |n| size += n;
+            if (at + i + 27 + header[26] + size != source.length) continue;
+            var clean = header;
+            const expected = std.mem.readInt(u32, clean[22..26], .little);
+            @memset(clean[22..26], 0);
+            var sum = crc(crc(0, &clean), laces[0..header[26]]);
+            var bytes: [1024]u8 = undefined;
+            var done: u32 = 0;
+            while (done < size) {
+                const n = @min(bytes.len, size - done);
+                try source.read(at + i + 27 + header[26] + done, bytes[0..n]);
+                sum = crc(sum, bytes[0..n]);
+                done += n;
+            }
+            const granule = std.mem.readInt(i64, header[6..14], .little);
+            if (sum == expected and granule >= 0) return @intCast(granule);
+        }
+    }
+    return null;
+}
+
 pub fn title(bytes: []const u8, offset: usize, out: []u8) !usize {
     if (bytes.len < offset + 4) return error.BadComment;
     var at = offset;

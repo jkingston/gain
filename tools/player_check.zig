@@ -10,6 +10,7 @@ const report: *volatile protocol.Report = @ptrFromInt(protocol.address);
 const error_text: [*]u8 = @ptrFromInt(protocol.address + 0x100);
 const fixture_address = 0x81800000;
 const parameters: *volatile [8]u32 = @ptrFromInt(protocol.address);
+const end_seek_mode = 4;
 
 extern fn rom_return() callconv(.c) noreturn;
 var deadline: u64 = 0;
@@ -134,11 +135,34 @@ fn firstTrack(volume: *Volume, browser: *gain.file_browser.Browser(Volume), dept
 fn play(reader: anytype, length: u32, card: ?*gain.storage.Controller, mode: u32, duration: u32) !void {
     var ui = Ui{ .mode = mode, .duration = duration };
     defer _ = gain.display.resetForDirect();
+    var last_reference: ?gain.pcm_reservoir.StereoFrame = null;
+    if (mode == end_seek_mode) {
+        // This mode targets headerless/free-format MPEG duration recovery. Its
+        // integer decoder is deterministic, so compare the actual final PCM,
+        // not only a successful return or a one-frame counter.
+        var magic: [3]u8 = undefined;
+        try reader.seekTo(0);
+        if (try reader.read(&magic) != magic.len or !(std.mem.eql(u8, &magic, "ID3") or (magic[0] == 0xff and magic[1] & 0xe0 == 0xe0))) return error.UnsupportedFixture;
+        try reader.seekTo(0);
+        const reference = try gain.player.playFile(reader, length, card, .{ .attenuation = 80 }, .{ .context = &ui, .poll = Ui.poll });
+        const capture = gain.memory.pcm_reservoir.cachedSlice(gain.pcm_reservoir.StereoFrame);
+        if (reference.playback.exit != .completed or reference.playback.frames == 0 or reference.playback.frames > capture.len) return error.CaptureCapacity;
+        last_reference = capture[@intCast(reference.playback.frames - 1)];
+        _ = gain.display.resetForDirect();
+        try reader.seekTo(0);
+    }
     const result = try gain.player.playFile(reader, length, card, .{
         .attenuation = 80,
+        .start_frame = if (mode == end_seek_mode) std.math.maxInt(u32) else 0,
         .measure_stacks = true,
     }, .{ .context = &ui, .poll = Ui.poll });
     if (ui.screen.failed) return error.DisplayFailure;
+    if (mode == end_seek_mode) {
+        if (!result.seek_clamped or result.playback.exit != .completed or result.playback.frames != 1) return error.SeekRecovery;
+        const last = gain.memory.pcm_reservoir.cachedSlice(gain.pcm_reservoir.StereoFrame)[0];
+        if (!std.meta.eql(last_reference.?, last)) return error.SeekSampleMismatch;
+        report.pcm_checksum = @import("player_pcm_checksum.zig").update(report.pcm_checksum, &[_]gain.pcm_reservoir.StereoFrame{last});
+    }
     if (mode == 0 and result.playback.exit == .completed) {
         const capture = gain.memory.pcm_reservoir.cachedSlice(gain.pcm_reservoir.StereoFrame);
         if (result.playback.frames > capture.len) return error.CaptureCapacity;
@@ -173,7 +197,7 @@ fn run() !void {
     const mode = parameters[1];
     const repeats = parameters[2];
     const duration = parameters[3];
-    if (length > 7 * 1024 * 1024 or mode > 8 or mode == 4 or repeats == 0 or repeats > 1000 or duration > 600 or @as(u64, duration) * repeats > 600) return error.InvalidParameters;
+    if (length > 7 * 1024 * 1024 or mode > 8 or repeats == 0 or repeats > 1000 or duration > 600 or @as(u64, duration) * repeats > 600) return error.InvalidParameters;
     report.* = .{ .mode = mode };
     x.Timer.initialize();
     deadline = @as(u64, protocol.timer_hz) * (@as(u64, @max(duration, 2)) * repeats + 10);

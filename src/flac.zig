@@ -40,8 +40,11 @@ pub const Frame = struct {
     bits_per_sample: u6,
     channels: u4,
     coded_number: u36,
+    first_sample: u64,
     bytes_consumed: usize,
 };
+
+pub const SeekPoint = struct { sample: u64, offset: u32 };
 
 pub const Coverage = struct {
     channel_modes: u16 = 0,
@@ -97,8 +100,14 @@ pub fn Decoder(comptime Reader: type) type {
         left: []i32,
         right: []i32,
         decoded_samples: u64 = 0,
+        frame_offset: u32 = 0,
+        seek_point: ?SeekPoint = null,
 
         pub fn init(reader: *Reader, compressed: []u8, left: []i32, right: []i32) !Self {
+            return initSeeking(reader, compressed, left, right, 0, null);
+        }
+
+        pub fn initSeeking(reader: *Reader, compressed: []u8, left: []i32, right: []i32, target: u64, known_length: ?u64) !Self {
             if (compressed.len == 0) return error.CompressedBufferTooSmall;
             var signature: [4]u8 = undefined;
             try readExact(reader, &signature);
@@ -107,6 +116,8 @@ pub fn Decoder(comptime Reader: type) type {
             var first = true;
             var stream_info: ?StreamInfo = null;
             var stream_offset: usize = signature.len;
+            var seek_point: ?SeekPoint = null;
+            var saw_table = false;
             while (true) {
                 var header: [4]u8 = undefined;
                 try readExact(reader, &header);
@@ -114,6 +125,7 @@ pub fn Decoder(comptime Reader: type) type {
                 const last = header[0] & 0x80 != 0;
                 const kind = header[0] & 0x7f;
                 const length = readBe24(header[1..4]);
+                if (known_length) |file_length| if (@as(u64, stream_offset) + length > file_length) return error.Truncated;
                 if (kind == 127) return error.InvalidMetadata;
                 if (first and kind != 0) return error.MissingStreamInfo;
                 if (kind == 0) {
@@ -123,8 +135,25 @@ pub fn Decoder(comptime Reader: type) type {
                     var block: [stream_info_bytes]u8 = undefined;
                     try readExact(reader, &block);
                     stream_info = try parseStreamInfoBlock(&block);
+                } else if (kind == 3) {
+                    if (saw_table or length % 18 != 0) return error.InvalidMetadata;
+                    saw_table = true;
+                    var previous: ?u64 = null;
+                    if (target == 0) {
+                        try skipMetadata(reader, compressed, length, @as(u64, stream_offset) + length, known_length);
+                    } else for (0..length / 18) |_| {
+                        var entry: [18]u8 = undefined;
+                        try readExact(reader, &entry);
+                        const sample_number = std.mem.readInt(u64, entry[0..8], .big);
+                        const offset = std.mem.readInt(u64, entry[8..16], .big);
+                        const samples = std.mem.readInt(u16, entry[16..18], .big);
+                        if (sample_number == std.math.maxInt(u64)) continue;
+                        if (previous != null and sample_number <= previous.?) return error.InvalidMetadata;
+                        previous = sample_number;
+                        if (sample_number <= target and samples != 0 and offset <= std.math.maxInt(u32)) seek_point = .{ .sample = sample_number, .offset = @intCast(offset) };
+                    }
                 } else {
-                    try discardExact(reader, compressed, length);
+                    try skipMetadata(reader, compressed, length, @as(u64, stream_offset) + length, known_length);
                 }
                 stream_offset += length;
                 first = false;
@@ -145,7 +174,29 @@ pub fn Decoder(comptime Reader: type) type {
                 .compressed = compressed,
                 .left = left,
                 .right = right,
+                .frame_offset = @intCast(stream_offset),
+                .seek_point = seek_point,
             };
+        }
+
+        fn skipMetadata(reader: *Reader, scratch: []u8, count: u24, end: u64, known_length: ?u64) !void {
+            if (comptime @hasDecl(Reader, "seekTo")) {
+                if (known_length != null and end <= std.math.maxInt(u32)) {
+                    // The containing file has already bounded this skip. Large
+                    // artwork and padding need no transfer through the decoder.
+                    return reader.seekTo(@intCast(end));
+                }
+            }
+            return discardExact(reader, scratch, count);
+        }
+
+        pub fn seekToPoint(self: *Self, point: SeekPoint) !void {
+            if (point.offset < self.info.first_frame_offset or (self.info.total_samples != 0 and point.sample >= self.info.total_samples)) return error.InvalidFrame;
+            try self.reader.seekTo(point.offset);
+            self.frame_offset = point.offset;
+            self.decoded_samples = point.sample;
+            self.compressed_bytes = 0;
+            self.end_of_input = false;
         }
 
         pub fn next(self: *Self) !?Frame {
@@ -185,6 +236,7 @@ pub fn Decoder(comptime Reader: type) type {
                 else => return failure,
             };
 
+            if (decoded.first_sample != self.decoded_samples) return error.InvalidFrame;
             const remaining = self.compressed_bytes - decoded.bytes_consumed;
             std.mem.copyForwards(
                 u8,
@@ -193,6 +245,7 @@ pub fn Decoder(comptime Reader: type) type {
             );
             self.compressed_bytes = remaining;
             self.decoded_samples += decoded.block_size;
+            self.frame_offset += @intCast(decoded.bytes_consumed);
             if (self.info.total_samples != 0 and self.decoded_samples > self.info.total_samples) {
                 return error.InvalidFrame;
             }
@@ -208,7 +261,7 @@ pub fn decodeFrame(input: []const u8, info: StreamInfo, left: []i32, right: []i3
 pub fn decodeFrameObserved(input: []const u8, info: StreamInfo, left: []i32, right: []i32, coverage: ?*Coverage) Error!Frame {
     var bits = BitReader.init(input);
     if (try bits.read(15) != frame_sync_code) return error.InvalidFrame;
-    _ = try bits.read(1); // blocking strategy; coded number interpretation does not affect decoding.
+    const variable_block = try bits.read(1) != 0;
     const block_code: u4 = @intCast(try bits.read(4));
     const rate_code: u4 = @intCast(try bits.read(4));
     const channel_code: u4 = @intCast(try bits.read(4));
@@ -253,6 +306,7 @@ pub fn decodeFrameObserved(input: []const u8, info: StreamInfo, left: []i32, rig
         .bits_per_sample = depth,
         .channels = channel_count,
         .coded_number = coded_number,
+        .first_sample = if (variable_block) coded_number else @as(u64, coded_number) * info.maximum_block_size,
         .bytes_consumed = bits.bit_position / 8,
     };
 }
