@@ -528,7 +528,7 @@ fn Player(comptime Reader: type) type {
             return true;
         }
 
-        fn fillInput(self: *Self) bool {
+        pub fn fillInput(self: *Self) bool {
             if (self.openNext()) return true;
             const burst_bytes = self.workspace.burst.len - dma_word_bytes;
             if (self.cancelled() or self.codec_done.load(.acquire) or !self.input.producerReady(burst_bytes)) return false;
@@ -538,20 +538,24 @@ fn Player(comptime Reader: type) type {
             return true;
         }
 
-        fn scanPoll(context: *anyopaque) bool {
-            const self: *Self = @ptrCast(@alignCast(context));
-            while (self.fillInput()) {}
-            // A scan only borrows slack after the codec has a generous PCM
-            // reserve. Waiting yields to output, UI, control and codec owners.
-            while (!self.cancelled() and !self.codec_done.load(.acquire) and !@import("scan_admission.zig").admit(.{
+        pub fn backgroundConditions(self: *Self) @import("scan_admission.zig").Conditions {
+            return .{
                 .started = self.started,
                 .cancelled = self.cancelled(),
-                .sample_rate = self.information.sample_rate,
+                .sample_rate = if (self.header_ready.load(.acquire)) self.information.sample_rate else 0,
                 .pcm_frames = self.reservoir.available(),
-            })) {
+            };
+        }
+
+        fn scanPoll(context: *anyopaque) bool {
+            const self: *Self = @ptrCast(@alignCast(context));
+            @import("scan_admission.zig").refill(self);
+            // A scan only borrows slack after the codec has a generous PCM
+            // reserve. Waiting yields to output, UI, control and codec owners.
+            while (!self.cancelled() and !self.codec_done.load(.acquire) and !@import("scan_admission.zig").admit(self.backgroundConditions())) {
                 _ = self.runtime.take(event);
                 self.runtime.wait(event, self.runtime.now() + x.Timer.milliseconds(1));
-                while (self.fillInput()) {}
+                @import("scan_admission.zig").refill(self);
             }
             return self.cancelled();
         }
@@ -561,13 +565,8 @@ fn Player(comptime Reader: type) type {
             while (true) {
                 _ = self.runtime.take(event);
                 self.storage_idle.store(false, .release);
-                if (self.fillInput()) continue;
-                if (@import("scan_admission.zig").admit(.{
-                    .started = self.started,
-                    .cancelled = self.cancelled(),
-                    .sample_rate = if (self.header_ready.load(.acquire)) self.information.sample_rate else 0,
-                    .pcm_frames = self.reservoir.available(),
-                })) if (self.config.storage_work) |work| {
+                @import("scan_admission.zig").refill(self);
+                if (@import("scan_admission.zig").admit(self.backgroundConditions())) if (self.config.storage_work) |work| {
                     work.run(work.context, .{ .context = self, .poll = scanPoll });
                 };
                 self.storage_idle.store(true, .release);
